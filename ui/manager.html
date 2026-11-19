@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>归藏 · 书库</title>
+<link rel="stylesheet" href="app.css?v=110" />
+</head>
+<body>
+  <div class="app">
+    <header class="topbar" id="topbar"></header>
+    <div class="manager-body">
+      <nav class="rail">
+        <div class="rail-scroll" id="rail"></div>
+        <div class="rail-foot" id="railFoot"></div>
+      </nav>
+      <main class="list-pane">
+        <div class="list-head-host" id="listHead"></div>
+        <div id="scanHost"></div>
+        <div class="list-scroll" id="list"></div>
+      </main>
+      <aside class="inspector" id="inspector" hidden></aside>
+    </div>
+    <div id="mobileOverlay" class="mobile-overlay" hidden></div>
+  </div>
+  <div class="modal" id="modal" hidden><div class="sheet" id="sheet"></div></div>
+  <div id="toast"></div>
+  <script type="module" src="manager.js"></script>
+</body>
+</html>

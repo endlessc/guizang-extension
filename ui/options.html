@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>归藏 · 设置</title>
+<link rel="stylesheet" href="app.css?v=110" />
+<link rel="stylesheet" href="options.css?v=110" />
+</head>
+<body class="opt-page">
+  <div class="opt-wrap">
+    <header class="opt-head" id="head"></header>
+
+    <form id="form">
+      <section class="card">
+        <div class="card-kicker">辨目析义模型</div>
+        <h2>模型配置</h2>
+        <p class="hint">任何兼容 OpenAI 规范的 <code>/chat/completions</code> 均可使用：DeepSeek、通义千问、Kimi 或本地 Ollama（<code>http://localhost:11434/v1</code>）。不配置 Key 亦可离线使用，系统将自动退回本地关键词分卷规则。</p>
+        <div class="grid">
+          <label class="field wide"><span>接口地址 (Base URL)</span>
+            <input name="baseUrl" spellcheck="false" placeholder="https://api.deepseek.com/v1" /></label>
+          <label class="field"><span>模型标识 (Model)</span>
+            <input name="model" spellcheck="false" placeholder="deepseek-chat" /></label>
+          <label class="field"><span>鉴权秘钥 (API Key)</span>
+            <input name="apiKey" type="password" spellcheck="false" placeholder="sk-…" autocomplete="off" /></label>
+          <label class="field"><span>最大输出 (max_tokens)</span>
+            <input name="maxTokens" type="number" min="200" step="100" /></label>
+        </div>
+        <div class="row">
+          <button type="button" class="btn btn-line btn-md" id="test">测试连接</button>
+          <span class="test-msg" id="testMsg"></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-kicker">逐卷网络考订</div>
+        <h2>检测参数</h2>
+        <p class="hint">检测在扩展后台发出真实轻量请求，获取实际状态码与网络连通耗时。一次探测过多容易触发源站防护，建议保持默认并发与超时。</p>
+        <div class="grid">
+          <label class="field"><span>并发探测数</span>
+            <input name="concurrency" type="number" min="1" max="12" /></label>
+          <label class="field"><span>单条超时（毫秒）</span>
+            <input name="timeout" type="number" min="1000" step="500" /></label>
+          <label class="field"><span>单批检测上限</span>
+            <input name="checkLimit" type="number" min="5" max="300" step="5" /></label>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-kicker">文人色彩系统</div>
+        <h2>典籍配色方案</h2>
+        <p class="hint">以宣纸、徽墨、汝窑、蜜蜡与漆器等传统器物文脉为灵感，精心调校 6 套古典雅致色系，兼顾高对比度易读性与沉浸审美，即刻全景同步至管理台、侧边栏与弹窗。</p>
+        <div class="theme-grid" id="themeGrid"></div>
+      </section>
+
+      <section class="card">
+        <div class="card-kicker">四库存目源流</div>
+        <h2>分类体系映射</h2>
+        <p class="hint">归藏遵循「因书立目」的典藏传统。自动读取书签栏中带有三位数字前缀（如「<code>000 综合与工具</code>」）的文件夹建立十进编目；未设数字者，自动以书签栏一级目录编制顺序代码。</p>
+        <div class="scheme" id="scheme"></div>
+      </section>
+
+      <section class="card danger">
+        <div class="card-kicker tone-dead">数据与隐私安全</div>
+        <h2>本地存储管控</h2>
+        <p class="hint">所有检测记录、归类建议与 API Key 均严格保存在本地 <code>chrome.storage.local</code>，绝不上传至任何第三方云端。</p>
+        <div class="row">
+          <button type="button" class="btn btn-line btn-md" id="clearHealth">清空检测记录</button>
+          <button type="button" class="btn btn-ghost btn-md" id="clearPending">重置归类建议</button>
+          <span class="test-msg" id="dataMsg"></span>
+        </div>
+      </section>
+
+      <div class="savebar">
+        <button type="submit" class="btn btn-primary btn-md" id="save">保存全部设置</button>
+        <span class="test-msg" id="saveMsg"></span>
+      </div>
+    </form>
+  </div>
+  <div id="toast"></div>
+  <script type="module" src="options.js"></script>
+</body>
+</html>

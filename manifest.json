@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "归藏 — 收藏夹管理",
+  "short_name": "归藏",
+  "version": "0.4.1",
+  "description": "看得清、归得位：AI 归类建议逐条确认，失效链接一次查清。",
+  "minimum_chrome_version": "116",
+  "permissions": ["bookmarks", "storage", "tabs", "sidePanel", "favicon"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "action": {
+    "default_title": "归藏",
+    "default_popup": "ui/popup.html",
+    "default_icon": { "16": "icons/16.png", "32": "icons/32.png" }
+  },
+  "side_panel": { "default_path": "ui/sidepanel.html" },
+  "options_ui": { "page": "ui/options.html", "open_in_tab": true },
+  "icons": {
+    "16": "icons/16.png",
+    "32": "icons/32.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  }
+}

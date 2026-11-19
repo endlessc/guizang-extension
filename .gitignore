@@ -1,0 +1,14 @@
+# macOS / 编辑器
+.DS_Store
+*~
+.idea/
+.vscode/
+
+# 依赖与日志
+node_modules/
+*.log
+
+# 打包产物：扩展私钥绝不能进仓库（.pem 丢了扩展 ID 会变）
+*.crx
+*.pem
+*.zip

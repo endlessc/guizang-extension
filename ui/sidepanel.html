@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN" class="panel">
+<head>
+<meta charset="utf-8" />
+<link rel="stylesheet" href="app.css?v=110" />
+<link rel="stylesheet" href="panel.css?v=110" />
+</head>
+<body>
+  <div class="sp">
+    <header class="sp-head" id="head"></header>
+    <div class="sp-search">
+      <span id="searchIcon"></span>
+      <input id="q" placeholder="搜收藏" spellcheck="false" />
+      <kbd>⌘K</kbd>
+    </div>
+    <div class="sp-body">
+      <div id="currentHost"></div>
+      <div id="alerts"></div>
+      <div id="listLabel"></div>
+      <div class="sp-rows" id="list"></div>
+    </div>
+    <div class="sp-foot" id="foot"></div>
+  </div>
+  <div id="toast"></div>
+  <script type="module" src="sidepanel.js"></script>
+</body>
+</html>
