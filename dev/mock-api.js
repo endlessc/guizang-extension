@@ -11,7 +11,8 @@ import { parseOptsOf, listSchemes, getScheme } from '../lib/schemes.js';
 import { planInstall } from '../lib/scheme-install.js';
 import { flattenTree, checkBackupReady } from '../lib/backup.js';
 import { PROTO } from '../lib/version.js';
-import { classify, DEFAULT_SETTINGS } from '../lib/llm.js';
+import { classify, classifyHeuristic, DEFAULT_SETTINGS } from '../lib/llm.js';
+import { buildPlan, dropOp, overrideOp } from '../lib/organize.js';
 
 const FOLDERS = [
   ['000', '综合与工具'],
@@ -109,6 +110,7 @@ let health = {};
 let pending = {};
 let mockTheme = 'system';
 let settings = { ...DEFAULT_SETTINGS };
+let plan = null;           // 整理计划（本地预览内存态）
 let backups = [];          // 只存索引（本地预览用，刷新即重置）
 let backupNodes = {};      // id → 完整快照
 let backupSeq = 0;
@@ -372,6 +374,36 @@ async function handle(msg) {
     }
     emit({ type: 'state:changed' });
     return { restored: (msg.items || []).length };
+  }
+
+  if (type === 'organize:plan') {
+    const st = stateLoad();
+    const picked = st.items.filter((it) => !it.code);
+    emit({ type: 'organize:start' });
+    const suggestions = {};
+    for (const s of classifyHeuristic(picked, st.scheme)) suggestions[s.id] = s;
+    plan = buildPlan({ items: st.items, scheme: st.scheme, scope: msg.scope || 'inbox', suggestions });
+    emit({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
+    emit({ type: 'organize:done', plan });
+    return { started: true };
+  }
+  if (type === 'organize:load') return { plan, running: false };
+  if (type === 'organize:cancel') {
+    plan = null;
+    emit({ type: 'organize:done', plan: null });
+    return { ok: true };
+  }
+  if (type === 'organize:drop') {
+    if (!plan) throw new Error('还没有整理计划');
+    plan = dropOp(plan, msg.id);
+    emit({ type: 'organize:done', plan });
+    return plan;
+  }
+  if (type === 'organize:override') {
+    if (!plan) throw new Error('还没有整理计划');
+    plan = overrideOp(plan, msg.id, msg.code);
+    emit({ type: 'organize:done', plan });
+    return plan;
   }
 
   if (type === 'backup:run') {

@@ -11,9 +11,14 @@ import { planInstall } from './lib/scheme-install.js';
 import { saveBackup, listBackups, exportBackup, clearBackups, checkBackupReady } from './lib/backup.js';
 import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
-import { classify, classifyHeuristic, hasModel, testConnection, DEFAULT_SETTINGS } from './lib/llm.js';
+import { classify, classifyHeuristic, classifyWithModel, hasModel, testConnection, DEFAULT_SETTINGS } from './lib/llm.js';
+import { buildPlan, dropOp, overrideOp, MAX_CANDIDATES } from './lib/organize.js';
 
 const KEYS = ['settings', 'health', 'pending'];
+const PLAN_KEY = 'plan';
+
+/** 整理计划的生成进度（只在内存里，页面靠广播） */
+let organize = { running: false, stage: '', done: 0, total: 0 };
 
 /** 正在跑的检测，只存在内存里；页面靠它显示进度 */
 let scan = { running: false, done: 0, total: 0, startedAt: 0 };
@@ -77,6 +82,85 @@ async function loadState() {
 function broadcast(message) {
   // 没有页面在听的时候 sendMessage 会 reject，这里忽略即可
   chrome.runtime.sendMessage(message).catch(() => {});
+}
+
+/** 受管书签（企业策略）及其子树：Chrome 会拒绝移动，计划里先标出来 */
+function collectManagedIds(tree) {
+  const set = new Set();
+  const walk = (node, inherited) => {
+    const managed = inherited || node.unmodifiable === 'managed';
+    if (managed && node.id) set.add(node.id);
+    for (const c of node.children || []) walk(c, managed);
+  };
+  if (tree && tree[0]) walk(tree[0], false);
+  return set;
+}
+
+async function readPlan() {
+  const { plan } = await chrome.storage.local.get(PLAN_KEY);
+  if (!plan) throw new Error('还没有整理计划');
+  return plan;
+}
+
+async function writePlan(plan) {
+  await chrome.storage.local.set({ [PLAN_KEY]: plan });
+  broadcast({ type: 'organize:done', plan });
+  return plan;
+}
+
+/**
+ * 生成整理计划：预筛 → 本地规则 → 低置信度送模型 → 冲突消解。
+ * 全程只读书签，不动任何数据。
+ */
+async function runOrganize(scope) {
+  organize = { running: true, stage: 'preselect', done: 0, total: 0 };
+  broadcast({ type: 'organize:start' });
+  try {
+    const state = await loadState();
+    const { items, scheme, settings } = state;
+    if (!scheme.length) throw new Error('还没有分类目录，先到设置里装一套方案');
+
+    const picked = (scope === 'all' ? items : items.filter((it) => !it.code)).slice(0, MAX_CANDIDATES);
+    organize.total = picked.length;
+    organize.done = picked.length;
+    broadcast({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
+
+    // 本地关键词规则先跑：零成本，能定的先定
+    const suggestions = {};
+    for (const s of classifyHeuristic(picked, scheme)) suggestions[s.id] = { ...s };
+
+    // 只把「本地没把握」的送去模型，别拿几千条去烧 token
+    const lowConf = picked.filter((it) => (suggestions[it.id].conf || 0) < 0.55).slice(0, MAX_CANDIDATES);
+    if (hasModel(settings) && lowConf.length) {
+      organize.stage = 'model';
+      organize.total = lowConf.length;
+      organize.done = 0;
+      broadcast({ type: 'organize:progress', stage: 'model', done: 0, total: lowConf.length });
+      try {
+        const refined = await classifyWithModel(lowConf, scheme, settings, (done, total) => {
+          organize.done = done;
+          broadcast({ type: 'organize:progress', stage: 'model', done, total });
+        });
+        for (const s of refined) suggestions[s.id] = { ...s };
+      } catch (e) {
+        // 模型不通不耽误出计划，退回本地规则
+        broadcast({ type: 'organize:warn', message: '模型没走通，先用本地规则：' + String((e && e.message) || e) });
+      }
+    }
+
+    const tree = await chrome.bookmarks.getTree();
+    const plan = buildPlan({
+      items,
+      scheme,
+      scope,
+      suggestions,
+      blocked: collectManagedIds(tree),
+    });
+    await writePlan(plan);
+    return plan;
+  } finally {
+    organize = { running: false, stage: '', done: 0, total: 0 };
+  }
 }
 
 async function moveToCode(ids, code) {
@@ -412,6 +496,37 @@ const handlers = {
     if (!scheme) throw new Error('没有这个方案');
     const tree = await chrome.bookmarks.getTree();
     return planInstall(tree, scheme);
+  },
+
+  'organize:plan': async ({ scope = 'inbox' } = {}) => {
+    if (organize.running) throw new Error('上一次整理计划还在生成');
+    runOrganize(scope).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
+    return { started: true };
+  },
+
+  'organize:load': async () => {
+    const { plan } = await chrome.storage.local.get(PLAN_KEY);
+    return { plan: plan || null, running: organize.running };
+  },
+
+  'organize:cancel': async () => {
+    await chrome.storage.local.remove(PLAN_KEY);
+    broadcast({ type: 'organize:done', plan: null });
+    return { ok: true };
+  },
+
+  'organize:drop': async ({ id }) => {
+    const plan = await readPlan();
+    const next = dropOp(plan, id);
+    await writePlan(next);
+    return next;
+  },
+
+  'organize:override': async ({ id, code }) => {
+    const plan = await readPlan();
+    const next = overrideOp(plan, id, code);
+    await writePlan(next);
+    return next;
   },
 
   /** 整理前的退路：整树结构化快照，环形保留 3 份 */

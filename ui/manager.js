@@ -6,6 +6,7 @@ import {
   THEMES, getTheme, setTheme,
 } from './shared.js';
 import { groupByCode } from '../lib/tree.js';
+import { groupOps } from '../lib/organize.js';
 import { PROTO } from '../lib/version.js';
 
 import { ensureEnv } from './env.js';
@@ -32,6 +33,9 @@ const S = {
   editing: null,       // 正在编辑的书签 { id, title, url }
   aiBusy: false,
   aiProgress: null,
+  plan: null,          // 整理计划（只读，执行在下一步）
+  planBusy: false,
+  planProgress: null,
   done: [],            // 刚归入的，做即时反馈
 };
 
@@ -271,6 +275,7 @@ function renderRail() {
   parts.push('<div class="section-label">智能视图</div>');
   parts.push(railItem({ name: '待归类', count: c.inbox, view: 'inbox', iconName: 'inbox', tone: 'brand', active: S.view.kind === 'inbox' }));
   parts.push(railItem({ name: '归类建议', count: c.pending, view: 'pending', iconName: 'sparkle', tone: 'brand', active: S.view.kind === 'pending' }));
+  parts.push(railItem({ name: '整理计划', count: S.plan ? S.plan.ops.length : 0, view: '__organize', iconName: 'folder', tone: 'ink', active: S.drawer === 'organize' }));
   parts.push(railItem({ name: '已失效', count: c.dead, view: 'dead', iconName: 'alert', tone: 'dead', active: S.view.kind === 'dead' }));
   parts.push(railItem({ name: '疑似失效', count: c.susp, view: 'susp', iconName: 'clock', tone: 'warn', active: S.view.kind === 'susp' }));
   parts.push(railItem({ name: '未检测', count: c.unchecked, view: 'unchecked', iconName: 'plus', tone: 'ink', active: S.view.kind === 'unchecked' }));
@@ -289,6 +294,10 @@ function renderRail() {
   $('#rail').querySelectorAll('[data-view]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const v = btn.dataset.view;
+      if (v === '__organize') {
+        openOrganize();
+        return;
+      }
       S.view = v === 'all' ? { kind: 'all' }
         : ['pending', 'dead', 'susp', 'unchecked', 'inbox'].includes(v) ? { kind: v }
         : { kind: 'folder', code: v };
@@ -762,10 +771,157 @@ function renderInspector() {
     wireAi();
     return;
   }
+  if (S.drawer === 'organize') {
+    box.innerHTML = organizePanel();
+    wireOrganize();
+    return;
+  }
   const it = S.items.find((x) => x.id === S.selected);
   if (!it) { box.hidden = true; S.drawer = null; return; }
   box.innerHTML = detailPanel(it);
   wireDetail(it);
+}
+
+function openOrganize() {
+  S.drawer = 'organize';
+  S.selected = null;
+  renderInspector();
+  renderRail();
+}
+
+function organizePanel() {
+  const plan = S.plan;
+  const busy = S.planBusy;
+
+  const head = `<div class="insp-head">
+      <div class="insp-head-bar">
+        <div class="insp-kicker">${icon('folder', 12)} 整理计划</div>
+        <div class="insp-head-tools">
+          <button class="ibtn" data-close title="收起">${icon('x', 13)}</button>
+        </div>
+      </div>
+      <h2 class="insp-title">${busy ? '正在生成' : plan ? plan.ops.length + ' 条待整理' : '还没有计划'}</h2>
+      <p class="insp-sub">按已安装的方案把待归类书签归位。生成计划只读，不会移动任何书签。</p>
+    </div>`;
+
+  if (busy) {
+    const pr = S.planProgress || { stage: 'preselect', done: 0, total: 0 };
+    const pct = pr.total ? Math.round((pr.done / pr.total) * 100) : 6;
+    return head + `<div class="insp-body">
+      <div class="plan-busy">
+        <div class="plan-busy-line">${pr.stage === 'model' ? '模型正在判断' : '正在预筛'} ${pr.done}/${pr.total || '…'}</div>
+        <div class="scan-track" style="background:rgba(34,73,110,.14)"><div class="scan-fill" style="width:${pct}%"></div></div>
+      </div>
+    </div>`;
+  }
+
+  if (!plan) {
+    const ready = S.scheme.length > 0;
+    return head + `<div class="insp-body">
+      <div class="plan-empty">
+        <div class="plan-empty-line">当前方案：${ready ? `${S.scheme.length} 个类目` : '还没有可用的分类目录'}</div>
+        <div class="plan-empty-hint">${ready
+          ? '生成后会按类目列出「该挪去哪」，你可以逐条剔除或改判；执行在下一步接入。'
+          : '先到设置页装一套方案（杜威、中图法等），再回来生成计划。'}</div>
+        <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
+      </div>
+    </div>`;
+  }
+
+  const groups = groupOps(plan).map((g) => `
+    <div class="plan-group">
+      <div class="plan-group-head">
+        <span class="plan-group-code">${esc(g.code)}</span>
+        <span class="plan-group-name">${esc(g.name)}</span>
+        <span class="plan-group-n">${g.ops.length}</span>
+      </div>
+      ${g.ops.map(planRow).join('')}
+    </div>`).join('');
+
+  const s = plan.stats;
+  return head + `
+    <div class="insp-body">
+      <div class="plan-stats">
+        <span>可移 <b>${s.ready}</b></span>
+        <span>拿不准 <b>${s.unsure}</b></span>
+        <span>跳过 <b>${s.skip}</b></span>
+        ${s.blocked ? `<span class="tone-dead">动不了 <b>${s.blocked}</b></span>` : ''}
+      </div>
+      ${groups || '<div class="plan-empty-hint">计划是空的：没有需要移动的书签。</div>'}
+    </div>
+    <div class="insp-foot plan-foot">
+      <div class="plan-foot-line">生成于 ${relTime(plan.at)}${plan.overflow ? ` · 还有 ${plan.overflow} 条没纳入` : ''}</div>
+      <div class="plan-foot-actions">
+        <button class="btn btn-line btn-sm" data-gen>重新生成</button>
+        <button class="btn btn-ghost btn-sm" data-clear>清空</button>
+      </div>
+    </div>`;
+}
+
+function planRow(op) {
+  const tone = op.status === 'ready' ? '' : op.status === 'unsure' ? ' tone-warn' : op.status === 'blocked' ? ' tone-dead' : ' tone-ink';
+  const tag = op.status === 'ready' ? `→ ${esc(op.to.code)} ${esc(op.to.name)}`
+    : op.status === 'unsure' ? '拿不准'
+    : op.status === 'blocked' ? '动不了'
+    : '跳过';
+  const pickable = op.status === 'ready' || op.status === 'unsure';
+  return `<div class="plan-row">
+    <div class="plan-main">
+      <div class="plan-title" title="${esc(op.title)}">${esc(op.title)}</div>
+      <div class="plan-sub">
+        <span class="plan-tag${tone}">${tag}</span>
+        ${op.reason ? `<span class="plan-why" title="${esc(op.reason)}">${esc(op.reason)}</span>` : ''}
+      </div>
+    </div>
+    ${pickable ? `<select class="plan-pick" data-pick="${esc(op.id)}" title="改判到哪个类目">
+      ${S.scheme.map((f) => `<option value="${esc(f.code)}"${op.to && op.to.code === f.code ? ' selected' : ''}>${esc(f.code)} ${esc(f.name)}</option>`).join('')}
+    </select>` : ''}
+    <button class="ibtn plan-drop" data-drop="${esc(op.id)}" title="从计划里剔除">${icon('x', 11)}</button>
+  </div>`;
+}
+
+function wireOrganize() {
+  const box = $('#inspector');
+  box.querySelector('[data-close]')?.addEventListener('click', () => {
+    S.drawer = null;
+    renderInspector();
+    renderRail();
+  });
+
+  const gen = box.querySelector('[data-gen]');
+  if (gen) {
+    gen.addEventListener('click', async () => {
+      S.planBusy = true;
+      S.planProgress = { stage: 'preselect', done: 0, total: 0 };
+      renderInspector();
+      await send('organize:plan', { scope: 'inbox' }).catch((err) => {
+        S.planBusy = false;
+        toast(err.message);
+        renderInspector();
+      });
+    });
+  }
+
+  box.querySelector('[data-clear]')?.addEventListener('click', async () => {
+    await send('organize:cancel');
+    S.plan = null;
+    renderInspector();
+    renderRail();
+  });
+
+  box.querySelectorAll('[data-drop]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const plan = await send('organize:drop', { id: btn.dataset.drop }).catch(() => null);
+      if (plan) { S.plan = plan; renderInspector(); renderRail(); }
+    });
+  });
+
+  box.querySelectorAll('[data-pick]').forEach((sel) => {
+    sel.addEventListener('change', async () => {
+      const plan = await send('organize:override', { id: sel.dataset.pick, code: sel.value }).catch(() => null);
+      if (plan) { S.plan = plan; renderInspector(); renderRail(); }
+    });
+  });
 }
 
 function aiPanel() {
@@ -1296,6 +1452,11 @@ async function load() {
   S.settings = st.settings || {};
   S.aiReady = st.aiReady;
   S.scan = st.scan || { running: false, done: 0, total: 0 };
+  const org = await send('organize:load').catch(() => null);
+  if (org) {
+    S.plan = org.plan || null;
+    S.planBusy = Boolean(org.running);
+  }
   S.loaded = true;
   renderAll();
 }
@@ -1348,6 +1509,35 @@ onBroadcast((msg) => {
   if (msg.type === 'ai:progress') {
     S.aiProgress = { done: msg.done, total: msg.total };
     renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:start') {
+    S.planBusy = true;
+    S.planProgress = { stage: 'preselect', done: 0, total: 0 };
+    renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:progress') {
+    S.planProgress = { stage: msg.stage, done: msg.done, total: msg.total };
+    renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:done') {
+    S.planBusy = false;
+    S.planProgress = null;
+    S.plan = msg.plan || null;
+    renderInspector();
+    renderRail();
+    return;
+  }
+  if (msg.type === 'organize:error') {
+    S.planBusy = false;
+    renderInspector();
+    toast(msg.message || '整理计划生成失败');
+    return;
+  }
+  if (msg.type === 'organize:warn') {
+    toast(msg.message);
     return;
   }
   if (msg.type === 'state:changed') {
