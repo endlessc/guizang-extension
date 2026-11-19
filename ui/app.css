@@ -664,6 +664,8 @@ kbd{
 .group-num{
   font-family:var(--serif);font-size:26px;line-height:.95;letter-spacing:-.02em;font-weight:600;
   color:var(--ink);
+  /* 字母类目（T / B）只有一位，给个最小宽度，类目名才不会左右跳 */
+  min-width:1.75em;
 }
 .group-name{font-size:12px;font-weight:600;color:var(--ink-2);}
 .group-count{font-size:11px;color:var(--ink-4);font-variant-numeric:tabular-nums;}

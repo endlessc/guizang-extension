@@ -55,7 +55,9 @@
       <section class="card">
         <div class="card-kicker">四库存目源流</div>
         <h2>分类体系映射</h2>
-        <p class="hint">归藏遵循「因书立目」的典藏传统。自动读取书签栏中带有三位数字前缀（如「<code>000 综合与工具</code>」）的文件夹建立十进编目；未设数字者，自动以书签栏一级目录编制顺序代码。</p>
+        <p class="hint">归藏遵循「因书立目」的典藏传统。可装一套预置方案（杜威十进、中图法等），装好后按方案归位；也可以只读取书签栏里已有的编码目录。数字编码（如「<code>000 综合与工具</code>」）始终识别，字母编码（如「<code>T 工业技术</code>」）只在对应方案启用后生效。</p>
+        <div class="scheme-pick" id="schemePicker"></div>
+        <div id="schemePreview"></div>
         <div class="scheme" id="scheme"></div>
       </section>
 

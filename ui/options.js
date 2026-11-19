@@ -21,6 +21,8 @@ async function boot() {
   fill(summary.settings);
   renderThemes();
   renderScheme(summary.scheme);
+  // 旧版后台不认识 schemes:list，别让它把整页拖垮
+  await renderPicker().catch(() => {});
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg) => {
@@ -80,6 +82,76 @@ function collect() {
     out[k] = /maxTokens|concurrency|timeout|checkLimit/.test(k) ? Number(el.value) || 0 : el.value.trim();
   }
   return out;
+}
+
+/* ── 整理方案 ─────────────────────────────── */
+
+async function renderPicker() {
+  const box = $('#schemePicker');
+  if (!box) return;
+  const { schemes, current } = await send('schemes:list');
+  box.innerHTML = schemes.map((s) => {
+    const active = s.id === current;
+    return `
+      <button type="button" class="scheme-card${active ? ' is-active' : ''}" data-scheme="${esc(s.id)}">
+        <span class="scheme-card-name">${esc(s.name)}${active ? '<i class="scheme-card-tag">当前</i>' : ''}</span>
+        <span class="scheme-card-desc">${esc(s.desc)}</span>
+        <span class="scheme-card-meta">${s.kind === 'letter' ? '字母编码' : '数字编码'} · ${s.codes.length} 类</span>
+      </button>`;
+  }).join('');
+  box.querySelectorAll('[data-scheme]').forEach((el) => {
+    el.addEventListener('click', () => previewScheme(el.dataset.scheme));
+  });
+}
+
+async function previewScheme(id) {
+  const box = $('#schemePreview');
+  if (!box) return;
+  box.innerHTML = '<div class="scheme-plan"><span class="test-msg">正在核对书签栏…</span></div>';
+  try {
+    const plan = await send('scheme:preview', { schemeId: id });
+    const s = plan.summary;
+    const conflicts = plan.conflict.length
+      ? `<div class="scheme-warn">这些已有文件夹的编码和方案撞车，先改名或换方案：<br>${
+        plan.conflict
+          .map((c) => `「${esc(c.code)}」现有为「${esc(c.got)}」，方案要「${esc(c.want)}」`)
+          .join('<br>')
+      }</div>`
+      : '';
+    box.innerHTML = `
+      <div class="scheme-plan">
+        <div class="scheme-plan-line">将新建 <b>${s.missing}</b> 个目录，复用 <b>${s.exists}</b> 个${
+          s.conflict ? `，<b class="bad">${s.conflict} 个撞车</b>` : ''
+        }</div>
+        ${conflicts}
+        <div class="row">
+          <button type="button" class="btn btn-primary btn-md" id="btnInstall"${
+            plan.conflict.length ? ' disabled' : ''
+          }>安装并启用</button>
+        </div>
+      </div>`;
+    const btn = $('#btnInstall');
+    if (btn) btn.addEventListener('click', () => installScheme(id));
+  } catch (err) {
+    box.innerHTML = `<div class="scheme-plan"><span class="test-msg bad">${esc(err.message)}</span></div>`;
+  }
+}
+
+async function installScheme(id) {
+  try {
+    const r = await send('scheme:install', { schemeId: id });
+    if (!r.installed) {
+      toast('有编码冲突，未安装');
+      return;
+    }
+    toast(`已启用：新建 ${r.created} 个目录，复用 ${r.reused} 个`);
+    $('#schemePreview').innerHTML = '';
+    const summary = await send('summary:load');
+    renderScheme(summary.scheme);
+    await renderPicker();
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 function renderScheme(scheme) {

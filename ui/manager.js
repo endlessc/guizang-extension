@@ -277,9 +277,9 @@ function renderRail() {
 
   if (S.scheme.length) parts.push('<div class="section-label">分类<span class="section-aside">编号</span></div>');
   for (const f of S.scheme) {
-    if (!byCode[f.code]) continue;
+    // 空类目也要列出来：装了方案却看不见目录，会以为没装上
     parts.push(railItem({
-      code: f.code, name: f.name, count: byCode[f.code],
+      code: f.code, name: f.name, count: byCode[f.code] || 0,
       bad: badByCode[f.code] || 0, view: f.code,
       active: S.view.kind === 'folder' && S.view.code === f.code,
     }));

@@ -6,6 +6,8 @@
  */
 
 import { parseTree, INBOX_TITLE } from './lib/tree.js';
+import { parseOptsOf, listSchemes, getScheme } from './lib/schemes.js';
+import { planInstall } from './lib/scheme-install.js';
 import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
 import { classify, classifyHeuristic, hasModel, testConnection, DEFAULT_SETTINGS } from './lib/llm.js';
@@ -25,22 +27,25 @@ async function readSettings() {
  * 找到「待归类」文件夹；没有就建一个。
  * 只在真要写书签时调用（保存 / 打开弹窗），读状态时不做多余副作用。
  */
-async function ensureInbox(tree) {
+async function ensureInbox(tree, schemeId) {
+  // 注意：这里必须传 schemeId，否则装了字母方案后「待归类」的判定会退化
+  const opts = parseOptsOf(schemeId);
   const t1 = tree || (await chrome.bookmarks.getTree());
-  const p1 = parseTree(t1);
+  const p1 = parseTree(t1, opts);
   if (p1.inboxId) return { tree: t1, parsed: p1, inboxId: p1.inboxId, created: false };
 
   const bar = (t1[0].children || []).find((n) => !n.url) || t1[0].children[0];
   const created = await chrome.bookmarks.create({ parentId: bar.id, title: INBOX_TITLE });
   const t2 = await chrome.bookmarks.getTree();
-  return { tree: t2, parsed: parseTree(t2), inboxId: created.id, created: true };
+  return { tree: t2, parsed: parseTree(t2, opts), inboxId: created.id, created: true };
 }
 
 async function loadState() {
-  const tree = await chrome.bookmarks.getTree();
-  const { items, folders, scheme, inboxId } = parseTree(tree);
+  // 先读设置：解析要用 settings.schemeId 决定字母编码是否生效
   const store = await chrome.storage.local.get(KEYS);
   const settings = { ...DEFAULT_SETTINGS, ...(store.settings || {}) };
+  const tree = await chrome.bookmarks.getTree();
+  const { items, folders, scheme, inboxId } = parseTree(tree, parseOptsOf(settings.schemeId));
   const health = store.health || {};
   const pending = store.pending || {};
 
@@ -74,8 +79,9 @@ function broadcast(message) {
 }
 
 async function moveToCode(ids, code) {
+  const settings = await readSettings();
   const tree = await chrome.bookmarks.getTree();
-  const { scheme } = parseTree(tree);
+  const { scheme } = parseTree(tree, parseOptsOf(settings.schemeId));
   const target = scheme.find((f) => f.code === code);
   if (!target) throw new Error(`找不到类目 ${code}，可能分类文件夹被改名或删除了`);
   let moved = 0;
@@ -175,10 +181,11 @@ const handlers = {
 
   /** 弹窗/侧边栏只要摘要，别把几千条书签塞进消息通道 */
   'summary:load': async () => {
-    const { parsed, inboxId } = await ensureInbox();
-    const { items, scheme } = parsed;
-    const { health = {}, pending = {}, settings = {} } = await chrome.storage.local.get(KEYS);
+    const { settings = {} } = await chrome.storage.local.get('settings');
     const merged = { ...DEFAULT_SETTINGS, ...settings };
+    const { parsed, inboxId } = await ensureInbox(undefined, merged.schemeId);
+    const { items, scheme } = parsed;
+    const { health = {}, pending = {} } = await chrome.storage.local.get(['health', 'pending']);
     let dead = 0;
     let susp = 0;
     let unchecked = 0;
@@ -283,8 +290,9 @@ const handlers = {
 
   /** 侧边栏只有计数，没有 id 列表，让后台自己挑没检测过的 */
   'health:runUnchecked': async () => {
+    const settings = await readSettings();
     const tree = await chrome.bookmarks.getTree();
-    const { items } = parseTree(tree);
+    const { items } = parseTree(tree, parseOptsOf(settings.schemeId));
     const { health = {} } = await chrome.storage.local.get('health');
     const ids = items.filter((it) => !health[it.id]).map((it) => it.id);
     if (!ids.length) return { started: false, total: 0 };
@@ -389,6 +397,40 @@ const handlers = {
     const merged = { ...(await readSettings()), ...(settings || {}) };
     const raw = await testConnection(merged);
     return { ok: true, raw };
+  },
+
+  /** 可选方案清单 + 当前装的是哪套 */
+  'schemes:list': async () => ({
+    schemes: listSchemes(),
+    current: (await readSettings()).schemeId || '',
+  }),
+
+  /** 预检：不出手，只算「会建几个 / 复用几个 / 有几个撞车」 */
+  'scheme:preview': async ({ schemeId }) => {
+    const scheme = getScheme(schemeId);
+    if (!scheme) throw new Error('没有这个方案');
+    const tree = await chrome.bookmarks.getTree();
+    return planInstall(tree, scheme);
+  },
+
+  /**
+   * 安装：按 code 复用已有目录，只建缺的。
+   * 有冲突就一个都不建，把冲突原样返回给界面处理。
+   */
+  'scheme:install': async ({ schemeId }) => {
+    const scheme = getScheme(schemeId);
+    if (!scheme) throw new Error('没有这个方案');
+    const tree = await chrome.bookmarks.getTree();
+    const plan = planInstall(tree, scheme);
+    if (plan.conflict.length) return { installed: false, conflict: plan.conflict, plan };
+
+    for (const f of plan.missing) {
+      await chrome.bookmarks.create({ parentId: plan.barId, title: `${f.code} ${f.name}` });
+    }
+    const next = { ...(await readSettings()), schemeId };
+    await chrome.storage.local.set({ settings: next });
+    broadcast({ type: 'state:changed' });
+    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId };
   },
 
   'bookmarks:update': async ({ id, title, url }) => {

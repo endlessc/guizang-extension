@@ -7,6 +7,8 @@
  */
 
 import { parseTree } from '../lib/tree.js';
+import { parseOptsOf, listSchemes, getScheme } from '../lib/schemes.js';
+import { planInstall } from '../lib/scheme-install.js';
 import { PROTO } from '../lib/version.js';
 import { classify, DEFAULT_SETTINGS } from '../lib/llm.js';
 
@@ -163,7 +165,7 @@ function emit(msg) {
 }
 
 function stateLoad() {
-  const { items, folders, scheme, inboxId } = parseTree([JSON.parse(JSON.stringify(root))]);
+  const { items, folders, scheme, inboxId } = parseTree([JSON.parse(JSON.stringify(root))], parseOptsOf(settings.schemeId));
   return {
     items, folders, scheme, inboxId,
     // 副本：真实 storage 也是结构化克隆，页面改不到存储里
@@ -176,7 +178,7 @@ function stateLoad() {
 }
 
 function summaryLoad() {
-  const { items, scheme, inboxId } = parseTree([JSON.parse(JSON.stringify(root))]);
+  const { items, scheme, inboxId } = parseTree([JSON.parse(JSON.stringify(root))], parseOptsOf(settings.schemeId));
   let dead = 0, susp = 0, unchecked = 0, inbox = 0;
   for (const it of items) {
     if (!it.code) inbox += 1;
@@ -263,7 +265,7 @@ async function handle(msg) {
   }
 
   if (type === 'health:runUnchecked') {
-    const { items } = parseTree([JSON.parse(JSON.stringify(root))]);
+    const { items } = parseTree([JSON.parse(JSON.stringify(root))], parseOptsOf(settings.schemeId));
     const ids = items.filter((it) => !health[it.id]).map((it) => it.id);
     if (!ids.length) return { started: false, total: 0 };
     return handle({ type: 'health:run', ids });
@@ -368,6 +370,28 @@ async function handle(msg) {
     return { restored: (msg.items || []).length };
   }
 
+  if (type === 'schemes:list') return { schemes: listSchemes(), current: settings.schemeId || '' };
+
+  if (type === 'scheme:preview') {
+    const scheme = getScheme(msg.schemeId);
+    if (!scheme) throw new Error('没有这个方案');
+    return planInstall([JSON.parse(JSON.stringify(root))], scheme);
+  }
+
+  if (type === 'scheme:install') {
+    const scheme = getScheme(msg.schemeId);
+    if (!scheme) throw new Error('没有这个方案');
+    const plan = planInstall([JSON.parse(JSON.stringify(root))], scheme);
+    if (plan.conflict.length) return { installed: false, conflict: plan.conflict, plan };
+    const bar = findNode(plan.barId);
+    for (const f of plan.missing) {
+      bar.children.push({ id: 'f' + scheme.id + f.code, title: `${f.code} ${f.name}`, parentId: bar.id, children: [] });
+    }
+    settings = { ...settings, schemeId: msg.schemeId };
+    emit({ type: 'state:changed' });
+    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId: msg.schemeId };
+  }
+
   if (type === 'settings:save') { settings = { ...settings, ...msg.settings }; return { settings }; }
   if (type === 'settings:test') throw new Error('本地预览没有真的模型服务');
   if (type === 'open:manager') {
@@ -389,8 +413,30 @@ function buildSave(msg) {
   });
 }
 
+/**
+ * 本地预览专用：?scheme=clc12 直接把方案装进内存树。
+ * 每个页面各有一份 mock 实例，options 页里装的不会自动出现在 manager 页，
+ * 所以想看字母类目的渲染效果就用这个参数。
+ */
+function seedSchemeFromQuery() {
+  if (typeof location === 'undefined') return;
+  const id = new URLSearchParams(location.search).get('scheme');
+  const scheme = id ? getScheme(id) : null;
+  if (!scheme) return;
+  const bar = findNode('1');
+  if (!bar) return;
+  for (const f of scheme.folders) {
+    const title = `${f.code} ${f.name}`;
+    if (!bar.children.some((c) => !c.url && c.title === title)) {
+      bar.children.push({ id: 'seed' + scheme.id + f.code, title, parentId: bar.id, children: [] });
+    }
+  }
+  settings = { ...settings, schemeId: scheme.id };
+}
+
 export async function install() {
   buildTree();
+  seedSchemeFromQuery();
 
   const api = {
     runtime: {
