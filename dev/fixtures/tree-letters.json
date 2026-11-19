@@ -1,0 +1,85 @@
+[
+  {
+    "id": "0",
+    "title": "",
+    "children": [
+      {
+        "id": "1",
+        "parentId": "0",
+        "title": "书签栏",
+        "index": 0,
+        "children": [
+          {
+            "id": "10",
+            "parentId": "1",
+            "title": "T 工业技术",
+            "index": 0,
+            "children": [
+              {
+                "id": "1001",
+                "parentId": "10",
+                "title": "Kernel.org",
+                "url": "https://kernel.org",
+                "dateAdded": 1700000000000020,
+                "index": 0
+              },
+              {
+                "id": "101",
+                "parentId": "10",
+                "title": "TP 计算机",
+                "index": 1,
+                "children": [
+                  {
+                    "id": "1011",
+                    "parentId": "101",
+                    "title": "MDN",
+                    "url": "https://developer.mozilla.org",
+                    "dateAdded": 1700000000000021,
+                    "index": 0
+                  }
+                ]
+              }
+            ]
+          },
+          {
+            "id": "11",
+            "parentId": "1",
+            "title": "B 哲学与宗教",
+            "index": 1,
+            "children": []
+          },
+          {
+            "id": "12",
+            "parentId": "1",
+            "title": "AI 工具",
+            "index": 2,
+            "children": [
+              {
+                "id": "1201",
+                "parentId": "12",
+                "title": "ChatGPT",
+                "url": "https://chat.openai.com",
+                "dateAdded": 1700000000000022,
+                "index": 0
+              }
+            ]
+          },
+          {
+            "id": "13",
+            "parentId": "1",
+            "title": "PDF 手册",
+            "index": 3,
+            "children": []
+          }
+        ]
+      },
+      {
+        "id": "2",
+        "parentId": "0",
+        "title": "其他书签",
+        "index": 1,
+        "children": []
+      }
+    ]
+  }
+]

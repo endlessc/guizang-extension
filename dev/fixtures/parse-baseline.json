@@ -1,0 +1,362 @@
+{
+  "tree-dewey": {
+    "folders": [
+      {
+        "code": "000",
+        "depth": 0,
+        "hint": "通用、效率、工具箱、引擎入口",
+        "id": "10",
+        "name": "综合与工具",
+        "path": "000 综合与工具"
+      },
+      {
+        "code": "100",
+        "depth": 0,
+        "hint": "编程语言、后端服务、框架、面试",
+        "id": "11",
+        "name": "编程与后端",
+        "path": "100 编程与后端"
+      },
+      {
+        "code": "000",
+        "depth": 0,
+        "hint": "通用、效率、工具箱、引擎入口",
+        "id": "12",
+        "name": "综合（与上面重号）",
+        "path": "000 综合（与上面重号）"
+      }
+    ],
+    "inboxId": "13",
+    "items": [
+      {
+        "added": 1700000000000007,
+        "code": "",
+        "folderId": "3",
+        "host": "m.example",
+        "id": "301",
+        "inbox": false,
+        "index": 0,
+        "title": "手机收藏",
+        "url": "https://m.example"
+      },
+      {
+        "added": 1700000000000006,
+        "code": "",
+        "folderId": "21",
+        "host": "deep.example",
+        "id": "2101",
+        "inbox": false,
+        "index": 0,
+        "title": "深层条目",
+        "url": "https://deep.example"
+      },
+      {
+        "added": 1700000000000005,
+        "code": "",
+        "folderId": "1",
+        "host": "loose.example",
+        "id": "15",
+        "inbox": false,
+        "index": 5,
+        "title": "书签栏散条目",
+        "url": "https://loose.example"
+      },
+      {
+        "added": 1700000000000004,
+        "code": "",
+        "folderId": "14",
+        "host": "space.bilibili.com",
+        "id": "1401",
+        "inbox": false,
+        "index": 0,
+        "title": "首页",
+        "url": "https://space.bilibili.com"
+      },
+      {
+        "added": 1700000000000003,
+        "code": "",
+        "folderId": "13",
+        "host": "a.example",
+        "id": "1301",
+        "inbox": true,
+        "index": 0,
+        "title": "散条目 A",
+        "url": "https://a.example"
+      },
+      {
+        "added": 1700000000000002,
+        "code": "100",
+        "folderId": "11",
+        "host": "github.com",
+        "id": "1101",
+        "inbox": false,
+        "index": 0,
+        "title": "GitHub",
+        "url": "https://github.com"
+      },
+      {
+        "added": 1700000000000001,
+        "code": "000",
+        "folderId": "101",
+        "host": "regex101.com",
+        "id": "1011",
+        "inbox": false,
+        "index": 0,
+        "title": "Regex101",
+        "url": "https://regex101.com"
+      },
+      {
+        "added": 1700000000000000,
+        "code": "000",
+        "folderId": "10",
+        "host": "example.com",
+        "id": "1001",
+        "inbox": false,
+        "index": 1,
+        "title": "Example",
+        "url": "https://example.com"
+      },
+      {
+        "added": 0,
+        "code": "",
+        "folderId": "2",
+        "host": "nodate.example",
+        "id": "20",
+        "inbox": false,
+        "index": 0,
+        "title": "没有日期",
+        "url": "https://nodate.example"
+      }
+    ],
+    "scheme": [
+      {
+        "code": "000",
+        "depth": 0,
+        "hint": "通用、效率、工具箱、引擎入口",
+        "id": "10",
+        "name": "综合与工具",
+        "path": "000 综合与工具"
+      },
+      {
+        "code": "100",
+        "depth": 0,
+        "hint": "编程语言、后端服务、框架、面试",
+        "id": "11",
+        "name": "编程与后端",
+        "path": "100 编程与后端"
+      }
+    ]
+  },
+  "tree-letters": {
+    "folders": [
+      {
+        "code": "F1",
+        "depth": 0,
+        "hint": "",
+        "id": "10",
+        "name": "T 工业技术",
+        "path": "T 工业技术"
+      },
+      {
+        "code": "F2",
+        "depth": 1,
+        "hint": "",
+        "id": "101",
+        "name": "TP 计算机",
+        "path": "TP 计算机"
+      },
+      {
+        "code": "F3",
+        "depth": 0,
+        "hint": "",
+        "id": "11",
+        "name": "B 哲学与宗教",
+        "path": "B 哲学与宗教"
+      },
+      {
+        "code": "F4",
+        "depth": 0,
+        "hint": "",
+        "id": "12",
+        "name": "AI 工具",
+        "path": "AI 工具"
+      },
+      {
+        "code": "F5",
+        "depth": 0,
+        "hint": "",
+        "id": "13",
+        "name": "PDF 手册",
+        "path": "PDF 手册"
+      }
+    ],
+    "inboxId": null,
+    "items": [
+      {
+        "added": 1700000000000022,
+        "code": "F4",
+        "folderId": "12",
+        "host": "chat.openai.com",
+        "id": "1201",
+        "inbox": false,
+        "index": 0,
+        "title": "ChatGPT",
+        "url": "https://chat.openai.com"
+      },
+      {
+        "added": 1700000000000021,
+        "code": "F2",
+        "folderId": "101",
+        "host": "developer.mozilla.org",
+        "id": "1011",
+        "inbox": false,
+        "index": 0,
+        "title": "MDN",
+        "url": "https://developer.mozilla.org"
+      },
+      {
+        "added": 1700000000000020,
+        "code": "F1",
+        "folderId": "10",
+        "host": "kernel.org",
+        "id": "1001",
+        "inbox": false,
+        "index": 0,
+        "title": "Kernel.org",
+        "url": "https://kernel.org"
+      }
+    ],
+    "scheme": [
+      {
+        "code": "F1",
+        "depth": 0,
+        "hint": "",
+        "id": "10",
+        "name": "T 工业技术",
+        "path": "T 工业技术"
+      },
+      {
+        "code": "F2",
+        "depth": 1,
+        "hint": "",
+        "id": "101",
+        "name": "TP 计算机",
+        "path": "TP 计算机"
+      },
+      {
+        "code": "F3",
+        "depth": 0,
+        "hint": "",
+        "id": "11",
+        "name": "B 哲学与宗教",
+        "path": "B 哲学与宗教"
+      },
+      {
+        "code": "F4",
+        "depth": 0,
+        "hint": "",
+        "id": "12",
+        "name": "AI 工具",
+        "path": "AI 工具"
+      },
+      {
+        "code": "F5",
+        "depth": 0,
+        "hint": "",
+        "id": "13",
+        "name": "PDF 手册",
+        "path": "PDF 手册"
+      }
+    ]
+  },
+  "tree-nocode": {
+    "folders": [
+      {
+        "code": "F1",
+        "depth": 0,
+        "hint": "",
+        "id": "10",
+        "name": "工作",
+        "path": "工作"
+      },
+      {
+        "code": "F2",
+        "depth": 0,
+        "hint": "",
+        "id": "11",
+        "name": "学习",
+        "path": "学习"
+      },
+      {
+        "code": "F3",
+        "depth": 0,
+        "hint": "",
+        "id": "12",
+        "name": "生活",
+        "path": "生活"
+      }
+    ],
+    "inboxId": null,
+    "items": [
+      {
+        "added": 1700000000000012,
+        "code": "",
+        "folderId": "2",
+        "host": "other.example",
+        "id": "2001",
+        "inbox": false,
+        "index": 0,
+        "title": "别的书签",
+        "url": "https://other.example"
+      },
+      {
+        "added": 1700000000000011,
+        "code": "F2",
+        "folderId": "11",
+        "host": "developer.mozilla.org",
+        "id": "1101",
+        "inbox": false,
+        "index": 0,
+        "title": "MDN",
+        "url": "https://developer.mozilla.org"
+      },
+      {
+        "added": 1700000000000010,
+        "code": "F1",
+        "folderId": "10",
+        "host": "wiki.example",
+        "id": "1001",
+        "inbox": false,
+        "index": 0,
+        "title": "内网 Wiki",
+        "url": "https://wiki.example"
+      }
+    ],
+    "scheme": [
+      {
+        "code": "F1",
+        "depth": 0,
+        "hint": "",
+        "id": "10",
+        "name": "工作",
+        "path": "工作"
+      },
+      {
+        "code": "F2",
+        "depth": 0,
+        "hint": "",
+        "id": "11",
+        "name": "学习",
+        "path": "学习"
+      },
+      {
+        "code": "F3",
+        "depth": 0,
+        "hint": "",
+        "id": "12",
+        "name": "生活",
+        "path": "生活"
+      }
+    ]
+  }
+}

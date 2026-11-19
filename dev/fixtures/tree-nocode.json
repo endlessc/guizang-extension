@@ -1,0 +1,71 @@
+[
+  {
+    "id": "0",
+    "title": "",
+    "children": [
+      {
+        "id": "1",
+        "parentId": "0",
+        "title": "书签栏",
+        "index": 0,
+        "children": [
+          {
+            "id": "10",
+            "parentId": "1",
+            "title": "工作",
+            "index": 0,
+            "children": [
+              {
+                "id": "1001",
+                "parentId": "10",
+                "title": "内网 Wiki",
+                "url": "https://wiki.example",
+                "dateAdded": 1700000000000010,
+                "index": 0
+              }
+            ]
+          },
+          {
+            "id": "11",
+            "parentId": "1",
+            "title": "学习",
+            "index": 1,
+            "children": [
+              {
+                "id": "1101",
+                "parentId": "11",
+                "title": "MDN",
+                "url": "https://developer.mozilla.org",
+                "dateAdded": 1700000000000011,
+                "index": 0
+              }
+            ]
+          },
+          {
+            "id": "12",
+            "parentId": "1",
+            "title": "生活",
+            "index": 2,
+            "children": []
+          }
+        ]
+      },
+      {
+        "id": "2",
+        "parentId": "0",
+        "title": "其他书签",
+        "index": 1,
+        "children": [
+          {
+            "id": "2001",
+            "parentId": "2",
+            "title": "别的书签",
+            "url": "https://other.example",
+            "dateAdded": 1700000000000012,
+            "index": 0
+          }
+        ]
+      }
+    ]
+  }
+]

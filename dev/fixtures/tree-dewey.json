@@ -1,0 +1,158 @@
+[
+  {
+    "id": "0",
+    "title": "",
+    "children": [
+      {
+        "id": "1",
+        "parentId": "0",
+        "title": "书签栏",
+        "index": 0,
+        "children": [
+          {
+            "id": "10",
+            "parentId": "1",
+            "title": "000 综合与工具",
+            "index": 0,
+            "children": [
+              {
+                "id": "101",
+                "parentId": "10",
+                "title": "工具箱",
+                "index": 0,
+                "children": [
+                  {
+                    "id": "1011",
+                    "parentId": "101",
+                    "title": "Regex101",
+                    "url": "https://regex101.com",
+                    "dateAdded": 1700000000000001,
+                    "index": 0
+                  }
+                ]
+              },
+              {
+                "id": "1001",
+                "parentId": "10",
+                "title": "Example",
+                "url": "https://example.com",
+                "dateAdded": 1700000000000000,
+                "index": 1
+              }
+            ]
+          },
+          {
+            "id": "11",
+            "parentId": "1",
+            "title": "100 编程与后端",
+            "index": 1,
+            "children": [
+              {
+                "id": "1101",
+                "parentId": "11",
+                "title": "GitHub",
+                "url": "https://github.com",
+                "dateAdded": 1700000000000002,
+                "index": 0
+              }
+            ]
+          },
+          {
+            "id": "12",
+            "parentId": "1",
+            "title": "000 综合（与上面重号）",
+            "index": 2,
+            "children": []
+          },
+          {
+            "id": "13",
+            "parentId": "1",
+            "title": "待归类",
+            "index": 3,
+            "children": [
+              {
+                "id": "1301",
+                "parentId": "13",
+                "title": "散条目 A",
+                "url": "https://a.example",
+                "dateAdded": 1700000000000003,
+                "index": 0
+              }
+            ]
+          },
+          {
+            "id": "14",
+            "parentId": "1",
+            "title": "B 站",
+            "index": 4,
+            "children": [
+              {
+                "id": "1401",
+                "parentId": "14",
+                "title": "首页",
+                "url": "https://space.bilibili.com",
+                "dateAdded": 1700000000000004,
+                "index": 0
+              }
+            ]
+          },
+          {
+            "id": "15",
+            "parentId": "1",
+            "title": "书签栏散条目",
+            "url": "https://loose.example",
+            "dateAdded": 1700000000000005,
+            "index": 5
+          }
+        ]
+      },
+      {
+        "id": "2",
+        "parentId": "0",
+        "title": "其他书签",
+        "index": 1,
+        "children": [
+          {
+            "id": "20",
+            "parentId": "2",
+            "title": "没有日期",
+            "url": "https://nodate.example",
+            "index": 0
+          },
+          {
+            "id": "21",
+            "parentId": "2",
+            "title": "深层普通文件夹",
+            "index": 1,
+            "children": [
+              {
+                "id": "2101",
+                "parentId": "21",
+                "title": "深层条目",
+                "url": "https://deep.example",
+                "dateAdded": 1700000000000006,
+                "index": 0
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "id": "3",
+        "parentId": "0",
+        "title": "移动设备书签",
+        "index": 2,
+        "children": [
+          {
+            "id": "301",
+            "parentId": "3",
+            "title": "手机收藏",
+            "url": "https://m.example",
+            "dateAdded": 1700000000000007,
+            "index": 0
+          }
+        ]
+      }
+    ]
+  }
+]
