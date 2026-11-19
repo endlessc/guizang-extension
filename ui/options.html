@@ -70,6 +70,20 @@
           <button type="button" class="btn btn-ghost btn-md" id="clearPending">重置归类建议</button>
           <span class="test-msg" id="dataMsg"></span>
         </div>
+
+        <div class="backup">
+          <div class="backup-head">
+            <span class="backup-title">书签树备份</span>
+            <span class="backup-hint">整树结构快照（不复制书签），环形保留最近 3 份；整理功能必须先备份才允许动手。</span>
+          </div>
+          <div class="row">
+            <button type="button" class="btn btn-line btn-md" id="doBackup">立即备份</button>
+            <button type="button" class="btn btn-ghost btn-md" id="exportBackup">导出最新</button>
+            <button type="button" class="btn btn-ghost btn-md" id="clearBackup">删除全部</button>
+            <span class="test-msg" id="backupMsg"></span>
+          </div>
+          <div class="backup-list" id="backupList"></div>
+        </div>
       </section>
 
       <div class="savebar">

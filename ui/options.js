@@ -34,6 +34,8 @@ async function boot() {
   $('#form').addEventListener('submit', save);
   $('#clearHealth').addEventListener('click', () => clear('health:clear', '检测结果'));
   $('#clearPending').addEventListener('click', () => clear('ai:ignoreAll', '归类建议'));
+  wireBackup();
+  await renderBackups().catch(() => {});
 }
 
 function renderThemes() {
@@ -194,6 +196,83 @@ async function test() {
     msg.textContent = err.message;
     msg.className = 'test-msg bad';
   }
+}
+
+/* ── 书签树备份 ───────────────────────────── */
+
+function download(name, text) {
+  const blob = new Blob([text], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function renderBackups() {
+  const box = $('#backupList');
+  if (!box) return;
+  const list = await send('backup:list');
+  if (!list.length) {
+    box.innerHTML = '<div class="backup-empty">还没有备份。整理功能会在动手前自动做一份。</div>';
+    return;
+  }
+  box.innerHTML = list
+    .map((b) => {
+      const when = new Date(b.at).toLocaleString('zh-CN', { hour12: false });
+      return `<div class="backup-item">
+        <span class="backup-when">${esc(when)}</span>
+        <span class="backup-meta">${b.counts.nodes} 节点 · ${Math.round(b.bytes / 1024)} KB</span>
+        <span class="backup-tag">${b.planId ? '整理前' : '手动'}</span>
+      </div>`;
+    })
+    .join('');
+}
+
+function wireBackup() {
+  const msg = $('#backupMsg');
+  const say = (text, ok = true) => {
+    if (!msg) return;
+    msg.textContent = text;
+    msg.className = 'test-msg ' + (ok ? 'ok' : 'bad');
+  };
+
+  $('#doBackup')?.addEventListener('click', async () => {
+    say('正在备份…');
+    try {
+      const meta = await send('backup:run', {});
+      say(`已备份 ${meta.counts.nodes} 个节点（${Math.round(meta.bytes / 1024)} KB）`);
+      await renderBackups();
+    } catch (err) {
+      say(err.message, false);
+    }
+  });
+
+  $('#exportBackup')?.addEventListener('click', async () => {
+    try {
+      const text = await send('backup:export', {});
+      const list = await send('backup:list');
+      download(`guizang-backup-${list[0].id}.json`, text);
+      say('已导出最新那份备份');
+    } catch (err) {
+      say(err.message, false);
+    }
+  });
+
+  $('#clearBackup')?.addEventListener('click', async () => {
+    // 删备份是不可逆的，确认一次
+    if (!window.confirm('删除全部书签树备份？删掉之后，整理就没有退路了。')) return;
+    try {
+      const r = await send('backup:clear', {});
+      say(`已删除 ${r.removed} 份备份`);
+      await renderBackups();
+    } catch (err) {
+      say(err.message, false);
+    }
+  });
 }
 
 async function clear(type, label) {

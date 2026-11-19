@@ -8,6 +8,7 @@
 import { parseTree, INBOX_TITLE } from './lib/tree.js';
 import { parseOptsOf, listSchemes, getScheme } from './lib/schemes.js';
 import { planInstall } from './lib/scheme-install.js';
+import { saveBackup, listBackups, exportBackup, clearBackups, checkBackupReady } from './lib/backup.js';
 import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
 import { classify, classifyHeuristic, hasModel, testConnection, DEFAULT_SETTINGS } from './lib/llm.js';
@@ -412,6 +413,27 @@ const handlers = {
     const tree = await chrome.bookmarks.getTree();
     return planInstall(tree, scheme);
   },
+
+  /** 整理前的退路：整树结构化快照，环形保留 3 份 */
+  'backup:run': async ({ planId = '' } = {}) => {
+    const settings = await readSettings();
+    const tree = await chrome.bookmarks.getTree();
+    return saveBackup(tree, { planId, schemeId: settings.schemeId || '' });
+  },
+
+  'backup:list': async () => listBackups(),
+
+  'backup:export': async ({ id }) => {
+    const list = await listBackups();
+    const target = id || (list[0] && list[0].id);
+    if (!target) throw new Error('还没有备份可导出');
+    return exportBackup(target);
+  },
+
+  'backup:clear': async () => clearBackups(),
+
+  /** 闸门：后台自己校验，不靠界面自觉。没有合规备份就返回 NEED_BACKUP。 */
+  'backup:check': async ({ planId = '', planAt = 0 }) => checkBackupReady(await listBackups(), { id: planId, at: planAt }),
 
   /**
    * 安装：按 code 复用已有目录，只建缺的。

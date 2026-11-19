@@ -348,3 +348,33 @@ body.opt-page{
 .scheme-plan-line b.bad{ color: var(--dead); }
 .scheme-warn{ margin-top: 8px; font-size: 11.5px; line-height: 1.7; color: var(--dead); }
 .scheme-plan .row{ margin-top: 10px; }
+
+/* ── 书签树备份 ─────────────────────────────── */
+.backup{
+  margin-top: 18px;
+  padding-top: 14px;
+  border-top: 1px dashed var(--rule);
+}
+.backup-head{ display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px; margin-bottom: 10px; }
+.backup-title{ font-size: 12.5px; font-weight: 600; color: var(--ink); }
+.backup-hint{ font-size: 11px; line-height: 1.6; color: var(--ink-4); flex: 1 1 260px; }
+.backup-list{ display: flex; flex-direction: column; gap: 4px; margin-top: 8px; }
+.backup-item{
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  font-size: 11.5px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.backup-when{ font-variant-numeric: tabular-nums; color: var(--ink-2); }
+.backup-meta{ color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.backup-tag{
+  margin-left: auto;
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 3px;
+  background: var(--paper-2);
+  color: var(--ink-3);
+}
+.backup-empty{ font-size: 11.5px; color: var(--ink-4); padding: 6px 0; }

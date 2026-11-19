@@ -9,6 +9,7 @@
 import { parseTree } from '../lib/tree.js';
 import { parseOptsOf, listSchemes, getScheme } from '../lib/schemes.js';
 import { planInstall } from '../lib/scheme-install.js';
+import { flattenTree, checkBackupReady } from '../lib/backup.js';
 import { PROTO } from '../lib/version.js';
 import { classify, DEFAULT_SETTINGS } from '../lib/llm.js';
 
@@ -108,6 +109,9 @@ let health = {};
 let pending = {};
 let mockTheme = 'system';
 let settings = { ...DEFAULT_SETTINGS };
+let backups = [];          // 只存索引（本地预览用，刷新即重置）
+let backupNodes = {};      // id → 完整快照
+let backupSeq = 0;
 const listeners = [];
 
 function buildTree() {
@@ -369,6 +373,31 @@ async function handle(msg) {
     emit({ type: 'state:changed' });
     return { restored: (msg.items || []).length };
   }
+
+  if (type === 'backup:run') {
+    const { nodes, counts } = flattenTree([JSON.parse(JSON.stringify(root))]);
+    const id = 'b' + (++backupSeq);
+    const at = Date.now();
+    const item = { id, at, planId: msg.planId || '', schemeId: settings.schemeId || '', counts, nodes };
+    const bytes = new TextEncoder().encode(JSON.stringify(item)).length;
+    backups.unshift({ id, at, planId: item.planId, schemeId: item.schemeId, counts, bytes });
+    backupNodes[id] = item;
+    backups = backups.slice(0, 3);
+    return backups[0];
+  }
+  if (type === 'backup:list') return backups;
+  if (type === 'backup:export') {
+    const id = msg.id || (backups[0] && backups[0].id);
+    if (!id || !backupNodes[id]) throw new Error('还没有备份可导出');
+    return JSON.stringify(backupNodes[id], null, 2);
+  }
+  if (type === 'backup:clear') {
+    const removed = backups.length;
+    backups = [];
+    backupNodes = {};
+    return { removed };
+  }
+  if (type === 'backup:check') return checkBackupReady(backups, { id: msg.planId || '', at: msg.planAt || 0 });
 
   if (type === 'schemes:list') return { schemes: listSchemes(), current: settings.schemeId || '' };
 
