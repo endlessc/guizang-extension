@@ -7,6 +7,14 @@ import {
 
 import { ensureEnv } from './env.js';
 await ensureEnv();
+function appVersion() {
+  try {
+    return chrome.runtime.getManifest().version;
+  } catch (e) {
+    return 'dev';
+  }
+}
+
 
 const S = {
   summary: null,
@@ -88,7 +96,7 @@ function renderHead() {
   $('#head').innerHTML = `
     ${mark(20)}
     <span class="sp-brand">归藏</span>
-    <span class="sp-version mono">v0.4</span>
+    <span class="sp-version mono">v${appVersion()}</span>
     <span class="sp-head-gap"></span>
     <button class="ibtn" id="optBtn" title="设置">${icon('sliders', 14)}</button>`;
   $('#optBtn').addEventListener('click', () => chrome.runtime.openOptionsPage());

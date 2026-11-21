@@ -7,6 +7,14 @@ await ensureEnv();
 
 const FIELDS = ['baseUrl', 'model', 'apiKey', 'maxTokens', 'concurrency', 'timeout', 'checkLimit'];
 
+function appVersion() {
+  try {
+    return chrome.runtime.getManifest().version;
+  } catch (e) {
+    return 'dev';
+  }
+}
+
 async function boot() {
   $('#head').innerHTML = `
     ${mark(26)}
@@ -15,7 +23,7 @@ async function boot() {
       <div class="sub">GUIZANG · SETTINGS</div>
     </div>
     <div class="gap"></div>
-    <span class="ver mono">v0.4.0</span>`;
+    <span class="ver mono">v${appVersion()}</span>`;
 
   const summary = await send('summary:load');
   fill(summary.settings);
