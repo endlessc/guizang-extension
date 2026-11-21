@@ -33,9 +33,12 @@ const S = {
   editing: null,       // 正在编辑的书签 { id, title, url }
   aiBusy: false,
   aiProgress: null,
-  plan: null,          // 整理计划（只读，执行在下一步）
+  plan: null,          // 整理计划
   planBusy: false,
   planProgress: null,
+  applyBusy: false,
+  applyProgress: null,
+  journal: null,       // 最近一次可撤销的整理
   done: [],            // 刚归入的，做即时反馈
 };
 
@@ -782,6 +785,14 @@ function renderInspector() {
   wireDetail(it);
 }
 
+async function undoJournal(id) {
+  const r = await send('organize:undo', { journalId: id }).catch((err) => ({ error: err.message }));
+  if (r.error) return toast(r.error);
+  toast(`已撤销 ${r.restored} 条`);
+  S.journal = null;
+  await load();
+}
+
 function openOrganize() {
   S.drawer = 'organize';
   S.selected = null;
@@ -800,9 +811,21 @@ function organizePanel() {
           <button class="ibtn" data-close title="收起">${icon('x', 13)}</button>
         </div>
       </div>
-      <h2 class="insp-title">${busy ? '正在生成' : plan ? plan.ops.length + ' 条待整理' : '还没有计划'}</h2>
+      <h2 class="insp-title">${S.applyBusy ? '正在整理' : busy ? '正在生成' : plan ? plan.ops.length + ' 条待整理' : '还没有计划'}</h2>
       <p class="insp-sub">按已安装的方案把待归类书签归位。生成计划只读，不会移动任何书签。</p>
     </div>`;
+
+  if (S.applyBusy) {
+    const ap = S.applyProgress || { done: 0, total: 0 };
+    const pct = ap.total ? Math.round((ap.done / ap.total) * 100) : 6;
+    return head + `<div class="insp-body">
+      <div class="plan-busy">
+        <div class="plan-busy-line">正在移动 ${ap.done}/${ap.total || '…'}</div>
+        <div class="scan-track" style="background:rgba(34,73,110,.14)"><div class="scan-fill" style="width:${pct}%"></div></div>
+        <button class="btn btn-line btn-sm" data-stop style="margin-top:12px">停止</button>
+      </div>
+    </div>`;
+  }
 
   if (busy) {
     const pr = S.planProgress || { stage: 'preselect', done: 0, total: 0 };
@@ -821,9 +844,10 @@ function organizePanel() {
       <div class="plan-empty">
         <div class="plan-empty-line">当前方案：${ready ? `${S.scheme.length} 个类目` : '还没有可用的分类目录'}</div>
         <div class="plan-empty-hint">${ready
-          ? '生成后会按类目列出「该挪去哪」，你可以逐条剔除或改判；执行在下一步接入。'
+          ? '生成后会按类目列出「该挪去哪」，你可以逐条剔除或改判；确认无误再执行。'
           : '先到设置页装一套方案（杜威、中图法等），再回来生成计划。'}</div>
         <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
+        ${S.journal ? `<div class="plan-last">上次整理移动了 <b>${S.journal.applied}</b> 条${S.journal.failed ? `，失败 ${S.journal.failed}` : ''}<button class="btn btn-ghost btn-sm" data-undo>撤销</button></div>` : ''}
       </div>
     </div>`;
   }
@@ -852,6 +876,7 @@ function organizePanel() {
     <div class="insp-foot plan-foot">
       <div class="plan-foot-line">生成于 ${relTime(plan.at)}${plan.overflow ? ` · 还有 ${plan.overflow} 条没纳入` : ''}</div>
       <div class="plan-foot-actions">
+        <button class="btn btn-primary btn-sm" data-apply ${s.ready ? '' : 'disabled'}>执行 ${s.ready} 条</button>
         <button class="btn btn-line btn-sm" data-gen>重新生成</button>
         <button class="btn btn-ghost btn-sm" data-clear>清空</button>
       </div>
@@ -914,6 +939,26 @@ function wireOrganize() {
       const plan = await send('organize:drop', { id: btn.dataset.drop }).catch(() => null);
       if (plan) { S.plan = plan; renderInspector(); renderRail(); }
     });
+  });
+
+  box.querySelector('[data-apply]')?.addEventListener('click', async () => {
+    S.applyBusy = true;
+    S.applyProgress = { done: 0, total: (S.plan && S.plan.stats.ready) || 0 };
+    renderInspector();
+    await send('organize:apply').catch((err) => {
+      S.applyBusy = false;
+      toast(err.message);
+      renderInspector();
+    });
+  });
+
+  box.querySelector('[data-stop]')?.addEventListener('click', async () => {
+    await send('organize:stop').catch(() => {});
+    toast('正在停下…');
+  });
+
+  box.querySelector('[data-undo]')?.addEventListener('click', () => {
+    if (S.journal) undoJournal(S.journal.id);
   });
 
   box.querySelectorAll('[data-pick]').forEach((sel) => {
@@ -1456,7 +1501,10 @@ async function load() {
   if (org) {
     S.plan = org.plan || null;
     S.planBusy = Boolean(org.running);
+    S.applyBusy = Boolean(org.applying);
   }
+  const jr = await send('organize:journal').catch(() => null);
+  if (jr) S.journal = jr.latest;
   S.loaded = true;
   renderAll();
 }
@@ -1520,6 +1568,29 @@ onBroadcast((msg) => {
   if (msg.type === 'organize:progress') {
     S.planProgress = { stage: msg.stage, done: msg.done, total: msg.total };
     renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:apply-start') {
+    S.applyBusy = true;
+    S.applyProgress = { done: 0, total: msg.total };
+    renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:apply-progress') {
+    S.applyProgress = { done: msg.done, total: msg.total };
+    renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:applied') {
+    S.applyBusy = false;
+    S.applyProgress = null;
+    S.journal = msg.entry || null;
+    renderInspector();
+    renderRail();
+    toast(
+      `已移动 ${msg.entry ? msg.entry.applied : 0} 条${msg.failed ? `，失败 ${msg.failed}` : ''}${msg.stopped ? '（已停止）' : ''}`,
+      msg.entry ? { actionText: '撤销', onAction: () => undoJournal(msg.entry.id) } : undefined,
+    );
     return;
   }
   if (msg.type === 'organize:done') {

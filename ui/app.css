@@ -979,3 +979,7 @@ kbd{
 .plan-foot{ display:flex; flex-direction:column; gap:8px; }
 .plan-foot-line{ font-size:11px; color:var(--ink-4); }
 .plan-foot-actions{ display:flex; gap:6px; }
+.plan-last{
+  display:flex; align-items:center; gap:8px;
+  font-size:11.5px; color:var(--ink-3); margin-top:2px;
+}

@@ -12,7 +12,7 @@ import { planInstall } from '../lib/scheme-install.js';
 import { flattenTree, checkBackupReady } from '../lib/backup.js';
 import { PROTO } from '../lib/version.js';
 import { classify, classifyHeuristic, DEFAULT_SETTINGS } from '../lib/llm.js';
-import { buildPlan, dropOp, overrideOp } from '../lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 
 const FOLDERS = [
   ['000', '综合与工具'],
@@ -111,6 +111,7 @@ let pending = {};
 let mockTheme = 'system';
 let settings = { ...DEFAULT_SETTINGS };
 let plan = null;           // 整理计划（本地预览内存态）
+let journal = [];          // 整理日志
 let backups = [];          // 只存索引（本地预览用，刷新即重置）
 let backupNodes = {};      // id → 完整快照
 let backupSeq = 0;
@@ -387,7 +388,69 @@ async function handle(msg) {
     emit({ type: 'organize:done', plan });
     return { started: true };
   }
-  if (type === 'organize:load') return { plan, running: false };
+  if (type === 'organize:load') return { plan, running: false, applying: false };
+
+  if (type === 'organize:apply') {
+    if (!plan) throw new Error('还没有整理计划');
+    const ops = readyOps(plan);
+    if (!ops.length) throw new Error('计划里没有可执行的条目');
+    // 真实后台在这里会先补一份备份，本地预览照做，避免预览和真机行为不一致
+    if (!backups.length) {
+      const meta = await handle({ type: 'backup:run', planId: plan.id });
+      emit({ type: 'organize:backup-made', meta });
+    }
+    emit({ type: 'organize:apply-start', total: ops.length });
+    const done = [];
+    let failed = 0;
+    for (const op of ops) {
+      const node = findNode(op.id);
+      const target = [...findNode('1').children].find((c) => !c.url && String(c.title).startsWith(op.to.code + ' '));
+      if (!node || !target) { failed += 1; continue; }
+      const fromFolderId = node.parentId;
+      const fromIndex = node.index || 0;
+      detach(node);
+      node.parentId = target.id;
+      target.children.push(node);
+      done.push({ id: op.id, fromFolderId, fromIndex, toFolderId: target.id, code: op.to.code });
+    }
+    const entry = {
+      id: 'j' + Date.now().toString(36), at: Date.now(), planId: plan.id,
+      applied: done.length, failed, ops: done,
+    };
+    journal = [entry, ...journal].slice(0, 3);
+    plan = null;
+    emit({ type: 'organize:applied', entry: { ...entry, ops: undefined, count: done.length }, failed, total: ops.length, stopped: false });
+    emit({ type: 'organize:done', plan: null });
+    emit({ type: 'state:changed' });
+    return { applied: done.length, failed, journalId: entry.id };
+  }
+
+  if (type === 'organize:stop') return { stopping: true };
+
+  if (type === 'organize:undo') {
+    const entry = msg.journalId ? journal.find((e) => e.id === msg.journalId) : journal.find((e) => !e.undoneAt);
+    if (!entry) throw new Error('没有可撤销的整理记录');
+    let restored = 0;
+    for (const rec of [...entry.ops].reverse()) {
+      const node = findNode(rec.id);
+      const parent = findNode(rec.fromFolderId);
+      if (!node || !parent) continue;
+      detach(node);
+      node.parentId = parent.id;
+      parent.children.splice(Math.min(rec.fromIndex, parent.children.length), 0, node);
+      restored += 1;
+    }
+    entry.undoneAt = Date.now();
+    emit({ type: 'state:changed' });
+    return { restored, total: entry.ops.length };
+  }
+
+  if (type === 'organize:journal') {
+    return {
+      latest: journal.find((e) => !e.undoneAt) || null,
+      list: journal.map(({ ops, ...rest }) => ({ ...rest, count: (ops || []).length })),
+    };
+  }
   if (type === 'organize:cancel') {
     plan = null;
     emit({ type: 'organize:done', plan: null });

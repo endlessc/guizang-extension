@@ -12,13 +12,16 @@ import { saveBackup, listBackups, exportBackup, clearBackups, checkBackupReady }
 import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
 import { classify, classifyHeuristic, classifyWithModel, hasModel, testConnection, DEFAULT_SETTINGS } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, MAX_CANDIDATES } from './lib/organize.js';
+import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 
 const KEYS = ['settings', 'health', 'pending'];
 const PLAN_KEY = 'plan';
 
 /** 整理计划的生成进度（只在内存里，页面靠广播） */
 let organize = { running: false, stage: '', done: 0, total: 0 };
+let applyCtl = { running: false, stop: false };
+const JOURNAL_KEY = 'journal';
 
 /** 正在跑的检测，只存在内存里；页面靠它显示进度 */
 let scan = { running: false, done: 0, total: 0, startedAt: 0 };
@@ -94,6 +97,107 @@ function collectManagedIds(tree) {
   };
   if (tree && tree[0]) walk(tree[0], false);
   return set;
+}
+
+async function readJournal() {
+  const { journal } = await chrome.storage.local.get(JOURNAL_KEY);
+  return Array.isArray(journal) ? journal : [];
+}
+
+/** 动手前保证有一份「不早于计划」的备份；没有就当场做一份，做不出来就抛 */
+async function ensureBackupFor(plan) {
+  const ready = checkBackupReady(await listBackups(), { id: plan.id, at: plan.at });
+  if (ready.ok) return ready.backup;
+  const settings = await readSettings();
+  const tree = await chrome.bookmarks.getTree();
+  const meta = await saveBackup(tree, { planId: plan.id, schemeId: settings.schemeId || '' });
+  broadcast({ type: 'organize:backup-made', meta });
+  return meta;
+}
+
+/** 按类目批量移动，每 25 条让出一次事件循环；随时可停 */
+async function runApply() {
+  if (applyCtl.running) throw new Error('上一次整理还没结束');
+  const plan = await readPlan();
+  const ops = readyOps(plan);
+  if (!ops.length) throw new Error('计划里没有可执行的条目');
+
+  await ensureBackupFor(plan);
+
+  const settings = await readSettings();
+  const tree = await chrome.bookmarks.getTree();
+  const { scheme } = parseTree(tree, parseOptsOf(settings.schemeId));
+  const folderOf = new Map(scheme.map((f) => [f.code, f.id]));
+
+  applyCtl = { running: true, stop: false };
+  broadcast({ type: 'organize:apply-start', total: ops.length });
+
+  const done = [];
+  let failed = 0;
+  let stopped = false;
+  for (let i = 0; i < ops.length; i += 1) {
+    if (applyCtl.stop) { stopped = true; break; }
+    const op = ops[i];
+    const target = folderOf.get(op.to.code);
+    if (!target) { failed += 1; continue; }
+    try {
+      const [node] = await chrome.bookmarks.get(op.id);
+      await chrome.bookmarks.move(op.id, { parentId: target });
+      done.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code: op.to.code });
+    } catch (e) {
+      failed += 1;
+    }
+    if (i % 25 === 24) {
+      broadcast({ type: 'organize:apply-progress', done: done.length + failed, total: ops.length });
+      await new Promise((r) => setTimeout(r, 0));
+    }
+  }
+
+  const entry = {
+    id: 'j' + Date.now().toString(36),
+    at: Date.now(),
+    planId: plan.id,
+    applied: done.length,
+    failed,
+    ops: done,
+  };
+  const journal = pushEntry(await readJournal(), entry);
+  await chrome.storage.local.set({ [JOURNAL_KEY]: journal });
+  await chrome.storage.local.remove(PLAN_KEY);
+  applyCtl = { running: false, stop: false };
+
+  broadcast({ type: 'organize:applied', entry: { ...entry, ops: undefined, count: done.length }, failed, total: ops.length, stopped });
+  broadcast({ type: 'organize:done', plan: null });
+  broadcast({ type: 'state:changed' });
+  return { applied: done.length, failed, journalId: entry.id };
+}
+
+/** 撤销：只把这次动过的条目 move 回原处（含 index），不碰别的书签 */
+async function runUndo(journalId) {
+  const list = await readJournal();
+  const entry = journalId ? findEntry(list, journalId) : latestEntry(list);
+  if (!entry) throw new Error('没有可撤销的整理记录');
+  if (entry.undoneAt) throw new Error('这次整理已经撤销过了');
+
+  let restored = 0;
+  for (const rec of [...(entry.ops || [])].reverse()) {
+    try {
+      await chrome.bookmarks.move(rec.id, { parentId: rec.fromFolderId, index: rec.fromIndex });
+      restored += 1;
+    } catch (e) {
+      // index 可能越界（原文件夹里删过东西），退一步只还原父目录
+      try {
+        await chrome.bookmarks.move(rec.id, { parentId: rec.fromFolderId });
+        restored += 1;
+      } catch (e2) {
+        // 原目录被删了就真的回不去了，跳过
+      }
+    }
+  }
+  const next = markUndone(list, entry.id);
+  await chrome.storage.local.set({ [JOURNAL_KEY]: next });
+  broadcast({ type: 'state:changed' });
+  return { restored, total: (entry.ops || []).length };
 }
 
 async function readPlan() {
@@ -506,7 +610,31 @@ const handlers = {
 
   'organize:load': async () => {
     const { plan } = await chrome.storage.local.get(PLAN_KEY);
-    return { plan: plan || null, running: organize.running };
+    return { plan: plan || null, running: organize.running, applying: applyCtl.running, stopping: applyCtl.stop };
+  },
+
+  /** 执行计划。备份闸门在这里：没有合规备份就当场做一份，做不出来才拒绝。 */
+  'organize:apply': async () => {
+    runApply().catch((e) => {
+      applyCtl = { running: false, stop: false };
+      broadcast({ type: 'organize:error', message: String((e && e.message) || e) });
+    });
+    return { started: true };
+  },
+
+  'organize:stop': async () => {
+    applyCtl.stop = true;
+    return { stopping: true };
+  },
+
+  'organize:undo': async ({ journalId } = {}) => runUndo(journalId),
+
+  'organize:journal': async () => {
+    const list = await readJournal();
+    return {
+      latest: latestEntry(list),
+      list: list.map(({ ops, ...rest }) => ({ ...rest, count: (ops || []).length })),
+    };
   },
 
   'organize:cancel': async () => {
