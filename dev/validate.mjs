@@ -86,6 +86,7 @@ const PERM_OF_API = {
   alarms: 'alarms',
   scripting: 'scripting',
   history: 'history',
+  contextMenus: 'contextMenus',
 };
 const usedApis = new Set();
 for (const f of jsFiles.filter((x) => !x.includes('dev/'))) {
@@ -94,8 +95,9 @@ for (const f of jsFiles.filter((x) => !x.includes('dev/'))) {
 }
 const declared = new Set([
   ...(manifest.permissions || []),
+  ...(manifest.optional_permissions || []),
   ...(manifest.host_permissions || []),
-  'runtime', 'i18n', 'extension',
+  'runtime', 'i18n', 'extension', 'omnibox', 'commands', 'action', 'permissions', 'windows',
 ]);
 for (const api of usedApis) {
   const need = PERM_OF_API[api];

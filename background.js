@@ -1,27 +1,41 @@
 /**
  * 归藏 · service worker
  *
- * 所有需要跨域、需要 bookmarks 权限的活儿都在这里做：
- * 读书签树、移动、批量体检、调模型。UI 只管画。
+ * 所有需要跨域、需要 bookmarks / omnibox / contextMenus / commands / optional(history, alarms)
+ * 的活儿都在这里做：读书签树、移动、批量体检、调模型、地址栏秒搜、右键快收、定期静默体检。
  */
 
 import { parseTree, INBOX_TITLE } from './lib/tree.js';
-import { parseOptsOf, listSchemes, getScheme } from './lib/schemes.js';
+import { parseOptsOf, listSchemes, getScheme, sanitizeCustomScheme } from './lib/schemes.js';
 import { planInstall } from './lib/scheme-install.js';
-import { saveBackup, listBackups, exportBackup, clearBackups, checkBackupReady } from './lib/backup.js';
+import {
+  saveBackup, listBackups, exportBackup, clearBackups,
+  checkBackupReady, readBackup, validateSnapshot, rebuildSubtree,
+} from './lib/backup.js';
 import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
-import { classify, classifyHeuristic, classifyWithModel, hasModel, testConnection, DEFAULT_SETTINGS } from './lib/llm.js';
+import {
+  classify, classifyHeuristic, classifyWithModel, cleanTitles,
+  hasModel, testConnection, DEFAULT_SETTINGS,
+} from './lib/llm.js';
 import { buildPlan, dropOp, overrideOp, readyOps, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
+import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
+import { buildOmniboxSuggestions } from './lib/search.js';
+import {
+  normalizeMeta, pruneMeta, emptyLearned, recordOverride,
+  removeLearnedDomain, analyzeUsage, pickSerendipity,
+} from './lib/meta.js';
+import { fetchPageHead, isWeakTitle, lookupWayback } from './lib/head.js';
 
-const KEYS = ['settings', 'health', 'pending'];
+const KEYS = ['settings', 'health', 'pending', 'meta', 'learned', 'usageCache'];
 const PLAN_KEY = 'plan';
+const JOURNAL_KEY = 'journal';
+const WEEKLY_ALARM = 'guizang-weekly-check';
 
 /** 整理计划的生成进度（只在内存里，页面靠广播） */
 let organize = { running: false, stage: '', done: 0, total: 0 };
 let applyCtl = { running: false, stop: false };
-const JOURNAL_KEY = 'journal';
 
 /** 正在跑的检测，只存在内存里；页面靠它显示进度 */
 let scan = { running: false, done: 0, total: 0, startedAt: 0 };
@@ -32,13 +46,22 @@ async function readSettings() {
   return { ...DEFAULT_SETTINGS, ...(settings || {}) };
 }
 
+function parseOptsFor(settings) {
+  return parseOptsOf(settings.schemeId, settings.customSchemes || []);
+}
+
+async function readLearned() {
+  const { learned } = await chrome.storage.local.get('learned');
+  return learned && learned.domains ? learned : emptyLearned();
+}
+
 /**
  * 找到「待归类」文件夹；没有就建一个。
  * 只在真要写书签时调用（保存 / 打开弹窗），读状态时不做多余副作用。
  */
-async function ensureInbox(tree, schemeId) {
-  // 注意：这里必须传 schemeId，否则装了字母方案后「待归类」的判定会退化
-  const opts = parseOptsOf(schemeId);
+async function ensureInbox(tree, settings) {
+  const s = settings || (await readSettings());
+  const opts = parseOptsFor(s);
   const t1 = tree || (await chrome.bookmarks.getTree());
   const p1 = parseTree(t1, opts);
   if (p1.inboxId) return { tree: t1, parsed: p1, inboxId: p1.inboxId, created: false };
@@ -50,15 +73,17 @@ async function ensureInbox(tree, schemeId) {
 }
 
 async function loadState() {
-  // 先读设置：解析要用 settings.schemeId 决定字母编码是否生效
   const store = await chrome.storage.local.get(KEYS);
   const settings = { ...DEFAULT_SETTINGS, ...(store.settings || {}) };
   const tree = await chrome.bookmarks.getTree();
-  const { items, folders, scheme, inboxId } = parseTree(tree, parseOptsOf(settings.schemeId));
+  const { items, folders, scheme, inboxId } = parseTree(tree, parseOptsFor(settings));
   const health = store.health || {};
   const pending = store.pending || {};
+  const rawMeta = store.meta || {};
+  const learned = store.learned && store.learned.domains ? store.learned : emptyLearned();
+  const usageCache = store.usageCache || null;
 
-  // 清理已经不存在的书签，别让缓存无限长
+  // 清理已经不存在的书签缓存
   const alive = new Set(items.map((i) => i.id));
   let dirty = false;
   for (const id of Object.keys(health)) {
@@ -67,7 +92,10 @@ async function loadState() {
   for (const id of Object.keys(pending)) {
     if (!alive.has(id)) { delete pending[id]; dirty = true; }
   }
-  if (dirty) await chrome.storage.local.set({ health, pending });
+  const pruned = pruneMeta(rawMeta, alive);
+  if (dirty || pruned.dirty) {
+    await chrome.storage.local.set({ health, pending, meta: pruned.meta });
+  }
 
   return {
     items,
@@ -76,6 +104,9 @@ async function loadState() {
     inboxId,
     health,
     pending,
+    meta: pruned.meta,
+    learned,
+    usageCache,
     settings,
     aiReady: hasModel(settings),
     scan,
@@ -83,8 +114,39 @@ async function loadState() {
 }
 
 function broadcast(message) {
-  // 没有页面在听的时候 sendMessage 会 reject，这里忽略即可
   chrome.runtime.sendMessage(message).catch(() => {});
+}
+
+/** 扩展图标徽标提示：只在有新失效或快收反馈时轻亮 */
+async function flashBadge(text, color = '#1E4468', durationMs = 2400) {
+  if (!chrome.action?.setBadgeText) return;
+  try {
+    await chrome.action.setBadgeBackgroundColor({ color });
+    await chrome.action.setBadgeText({ text: String(text) });
+    if (durationMs > 0) {
+      setTimeout(() => {
+        chrome.action.setBadgeText({ text: '' }).catch(() => {});
+      }, durationMs);
+    }
+  } catch {}
+}
+
+/** 为信息量过弱的条目并发流式抓取 <head> 摘要（最多 16 条，避免拖慢归类） */
+async function enrichWeakHeads(items, settings) {
+  if (!settings.fetchHeadOnAi) return {};
+  const weak = items.filter((it) => isWeakTitle(it.title, it.url) && /^https?:/i.test(it.url)).slice(0, 16);
+  if (!weak.length) return {};
+  const pageMeta = {};
+  const queue = weak.slice();
+  const workers = Array.from({ length: Math.min(4, queue.length) }, async () => {
+    while (queue.length) {
+      const it = queue.shift();
+      const head = await fetchPageHead(it.url, { timeout: 4500 });
+      if (head && (head.title || head.desc)) pageMeta[it.id] = head;
+    }
+  });
+  await Promise.all(workers);
+  return pageMeta;
 }
 
 /** 受管书签（企业策略）及其子树：Chrome 会拒绝移动，计划里先标出来 */
@@ -126,7 +188,7 @@ async function runApply() {
 
   const settings = await readSettings();
   const tree = await chrome.bookmarks.getTree();
-  const { scheme } = parseTree(tree, parseOptsOf(settings.schemeId));
+  const { scheme } = parseTree(tree, parseOptsFor(settings));
   const folderOf = new Map(scheme.map((f) => [f.code, f.id]));
 
   applyCtl = { running: true, stop: false };
@@ -144,7 +206,7 @@ async function runApply() {
       const [node] = await chrome.bookmarks.get(op.id);
       await chrome.bookmarks.move(op.id, { parentId: target });
       done.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code: op.to.code });
-    } catch (e) {
+    } catch {
       failed += 1;
     }
     if (i % 25 === 24) {
@@ -157,6 +219,7 @@ async function runApply() {
     id: 'j' + Date.now().toString(36),
     at: Date.now(),
     planId: plan.id,
+    scope: plan.scope || 'inbox',
     applied: done.length,
     failed,
     ops: done,
@@ -184,14 +247,11 @@ async function runUndo(journalId) {
     try {
       await chrome.bookmarks.move(rec.id, { parentId: rec.fromFolderId, index: rec.fromIndex });
       restored += 1;
-    } catch (e) {
-      // index 可能越界（原文件夹里删过东西），退一步只还原父目录
+    } catch {
       try {
         await chrome.bookmarks.move(rec.id, { parentId: rec.fromFolderId });
         restored += 1;
-      } catch (e2) {
-        // 原目录被删了就真的回不去了，跳过
-      }
+      } catch {}
     }
   }
   const next = markUndone(list, entry.id);
@@ -213,27 +273,34 @@ async function writePlan(plan) {
 }
 
 /**
- * 生成整理计划：预筛 → 本地规则 → 低置信度送模型 → 冲突消解。
+ * 生成整理计划：预筛 → 历史偏好/本地规则 → 低置信度送模型（附带弱标题 <head> 摘要）→ 冲突消解。
  * 全程只读书签，不动任何数据。
  */
-async function runOrganize(scope) {
+async function runOrganize(scope = 'inbox', folderCode = '') {
   organize = { running: true, stage: 'preselect', done: 0, total: 0 };
   broadcast({ type: 'organize:start' });
   try {
     const state = await loadState();
-    const { items, scheme, settings } = state;
+    const { items, scheme, settings, learned } = state;
     if (!scheme.length) throw new Error('还没有分类目录，先到设置里装一套方案');
 
-    const picked = (scope === 'all' ? items : items.filter((it) => !it.code)).slice(0, MAX_CANDIDATES);
+    const picked = (
+      scope === 'all' ? items
+      : scope === 'folder' && folderCode ? items.filter((it) => it.code === folderCode)
+      : items.filter((it) => !it.code)
+    ).slice(0, MAX_CANDIDATES);
+
     organize.total = picked.length;
     organize.done = picked.length;
     broadcast({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
 
-    // 本地关键词规则先跑：零成本，能定的先定
+    // 本地关键词规则 + 历史改判偏好先跑：零成本，能定的先定
     const suggestions = {};
-    for (const s of classifyHeuristic(picked, scheme)) suggestions[s.id] = { ...s };
+    for (const s of classifyHeuristic(picked, scheme, { schemeId: settings.schemeId, learned })) {
+      suggestions[s.id] = { ...s };
+    }
 
-    // 只把「本地没把握」的送去模型，别拿几千条去烧 token
+    // 只把「本地没把握」的送去模型
     const lowConf = picked.filter((it) => (suggestions[it.id].conf || 0) < 0.55).slice(0, MAX_CANDIDATES);
     if (hasModel(settings) && lowConf.length) {
       organize.stage = 'model';
@@ -241,13 +308,19 @@ async function runOrganize(scope) {
       organize.done = 0;
       broadcast({ type: 'organize:progress', stage: 'model', done: 0, total: lowConf.length });
       try {
-        const refined = await classifyWithModel(lowConf, scheme, settings, (done, total) => {
-          organize.done = done;
-          broadcast({ type: 'organize:progress', stage: 'model', done, total });
-        });
+        const pageMeta = await enrichWeakHeads(lowConf, settings);
+        const refined = await classifyWithModel(
+          lowConf,
+          scheme,
+          settings,
+          (done, total) => {
+            organize.done = done;
+            broadcast({ type: 'organize:progress', stage: 'model', done, total });
+          },
+          { learned, pageMeta },
+        );
         for (const s of refined) suggestions[s.id] = { ...s };
       } catch (e) {
-        // 模型不通不耽误出计划，退回本地规则
         broadcast({ type: 'organize:warn', message: '模型没走通，先用本地规则：' + String((e && e.message) || e) });
       }
     }
@@ -257,6 +330,7 @@ async function runOrganize(scope) {
       items,
       scheme,
       scope,
+      folderCode,
       suggestions,
       blocked: collectManagedIds(tree),
     });
@@ -267,26 +341,34 @@ async function runOrganize(scope) {
   }
 }
 
-async function moveToCode(ids, code) {
+async function moveToCode(ids, code, { learn = false } = {}) {
   const settings = await readSettings();
   const tree = await chrome.bookmarks.getTree();
-  const { scheme } = parseTree(tree, parseOptsOf(settings.schemeId));
+  const { items, scheme } = parseTree(tree, parseOptsFor(settings));
   const target = scheme.find((f) => f.code === code);
   if (!target) throw new Error(`找不到类目 ${code}，可能分类文件夹被改名或删除了`);
+  const byId = new Map(items.map((x) => [x.id, x]));
+  let learned = learn ? await readLearned() : null;
   let moved = 0;
+  const ops = [];
   for (const id of ids) {
     try {
+      const [node] = await chrome.bookmarks.get(id);
       await chrome.bookmarks.move(id, { parentId: target.id });
+      ops.push({ id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target.id, code });
+      if (learn && byId.has(id)) {
+        learned = recordOverride(learned, byId.get(id), code);
+      }
       moved += 1;
     } catch (e) {
-      // 单条失败不打断整批
       console.warn('[归藏] 移动失败', id, e);
     }
   }
-  return { moved, folderId: target.id, code, name: target.name };
+  if (learn && learned) await chrome.storage.local.set({ learned });
+  return { moved, folderId: target.id, code, name: target.name, ops };
 }
 
-async function runHealth(ids, opts) {
+async function runHealth(ids, { silent = false } = {}) {
   if (scan.running) throw new Error('上一次检测还没结束');
   const state = await loadState();
   const settings = state.settings;
@@ -296,17 +378,12 @@ async function runHealth(ids, opts) {
     .slice(0, Math.max(1, settings.checkLimit || 60))
     .map((it) => ({ id: it.id, url: it.url }));
 
-  if (!targets.length) return { started: false, total: 0 };
+  if (!targets.length) return { started: false, total: 0, newDead: 0 };
 
   scanAbort = new AbortController();
   scan = { running: true, done: 0, total: targets.length, startedAt: Date.now() };
-  broadcast({ type: 'scan:start', total: targets.length });
+  if (!silent) broadcast({ type: 'scan:start', total: targets.length });
 
-  /*
-   * 结果先在内存里攒着，定时整批落盘。
-   * 每完成一条就「读一次 storage 再写回去」的话，四条并发会互相覆盖，
-   * 场面是：界面显示检测了 60 条，storage 里只剩十几条。
-   */
   const acc = {};
   let flushing = null;
   const flush = () => {
@@ -330,14 +407,19 @@ async function runHealth(ids, opts) {
       onProgress: (done, total, id, r) => {
         scan.done = done;
         acc[id] = r;
-        broadcast({ type: 'scan:progress', done, total, id, result: r });
+        if (!silent) broadcast({ type: 'scan:progress', done, total, id, result: r });
       },
     });
     clearInterval(timer);
     await flush();
+    const deadStatuses = new Set(['dead', 'error', 'timeout', 'unreachable']);
+    const newDead = Object.values(results).filter((r) => deadStatuses.has(r.status)).length;
     scan = { running: false, done: Object.keys(results).length, total: targets.length, startedAt: 0 };
-    broadcast({ type: 'scan:done', total: targets.length });
-    return { started: true, total: targets.length };
+    if (!silent) broadcast({ type: 'scan:done', total: targets.length });
+    if (silent && newDead > 0) {
+      await flashBadge(newDead > 99 ? '99+' : String(newDead), '#A8341E', 0);
+    }
+    return { started: true, total: targets.length, newDead };
   } catch (e) {
     clearInterval(timer);
     await flush();
@@ -346,11 +428,125 @@ async function runHealth(ids, opts) {
   }
 }
 
+/** 同步定期静默检测闹钟（需已授权 alarms 权限） */
+async function syncWeeklyAlarm(enabled) {
+  if (!chrome.alarms) return { active: false };
+  try {
+    const has = chrome.permissions ? await chrome.permissions.contains({ permissions: ['alarms'] }) : true;
+    if (!has || !enabled) {
+      await chrome.alarms.clear(WEEKLY_ALARM).catch(() => {});
+      return { active: false };
+    }
+    await chrome.alarms.create(WEEKLY_ALARM, { delayInMinutes: 60, periodInMinutes: 10080 });
+    return { active: true };
+  } catch {
+    return { active: false };
+  }
+}
+
+/** 收纳当前窗口全部 http/https 标签页到待归类（或指定文件夹） */
+async function stashWindowTabs({ folderId = '', closeTabs = false } = {}) {
+  const settings = await readSettings();
+  const { parsed, inboxId } = await ensureInbox(undefined, settings);
+  const targetId = folderId || inboxId;
+  const existingNorm = new Set(parsed.items.map((it) => normalizeUrl(it.url)));
+  const tabs = await chrome.tabs.query({ currentWindow: true });
+
+  let saved = 0;
+  let skipped = 0;
+  const createdIds = [];
+  const toClose = [];
+
+  for (const t of tabs) {
+    if (!t.url || !/^https?:/i.test(t.url)) continue;
+    const norm = normalizeUrl(t.url);
+    if (existingNorm.has(norm)) {
+      skipped += 1;
+      if (closeTabs && !t.pinned && !t.active) toClose.push(t.id);
+      continue;
+    }
+    existingNorm.add(norm);
+    const node = await chrome.bookmarks.create({ parentId: targetId, title: t.title || t.url, url: t.url });
+    createdIds.push(node.id);
+    saved += 1;
+    if (closeTabs && !t.pinned && !t.active) toClose.push(t.id);
+  }
+
+  if (toClose.length) {
+    await chrome.tabs.remove(toClose).catch(() => {});
+  }
+  broadcast({ type: 'state:changed' });
+  return { saved, skipped, createdIds, closed: toClose.length };
+}
+
+/** 把任意快照安全恢复到一个带时间戳的新目录，绝不覆盖现有书签 */
+async function restoreSnapshotSafe(snapshot) {
+  const snap = validateSnapshot(snapshot);
+  const settings = await readSettings();
+  const currentTree = await chrome.bookmarks.getTree();
+  // 先为当前状态自动留一份退路
+  await saveBackup(currentTree, { planId: 'pre-restore', schemeId: settings.schemeId || '' });
+
+  const bar = (currentTree[0].children || []).find((n) => !n.url) || currentTree[0].children[0];
+  const d = new Date(snap.at);
+  const label = `归藏恢复 ${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+  const container = await chrome.bookmarks.create({ parentId: bar.id, title: label });
+
+  const roots = rebuildSubtree(snap.nodes);
+  let folders = 0;
+  let bookmarks = 0;
+
+  async function writeNode(node, parentId) {
+    if (node.url) {
+      await chrome.bookmarks.create({ parentId, title: node.title || node.url, url: node.url });
+      bookmarks += 1;
+      return;
+    }
+    // 跳过最外层 Chrome 内置根外壳，若没有子节点则跳过
+    const folder = await chrome.bookmarks.create({ parentId, title: node.title || '未命名文件夹' });
+    folders += 1;
+    for (const c of node.children || []) {
+      await writeNode(c, folder.id);
+    }
+  }
+
+  for (const r of roots) {
+    await writeNode(r, container.id);
+  }
+  broadcast({ type: 'state:changed' });
+  return { folderId: container.id, label, folders, bookmarks };
+}
+
+async function openManagerTab({ view, drawer, id, hash, q } = {}) {
+  const managerUrlPrefix = chrome.runtime.getURL('ui/manager.html');
+  let targetHash = hash || '';
+  if (!targetHash) {
+    const parts = [];
+    if (view) parts.push(`view=${encodeURIComponent(view)}`);
+    if (drawer) parts.push(`drawer=${encodeURIComponent(drawer)}`);
+    if (id) parts.push(`id=${encodeURIComponent(id)}`);
+    if (q) parts.push(`q=${encodeURIComponent(q)}`);
+    targetHash = parts.join('&');
+  }
+  const targetUrl = targetHash ? `${managerUrlPrefix}#${targetHash}` : managerUrlPrefix;
+
+  const tabs = await chrome.tabs.query({});
+  const existing = tabs.find((t) => t.url && t.url.startsWith(managerUrlPrefix));
+  if (existing) {
+    await chrome.tabs.update(existing.id, { active: true, url: targetUrl });
+    if (existing.windowId && chrome.windows?.update) {
+      await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
+    }
+    return { ok: true, reused: true };
+  }
+  await chrome.tabs.create({ url: targetUrl });
+  return { ok: true, created: true };
+}
+
 /* ── 消息路由 ─────────────────────────────────── */
 
 const handlers = {
-  /** 握手：页面靠它判断后台是不是同一个版本 */
-  'ping': async () => ({
+  ping: async () => ({
     proto: PROTO,
     version: chrome.runtime.getManifest().version,
   }),
@@ -368,15 +564,14 @@ const handlers = {
     return { theme };
   },
 
-  /** 弹窗/侧边栏只要摘要，别把几千条书签塞进消息通道 */
   'summary:load': async () => {
-    const { settings = {} } = await chrome.storage.local.get('settings');
-    const merged = { ...DEFAULT_SETTINGS, ...settings };
-    const { parsed, inboxId } = await ensureInbox(undefined, merged.schemeId);
+    const settings = await readSettings();
+    const { parsed, inboxId } = await ensureInbox(undefined, settings);
     const { items, scheme } = parsed;
-    const { health = {}, pending = {} } = await chrome.storage.local.get(['health', 'pending']);
+    const { health = {}, pending = {}, meta = {} } = await chrome.storage.local.get(['health', 'pending', 'meta']);
     let dead = 0;
     let susp = 0;
+    let moved = 0;
     let unchecked = 0;
     let inbox = 0;
     for (const it of items) {
@@ -385,20 +580,29 @@ const handlers = {
       if (!h) unchecked += 1;
       else if (h.status === 'dead' || h.status === 'error' || h.status === 'timeout' || h.status === 'unreachable') dead += 1;
       else if (h.status === 'blocked') susp += 1;
+      else if (h.status === 'moved') moved += 1;
     }
+    const dups = findDuplicates(items);
+    const serendipity = pickSerendipity(items, { health, meta, count: 3, seed: Math.floor(Date.now() / 3600000) })
+      .map((it) => ({ id: it.id, title: it.title, url: it.url, host: it.host, code: it.code, added: it.added }));
+
     return {
       scheme,
       inboxId,
-      settings: merged,
-      aiReady: hasModel(merged),
+      settings,
+      meta,
+      aiReady: hasModel(settings),
       counts: {
         all: items.length,
         dead,
         susp,
+        moved,
+        dups: dups.length,
         unchecked,
         inbox,
         pending: Object.keys(pending).length,
       },
+      serendipity,
       recent: items.slice(0, 8).map((it) => ({
         id: it.id,
         title: it.title,
@@ -428,6 +632,8 @@ const handlers = {
     return { inboxId, created };
   },
 
+  'tabs:stashWindow': async (opts = {}) => stashWindowTabs(opts),
+
   'bookmarks:move': async ({ ids, folderId }) => {
     let moved = 0;
     for (const id of ids) {
@@ -442,9 +648,8 @@ const handlers = {
     return { moved };
   },
 
-  /** 按类目编号移动：界面里说的都是 code，只有这里知道它对应哪个 folderId */
-  'bookmarks:moveCode': async ({ ids, code }) => {
-    const r = await moveToCode(ids, code);
+  'bookmarks:moveCode': async ({ ids, code, learn = false }) => {
+    const r = await moveToCode(ids, code, { learn });
     broadcast({ type: 'state:changed' });
     return r;
   },
@@ -463,8 +668,24 @@ const handlers = {
     return { removed };
   },
 
+  'bookmarks:batchRename': async ({ changes = [] }) => {
+    let renamed = 0;
+    const prev = [];
+    for (const c of changes) {
+      if (!c || !c.id || !c.title) continue;
+      try {
+        const [before] = await chrome.bookmarks.get(c.id);
+        await chrome.bookmarks.update(c.id, { title: c.title });
+        prev.push({ id: c.id, title: before.title });
+        renamed += 1;
+      } catch {}
+    }
+    broadcast({ type: 'state:changed' });
+    return { renamed, prev };
+  },
+
   'health:run': async ({ ids }) => {
-    // 不 await：立刻告诉界面"开始了"，进度靠广播
+    if (chrome.action?.setBadgeText) chrome.action.setBadgeText({ text: '' }).catch(() => {});
     runHealth(ids).then((r) => broadcast({ type: 'state:changed', summary: r })).catch((e) => {
       scan = { running: false, done: 0, total: 0, startedAt: 0 };
       broadcast({ type: 'scan:error', message: String(e.message || e) });
@@ -477,11 +698,10 @@ const handlers = {
     return { stopped: true };
   },
 
-  /** 侧边栏只有计数，没有 id 列表，让后台自己挑没检测过的 */
   'health:runUnchecked': async () => {
     const settings = await readSettings();
     const tree = await chrome.bookmarks.getTree();
-    const { items } = parseTree(tree, parseOptsOf(settings.schemeId));
+    const { items } = parseTree(tree, parseOptsFor(settings));
     const { health = {} } = await chrome.storage.local.get('health');
     const ids = items.filter((it) => !health[it.id]).map((it) => it.id);
     if (!ids.length) return { started: false, total: 0 };
@@ -495,18 +715,102 @@ const handlers = {
     return { ok: true };
   },
 
+  /** 批量更新 301/302 重定向目标地址，返回旧地址以便一键撤销 */
+  'health:applyRedirects': async ({ ids = [] }) => {
+    const { health = {} } = await chrome.storage.local.get('health');
+    const targetIds = ids.length
+      ? ids
+      : Object.entries(health).filter(([, h]) => h && h.status === 'moved' && h.finalUrl).map(([id]) => id);
+    const prev = [];
+    let updated = 0;
+    for (const id of targetIds) {
+      const h = health[id];
+      if (!h || !h.finalUrl) continue;
+      try {
+        const [node] = await chrome.bookmarks.get(id);
+        await chrome.bookmarks.update(id, { url: h.finalUrl });
+        prev.push({ id, oldUrl: node.url });
+        delete health[id];
+        updated += 1;
+      } catch {}
+    }
+    await chrome.storage.local.set({ health });
+    broadcast({ type: 'state:changed' });
+    return { updated, prev };
+  },
+
+  'wayback:lookup': async ({ url }) => lookupWayback(url),
+
+  'meta:set': async ({ id, patch }) => {
+    const { meta = {} } = await chrome.storage.local.get('meta');
+    const next = normalizeMeta(patch, meta[id]);
+    if (next) meta[id] = next;
+    else delete meta[id];
+    await chrome.storage.local.set({ meta });
+    broadcast({ type: 'state:changed' });
+    return { id, entry: next };
+  },
+
+  'meta:batchTag': async ({ ids = [], tag }) => {
+    const clean = String(tag || '').trim().replace(/^#+/, '').slice(0, 24);
+    if (!clean) throw new Error('标签不能为空');
+    const { meta = {} } = await chrome.storage.local.get('meta');
+    let count = 0;
+    for (const id of ids) {
+      const prev = meta[id] || {};
+      const tags = [...(prev.tags || []), clean];
+      const next = normalizeMeta({ tags }, prev);
+      if (next) { meta[id] = next; count += 1; }
+    }
+    await chrome.storage.local.set({ meta });
+    broadcast({ type: 'state:changed' });
+    return { count, tag: clean };
+  },
+
+  'learned:list': async () => readLearned(),
+
+  'learned:remove': async ({ host }) => {
+    const next = removeLearnedDomain(await readLearned(), host);
+    await chrome.storage.local.set({ learned: next });
+    broadcast({ type: 'state:changed' });
+    return next;
+  },
+
+  'learned:clear': async () => {
+    const next = emptyLearned();
+    await chrome.storage.local.set({ learned: next });
+    broadcast({ type: 'state:changed' });
+    return next;
+  },
+
+  /** 吃灰与常阅分析（基于可选 history 权限） */
+  'history:analyze': async () => {
+    if (!chrome.history) throw new Error('尚未授予浏览历史权限');
+    const state = await loadState();
+    const entries = await chrome.history.search({ text: '', startTime: 0, maxResults: 10000 });
+    const result = analyzeUsage(state.items, entries);
+    await chrome.storage.local.set({ usageCache: result });
+    broadcast({ type: 'state:changed' });
+    return result;
+  },
+
   'ai:run': async ({ ids }) => {
     const state = await loadState();
-    const { items, scheme, settings } = state;
+    const { items, scheme, settings, learned } = state;
     const wanted = new Set(ids);
     const targets = items.filter((it) => wanted.has(it.id)).slice(0, 80);
     if (!scheme.length) throw new Error('没找到可用分类。先在书签栏建几个类目文件夹（例如「500 人工智能」）。');
     if (!targets.length) return { suggestions: [] };
 
     broadcast({ type: 'ai:start', total: targets.length });
-    const list = await classify(targets, scheme, settings, (done, total) => {
-      broadcast({ type: 'ai:progress', done, total });
-    });
+    const pageMeta = hasModel(settings) ? await enrichWeakHeads(targets, settings) : {};
+    const list = await classify(
+      targets,
+      scheme,
+      settings,
+      (done, total) => broadcast({ type: 'ai:progress', done, total }),
+      { learned, pageMeta },
+    );
 
     const pending = { ...state.pending };
     const at = Date.now();
@@ -514,6 +818,15 @@ const handlers = {
     await chrome.storage.local.set({ pending });
     broadcast({ type: 'state:changed' });
     return { suggestions: list, source: hasModel(settings) ? 'model' : 'heuristic' };
+  },
+
+  'ai:cleanTitles': async ({ ids = [] }) => {
+    const state = await loadState();
+    const wanted = new Set(ids);
+    const targets = (ids.length ? state.items.filter((it) => wanted.has(it.id)) : state.items).slice(0, 40);
+    const pageMeta = await enrichWeakHeads(targets, state.settings);
+    const items = await cleanTitles(targets, state.settings, pageMeta);
+    return { items };
   },
 
   'ai:accept': async ({ ids }) => {
@@ -527,14 +840,31 @@ const handlers = {
       byCode.get(code).push(id);
     }
     let moved = 0;
+    const allOps = [];
     for (const [code, group] of byCode) {
       const r = await moveToCode(group, code);
       moved += r.moved;
+      allOps.push(...(r.ops || []));
       group.forEach((id) => delete p[id]);
     }
     await chrome.storage.local.set({ pending: p });
+    let journalId = null;
+    if (allOps.length) {
+      const entry = {
+        id: 'j' + Date.now().toString(36),
+        at: Date.now(),
+        planId: 'ai-accept',
+        scope: 'ai',
+        applied: allOps.length,
+        failed: 0,
+        ops: allOps,
+      };
+      const journal = pushEntry(await readJournal(), entry);
+      await chrome.storage.local.set({ [JOURNAL_KEY]: journal });
+      journalId = entry.id;
+    }
     broadcast({ type: 'state:changed' });
-    return { moved };
+    return { moved, journalId };
   },
 
   'ai:ignore': async ({ ids }) => {
@@ -552,32 +882,38 @@ const handlers = {
     return { ok: true };
   },
 
+  /** 修复：按 settings.schemeId 与自定义方案解析书签树，并纳入改判偏好 */
   'ai:suggestOne': async ({ url, title, fast }) => {
-    const tree = await chrome.bookmarks.getTree();
-    const { scheme } = parseTree(tree);
     const settings = await readSettings();
+    const learned = await readLearned();
+    const tree = await chrome.bookmarks.getTree();
+    const { scheme } = parseTree(tree, parseOptsFor(settings));
     const fake = [{ id: 'tmp', title: title || url, url, host: hostOf(url), code: '' }];
     const folderFor = (code) => (scheme.find((f) => f.code === code) || {}).id || null;
 
     if (!fast && hasModel(settings)) {
       try {
-        const [s] = await classify(fake, scheme, settings);
-        return { code: s.code, conf: s.conf, reason: s.reason, source: 'model', folderId: folderFor(s.code) };
+        const pageMeta = settings.fetchHeadOnAi && isWeakTitle(title, url)
+          ? { tmp: await fetchPageHead(url, { timeout: 4000 }) }
+          : {};
+        const [s] = await classify(fake, scheme, settings, undefined, { learned, pageMeta });
+        if (s) return { code: s.code, conf: s.conf, reason: s.reason, source: s.source || 'model', folderId: folderFor(s.code) };
       } catch (e) {
-        const [s] = classifyHeuristic(fake, scheme);
+        const [s] = classifyHeuristic(fake, scheme, { schemeId: settings.schemeId, learned });
         return {
-          code: s.code, conf: s.conf, reason: '模型不可用，用了本地规则', source: 'heuristic',
+          code: s.code, conf: s.conf, reason: '模型不可用，用了本地规则', source: s.source || 'heuristic',
           folderId: folderFor(s.code), error: String(e.message || e),
         };
       }
     }
-    const [s] = classifyHeuristic(fake, scheme);
-    return { code: s.code, conf: s.conf, reason: s.reason, source: 'heuristic', folderId: folderFor(s.code) };
+    const [s] = classifyHeuristic(fake, scheme, { schemeId: settings.schemeId, learned });
+    return { code: s.code, conf: s.conf, reason: s.reason, source: s.source || 'heuristic', folderId: folderFor(s.code) };
   },
 
   'settings:save': async ({ settings }) => {
     const next = { ...(await readSettings()), ...settings };
     await chrome.storage.local.set({ settings: next });
+    await syncWeeklyAlarm(Boolean(next.autoCheckWeekly));
     broadcast({ type: 'state:changed' });
     return { settings: next };
   },
@@ -588,23 +924,45 @@ const handlers = {
     return { ok: true, raw };
   },
 
-  /** 可选方案清单 + 当前装的是哪套 */
-  'schemes:list': async () => ({
-    schemes: listSchemes(),
-    current: (await readSettings()).schemeId || '',
-  }),
+  'schemes:list': async () => {
+    const settings = await readSettings();
+    return {
+      schemes: listSchemes(settings.customSchemes || []),
+      current: settings.schemeId || '',
+    };
+  },
 
-  /** 预检：不出手，只算「会建几个 / 复用几个 / 有几个撞车」 */
+  'scheme:saveCustom': async ({ scheme }) => {
+    const clean = sanitizeCustomScheme(scheme);
+    const settings = await readSettings();
+    const list = [...(settings.customSchemes || [])].filter((s) => s.id !== clean.id);
+    list.push(clean);
+    const next = { ...settings, customSchemes: list };
+    await chrome.storage.local.set({ settings: next });
+    broadcast({ type: 'state:changed' });
+    return { scheme: clean, schemes: listSchemes(list) };
+  },
+
+  'scheme:deleteCustom': async ({ schemeId }) => {
+    const settings = await readSettings();
+    const list = (settings.customSchemes || []).filter((s) => s.id !== schemeId);
+    const next = { ...settings, customSchemes: list, schemeId: settings.schemeId === schemeId ? '' : settings.schemeId };
+    await chrome.storage.local.set({ settings: next });
+    broadcast({ type: 'state:changed' });
+    return { schemes: listSchemes(list) };
+  },
+
   'scheme:preview': async ({ schemeId }) => {
-    const scheme = getScheme(schemeId);
+    const settings = await readSettings();
+    const scheme = getScheme(schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
     const tree = await chrome.bookmarks.getTree();
     return planInstall(tree, scheme);
   },
 
-  'organize:plan': async ({ scope = 'inbox' } = {}) => {
+  'organize:plan': async ({ scope = 'inbox', folderCode = '' } = {}) => {
     if (organize.running) throw new Error('上一次整理计划还在生成');
-    runOrganize(scope).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
+    runOrganize(scope, folderCode).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
     return { started: true };
   },
 
@@ -613,7 +971,6 @@ const handlers = {
     return { plan: plan || null, running: organize.running, applying: applyCtl.running, stopping: applyCtl.stop };
   },
 
-  /** 执行计划。备份闸门在这里：没有合规备份就当场做一份，做不出来才拒绝。 */
   'organize:apply': async () => {
     runApply().catch((e) => {
       applyCtl = { running: false, stop: false };
@@ -652,12 +1009,16 @@ const handlers = {
 
   'organize:override': async ({ id, code }) => {
     const plan = await readPlan();
+    const op = plan.ops.find((o) => o.id === id);
+    if (op && op.url) {
+      const learned = recordOverride(await readLearned(), { host: hostOf(op.url) }, code);
+      await chrome.storage.local.set({ learned });
+    }
     const next = overrideOp(plan, id, code);
     await writePlan(next);
     return next;
   },
 
-  /** 整理前的退路：整树结构化快照，环形保留 3 份 */
   'backup:run': async ({ planId = '' } = {}) => {
     const settings = await readSettings();
     const tree = await chrome.bookmarks.getTree();
@@ -673,17 +1034,18 @@ const handlers = {
     return exportBackup(target);
   },
 
+  'backup:restore': async ({ id, snapshotJson }) => {
+    const snap = snapshotJson ? validateSnapshot(snapshotJson) : await readBackup(id);
+    return restoreSnapshotSafe(snap);
+  },
+
   'backup:clear': async () => clearBackups(),
 
-  /** 闸门：后台自己校验，不靠界面自觉。没有合规备份就返回 NEED_BACKUP。 */
   'backup:check': async ({ planId = '', planAt = 0 }) => checkBackupReady(await listBackups(), { id: planId, at: planAt }),
 
-  /**
-   * 安装：按 code 复用已有目录，只建缺的。
-   * 有冲突就一个都不建，把冲突原样返回给界面处理。
-   */
   'scheme:install': async ({ schemeId }) => {
-    const scheme = getScheme(schemeId);
+    const settings = await readSettings();
+    const scheme = getScheme(schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
     const tree = await chrome.bookmarks.getTree();
     const plan = planInstall(tree, scheme);
@@ -692,7 +1054,7 @@ const handlers = {
     for (const f of plan.missing) {
       await chrome.bookmarks.create({ parentId: plan.barId, title: `${f.code} ${f.name}` });
     }
-    const next = { ...(await readSettings()), schemeId };
+    const next = { ...settings, schemeId };
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
     return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId };
@@ -703,7 +1065,6 @@ const handlers = {
     if (title != null) changes.title = title;
     if (url != null) changes.url = url;
 
-    // 地址变了，之前的检测结论描述的是另一个页面，留着会误导
     let urlChanged = false;
     if (url != null) {
       try {
@@ -739,17 +1100,21 @@ const handlers = {
     for (const it of items || []) {
       try {
         if (it.type === 'move') {
-          // 移动还原
           await chrome.bookmarks.move(it.id, { parentId: it.oldParentId });
           restored += 1;
         } else if (it.type === 'delete') {
-          // 删除还原：重新创建书签
           await chrome.bookmarks.create({
             parentId: it.parentId || '1',
             title: it.title,
             url: it.url,
             index: it.index,
           });
+          restored += 1;
+        } else if (it.type === 'url') {
+          await chrome.bookmarks.update(it.id, { url: it.oldUrl });
+          restored += 1;
+        } else if (it.type === 'title') {
+          await chrome.bookmarks.update(it.id, { title: it.title });
           restored += 1;
         }
       } catch (e) {
@@ -760,30 +1125,7 @@ const handlers = {
     return { restored };
   },
 
-  'open:manager': async ({ view, drawer, id, hash } = {}) => {
-    const managerUrlPrefix = chrome.runtime.getURL('ui/manager.html');
-    let targetHash = hash || '';
-    if (!targetHash) {
-      const parts = [];
-      if (view) parts.push(`view=${encodeURIComponent(view)}`);
-      if (drawer) parts.push(`drawer=${encodeURIComponent(drawer)}`);
-      if (id) parts.push(`id=${encodeURIComponent(id)}`);
-      targetHash = parts.join('&');
-    }
-    const targetUrl = targetHash ? `${managerUrlPrefix}#${targetHash}` : managerUrlPrefix;
-
-    const tabs = await chrome.tabs.query({});
-    const existing = tabs.find((t) => t.url && t.url.startsWith(managerUrlPrefix));
-    if (existing) {
-      await chrome.tabs.update(existing.id, { active: true, url: targetUrl });
-      if (existing.windowId && chrome.windows?.update) {
-        await chrome.windows.update(existing.windowId, { focused: true }).catch(() => {});
-      }
-      return { ok: true, reused: true };
-    }
-    await chrome.tabs.create({ url: targetUrl });
-    return { ok: true, created: true };
-  },
+  'open:manager': async (opts = {}) => openManagerTab(opts),
 };
 
 function hostOf(url) {
@@ -801,32 +1143,164 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     .then(() => fn(msg))
     .then((data) => sendResponse({ ok: true, data }))
     .catch((err) => sendResponse({ ok: false, error: String((err && err.message) || err) }));
-  return true; // 异步回应
+  return true;
 });
+
+/* ── Chrome 原生超能力 1：地址栏 Omnibox 秒搜（关键词 gz） ── */
+
+if (chrome.omnibox) {
+  chrome.omnibox.setDefaultSuggestion({
+    description: '归藏秒搜 — 输入标题、拼音首字母（如 rgzn）、#标签 或 domain:域名，回车直达书库',
+  });
+
+  chrome.omnibox.onInputChanged.addListener(async (text, suggest) => {
+    try {
+      const state = await loadState();
+      const dupIds = duplicateIdSet(findDuplicates(state.items));
+      const list = buildOmniboxSuggestions(
+        state.items,
+        text,
+        { health: state.health, meta: state.meta, scheme: state.scheme, dupIds },
+        6,
+      );
+      suggest(list);
+    } catch {
+      suggest([]);
+    }
+  });
+
+  chrome.omnibox.onInputEntered.addListener(async (text, disposition) => {
+    const trimmed = String(text || '').trim();
+    if (/^https?:\/\//i.test(trimmed)) {
+      if (disposition === 'currentTab') {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab && tab.id) await chrome.tabs.update(tab.id, { url: trimmed });
+        else await chrome.tabs.create({ url: trimmed });
+      } else if (disposition === 'newBackgroundTab') {
+        await chrome.tabs.create({ url: trimmed, active: false });
+      } else {
+        await chrome.tabs.create({ url: trimmed, active: true });
+      }
+      return;
+    }
+    await openManagerTab(trimmed ? { q: trimmed } : {});
+  });
+}
+
+/* ── Chrome 原生超能力 2：右键菜单快收 ─────────────────────── */
+
+function setupContextMenus() {
+  if (!chrome.contextMenus) return;
+  chrome.contextMenus.removeAll(() => {
+    chrome.contextMenus.create({
+      id: 'guizang-save-page',
+      title: '归藏：收当前页进「待归类」',
+      contexts: ['page'],
+    });
+    chrome.contextMenus.create({
+      id: 'guizang-save-link',
+      title: '归藏：收此链接进「待归类」',
+      contexts: ['link'],
+    });
+    chrome.contextMenus.create({
+      id: 'guizang-open-manager',
+      title: '归藏：打开全屏书库',
+      contexts: ['action', 'page'],
+    });
+  });
+}
+
+if (chrome.contextMenus?.onClicked) {
+  chrome.contextMenus.onClicked.addListener(async (info, tab) => {
+    if (info.menuItemId === 'guizang-open-manager') {
+      await openManagerTab({});
+      return;
+    }
+    const url = info.menuItemId === 'guizang-save-link' ? info.linkUrl : (info.pageUrl || (tab && tab.url));
+    const title = info.menuItemId === 'guizang-save-link'
+      ? (info.selectionText || info.linkUrl)
+      : ((tab && tab.title) || url);
+    if (!url || !/^https?:/i.test(url)) return;
+    const { inboxId } = await ensureInbox();
+    const existing = await chrome.bookmarks.search({ url });
+    if (!existing.length) {
+      await chrome.bookmarks.create({ parentId: inboxId, title: title || url, url });
+    }
+    await flashBadge('✓', '#346347', 1800);
+    broadcast({ type: 'state:changed' });
+  });
+}
+
+/* ── Chrome 原生超能力 3：全局快捷键 Commands ──────────────── */
+
+if (chrome.commands?.onCommand) {
+  chrome.commands.onCommand.addListener(async (command) => {
+    if (command === 'open-manager') {
+      await openManagerTab({});
+      return;
+    }
+    if (command === 'stash-current') {
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (!tab || !tab.url || !/^https?:/i.test(tab.url)) return;
+      const { inboxId } = await ensureInbox();
+      const existing = await chrome.bookmarks.search({ url: tab.url });
+      if (!existing.length) {
+        await chrome.bookmarks.create({ parentId: inboxId, title: tab.title || tab.url, url: tab.url });
+      }
+      await flashBadge('✓', '#346347', 1800);
+      broadcast({ type: 'state:changed' });
+      return;
+    }
+    if (command === 'stash-window') {
+      const r = await stashWindowTabs({ closeTabs: false });
+      await flashBadge(`+${r.saved}`, '#1E4468', 2600);
+    }
+  });
+}
+
+/* ── Chrome 原生超能力 4：可选周期静默体检（alarms） ───────── */
+
+if (chrome.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener(async (alarm) => {
+    if (alarm.name !== WEEKLY_ALARM || scan.running) return;
+    try {
+      const state = await loadState();
+      if (!state.settings.autoCheckWeekly) return;
+      // 优先测未检测过的，再测最久未检测的
+      const pool = state.items
+        .slice()
+        .sort((a, b) => ((state.health[a.id]?.at || 0) - (state.health[b.id]?.at || 0)))
+        .slice(0, state.settings.checkLimit || 60)
+        .map((it) => it.id);
+      if (pool.length) await runHealth(pool, { silent: true });
+    } catch {}
+  });
+}
 
 /* 书签被外部改动时让界面刷新 */
 chrome.bookmarks.onCreated.addListener(() => broadcast({ type: 'state:changed' }));
 chrome.bookmarks.onRemoved.addListener((id, info) => {
-  // 被删的是文件夹时，其子树里的缓存也一起清掉
-  chrome.storage.local.get(['health', 'pending']).then(({ health = {}, pending = {} }) => {
+  chrome.storage.local.get(['health', 'pending', 'meta']).then(({ health = {}, pending = {}, meta = {} }) => {
     let dirty = false;
-    if (health[id]) { delete health[id]; dirty = true; }
-    if (pending[id]) { delete pending[id]; dirty = true; }
-    (info.node.children || []).forEach((c) => {
-      if (health[c.id]) { delete health[c.id]; dirty = true; }
-      if (pending[c.id]) { delete pending[c.id]; dirty = true; }
-    });
-    if (dirty) chrome.storage.local.set({ health, pending });
+    const drop = (k) => {
+      if (health[k]) { delete health[k]; dirty = true; }
+      if (pending[k]) { delete pending[k]; dirty = true; }
+      if (meta[k]) { delete meta[k]; dirty = true; }
+    };
+    drop(id);
+    (info.node.children || []).forEach((c) => drop(c.id));
+    if (dirty) chrome.storage.local.set({ health, pending, meta });
   });
   broadcast({ type: 'state:changed' });
 });
 chrome.bookmarks.onChanged.addListener(() => broadcast({ type: 'state:changed' }));
 
 chrome.runtime.onInstalled.addListener(async (details) => {
+  setupContextMenus();
+  const s = await readSettings();
   if (details.reason === 'install') {
-    const s = await readSettings();
     await chrome.storage.local.set({ settings: s });
-    // 第一次装就把「待归类」建好，用户收藏时不用先想放哪
-    await ensureInbox().catch(() => {});
+    await ensureInbox(undefined, s).catch(() => {});
   }
+  await syncWeeklyAlarm(Boolean(s.autoCheckWeekly));
 });

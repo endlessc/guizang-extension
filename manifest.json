@@ -2,11 +2,29 @@
   "manifest_version": 3,
   "name": "归藏 — 收藏夹管理",
   "short_name": "归藏",
-  "version": "0.5.0",
-  "description": "看得清、归得位：AI 归类建议逐条确认，失效链接一次查清。",
+  "version": "0.6.0",
+  "description": "看得清、归得位、救得回：地址栏秒搜、AI 归类逐条确认、去重体检与时光机抢救。",
   "minimum_chrome_version": "116",
-  "permissions": ["bookmarks", "storage", "tabs", "sidePanel", "favicon"],
+  "permissions": ["bookmarks", "storage", "tabs", "sidePanel", "favicon", "contextMenus"],
+  "optional_permissions": ["history", "alarms"],
   "host_permissions": ["http://*/*", "https://*/*"],
+  "omnibox": {
+    "keyword": "gz"
+  },
+  "commands": {
+    "open-manager": {
+      "suggested_key": { "default": "Alt+Shift+G" },
+      "description": "打开归藏全屏书库"
+    },
+    "stash-current": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "将当前标签页快速收进待归类"
+    },
+    "stash-window": {
+      "suggested_key": { "default": "Alt+Shift+W" },
+      "description": "将当前窗口全部标签页收进待归类"
+    }
+  },
   "background": {
     "service_worker": "background.js",
     "type": "module"

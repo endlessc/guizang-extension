@@ -1,6 +1,6 @@
 /* 弹窗：把当前页归进去，顺手看一眼有什么坏了 */
 
-import { $, esc, icon, mark, send, toast, fmtDate, letterOf, faviconMark, statusMark } from './shared.js';
+import { $, esc, icon, mark, send, toast, fmtDate, letterOf, faviconMark, wireFavicons, statusMark } from './shared.js';
 
 import { ensureEnv } from './env.js';
 await ensureEnv();
@@ -14,6 +14,8 @@ const S = {
   suggestion: null,
   thinking: false,
   pickerOpen: false,
+  star: false,
+  note: '',
 };
 
 const canSave = (url) => /^https?:/i.test(url || '');
@@ -38,6 +40,9 @@ async function init() {
     if (chk && chk.exists && chk.items[0]) {
       S.existing = chk.items[0];
       S.existingFolder = summary.scheme.find((f) => f.id === S.existing.parentId) || null;
+      const m = (summary.meta && summary.meta[S.existing.id]) || {};
+      S.star = Boolean(m.star);
+      S.note = m.note || '';
     }
   }
 
@@ -143,13 +148,17 @@ function renderNow() {
     </div>
     <button class="btn btn-primary btn-md btn-block" id="saveBtn" ${S.chosen ? '' : 'disabled'}>
       ${icon(S.existing ? 'folder' : (S.chosen && !S.chosen.code ? 'inbox' : 'plus'), 14)}<span>${saveBtnText}</span></button>
-    ${S.existing ? `<button class="btn btn-ghost btn-sm btn-block" id="btnRemoveBookmark" style="color:var(--dead);margin-top:6px">${icon('trash', 12)}<span>移出书签</span></button>` : ''}
+    <div class="pp-meta-row">
+      <input class="pp-note-input" id="noteInput" value="${esc(S.note)}" placeholder="顺手记一句批注或收藏理由（可选）" />
+      <button type="button" class="pp-star-btn${S.star ? ' is-on' : ''}" id="starBtn" title="${S.star ? '取消星标' : '加星标'}">${icon('star', 13)}</button>
+    </div>
+    ${S.existing ? `<button class="btn btn-danger-ghost btn-sm btn-block pp-remove-btn" id="btnRemoveBookmark">${icon('trash', 12)}<span>移出书签</span></button>` : ''}
     ${s && s.code && (!S.chosen || S.chosen.code !== s.code) ? `<button class="pp-sug" id="useSug">
         ${icon('sparkle', 11)}
         <span>建议 <b class="tnum">${esc(s.code)}</b> ${esc((S.summary.scheme.find((x) => x.code === s.code) || {}).name || '')}</span>
         <span class="pp-sug-go">采用</span></button>` : ''}
     ${s && s.reason ? `<div class="pp-note">${esc(s.reason)}${s.conf ? ` · 把握 ${s.conf.toFixed(2)}` : ''}</div>` : ''}
-    ${s && s.source !== 'model' && S.summary.aiReady ? `<div class="pp-note"><button id="askModel" style="color:var(--brand);text-decoration:underline">让模型再判一次</button></div>` : ''}`;
+    ${s && s.source !== 'model' && S.summary.aiReady ? `<div class="pp-note"><button class="pp-link" id="askModel">让模型再判一次</button></div>` : ''}`;
 
   $('#pickBtn').addEventListener('click', () => {
     S.pickerOpen = !S.pickerOpen;
@@ -157,6 +166,20 @@ function renderNow() {
   });
   const save = $('#saveBtn');
   if (save) save.addEventListener('click', doSave);
+
+  const noteInput = $('#noteInput');
+  if (noteInput) {
+    noteInput.addEventListener('input', (e) => { S.note = e.target.value; });
+    noteInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') doSave(); });
+  }
+  const starBtn = $('#starBtn');
+  if (starBtn) {
+    starBtn.addEventListener('click', () => {
+      S.star = !S.star;
+      starBtn.classList.toggle('is-on', S.star);
+      starBtn.title = S.star ? '取消星标' : '加星标';
+    });
+  }
 
   const removeBtn = $('#btnRemoveBookmark');
   if (removeBtn && S.existing) {
@@ -196,13 +219,19 @@ async function doSave() {
   const url = S.tab.url;
   const parentId = S.chosen.folderId;
   try {
+    let savedId = null;
     const found = await chrome.bookmarks.search({ url });
     if (found && found.length) {
       await chrome.bookmarks.move(found[0].id, { parentId });
+      savedId = found[0].id;
       toast('已更新分类');
     } else {
-      await send('bookmark:save', { url, title: S.tab.title || url, folderId: parentId });
+      const r = await send('bookmark:save', { url, title: S.tab.title || url, folderId: parentId });
+      savedId = r && r.id;
       toast('已收藏');
+    }
+    if (savedId && (S.star || S.note.trim())) {
+      await send('meta:set', { id: savedId, patch: { star: S.star, note: S.note.trim() } }).catch(() => {});
     }
     setTimeout(() => window.close(), 380);
   } catch (e) {
@@ -212,19 +241,21 @@ async function doSave() {
 
 function renderAlerts() {
   const c = S.summary.counts;
+  const hasDead = (c.dead || 0) > 0;
   $('#alerts').innerHTML = `
     <button class="pp-alert" id="toPending" title="查看待定卷">${icon('inbox', 11)}<span>待定卷</span><b class="tnum">${c.inbox || 0}</b></button>
-    <button class="pp-alert is-dead" id="toDead" title="查看已失效链接">${icon('alert', 11)}<span>已失效</span><b class="tnum">${c.dead}</b></button>`;
+    <button class="pp-alert${hasDead ? ' is-dead' : ''}" id="toDead" title="查看已失效链接">${icon('alert', 11)}<span>已失效</span><b class="tnum">${c.dead || 0}</b></button>`;
   $('#toPending').addEventListener('click', () => openManager('view=inbox'));
   $('#toDead').addEventListener('click', () => openManager('view=dead'));
 }
 
 function renderRecent() {
   $('#recentLabel').innerHTML = `<div class="section-label">卷目<span class="section-aside">最近</span></div>`;
-  const rows = S.summary.recent.slice(0, 4);
-  $('#recent').innerHTML = rows.length
+  const rows = S.summary.recent.slice(0, 3);
+  const recentEl = $('#recent');
+  recentEl.innerHTML = rows.length
     ? rows.map((it) => `<div class="row row-narrow" data-url="${esc(it.url)}">
-        ${faviconMark(it.host, it.health && (it.health.status === 'dead' || it.health.status === 'unreachable'))}
+        ${faviconMark(it.host, it.health && (it.health.status === 'dead' || it.health.status === 'unreachable'), it.url)}
         <div class="row-main">
           <div class="row-title">${esc(it.title)}</div>
           <div class="row-meta"><span class="host">${esc(it.host)}</span></div>
@@ -233,7 +264,8 @@ function renderRecent() {
       </div>`).join('')
     : '<div class="pp-empty">还没有收藏。</div>';
 
-  $('#recent').querySelectorAll('[data-url]').forEach((el) => {
+  wireFavicons(recentEl);
+  recentEl.querySelectorAll('[data-url]').forEach((el) => {
     el.addEventListener('click', () => {
       chrome.tabs.create({ url: el.dataset.url });
       window.close();
@@ -244,9 +276,19 @@ function renderRecent() {
 function renderFoot() {
   $('#foot').innerHTML = `
     <button class="pp-open" id="openManager">打开书库 ${icon('arrowRight', 12)}</button>
+    <span class="pp-foot-sep"></span>
+    <button class="pp-stash" id="stashWinBtn" title="把当前窗口全部网页收进待归类（自动去重）">${icon('layers', 12)}<span>收本窗标签页</span></button>
     <button class="pp-scan" id="scanBtn" title="检测失效链接（在书库里跑）">${icon('pulse', 13)}</button>`;
   $('#openManager').addEventListener('click', () => openManager());
   $('#scanBtn').addEventListener('click', () => openManager('view=all'));
+  $('#stashWinBtn').addEventListener('click', async () => {
+    try {
+      const r = await send('tabs:stashWindow', { closeTabs: false });
+      toast(r.saved ? `已收进 ${r.saved} 个标签页${r.skipped ? `（跳过 ${r.skipped} 条已存）` : ''}` : '本窗标签页都已经在收藏夹里了');
+    } catch (e) {
+      toast(e.message);
+    }
+  });
 }
 
 async function openManager(hash = '') {

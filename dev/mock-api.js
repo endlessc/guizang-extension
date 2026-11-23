@@ -7,12 +7,17 @@
  */
 
 import { parseTree } from '../lib/tree.js';
-import { parseOptsOf, listSchemes, getScheme } from '../lib/schemes.js';
+import { parseOptsOf, listSchemes, getScheme, sanitizeCustomScheme } from '../lib/schemes.js';
 import { planInstall } from '../lib/scheme-install.js';
-import { flattenTree, checkBackupReady } from '../lib/backup.js';
+import { flattenTree, checkBackupReady, validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { PROTO } from '../lib/version.js';
-import { classify, classifyHeuristic, DEFAULT_SETTINGS } from '../lib/llm.js';
+import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS } from '../lib/llm.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
+import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
+import {
+  normalizeMeta, emptyLearned, recordOverride, removeLearnedDomain,
+  pickSerendipity, analyzeUsage,
+} from '../lib/meta.js';
 
 const FOLDERS = [
   ['000', '综合与工具'],
@@ -93,6 +98,8 @@ const ROWS = [
   ['A2A 协议白皮书', 'https://a2a-protocol.org/whitepaper', null, '2026-11-10', 'ok'],
   ['OpenWrt 路由器固件刷写指南', 'https://openwrt.org/docs/guide-user/installation', null, '2026-11-09', 'ok'],
   ['后端面试八股清单 · 2026 版', 'https://github.com/backend-interview/notes', null, '2026-11-08', 'ok'],
+  ['(3) Attention Is All You Need · 重复收藏示例', 'https://arxiv.org/abs/1706.03762?utm_source=twitter', null, '2026-11-12', 'ok'],
+  ['Excalidraw 白板（旧链重复）', 'http://www.excalidraw.com/#board', null, '2025-04-02', 'ok'],
 ];
 
 const STATUS = {
@@ -108,6 +115,19 @@ const STATUS = {
 let root;
 let health = {};
 let pending = {};
+let meta = {
+  b06: { tags: ['rust', '语言'], note: '官方圣经，常翻常新', star: true, readState: 'read', updatedAt: Date.now() },
+  b27: { tags: ['transformer', '论文'], note: '精读 Attention 机制必看', star: true, readState: 'unread', updatedAt: Date.now() },
+  b29: { tags: ['mcp', 'agent'], note: '工具协议规范参考', star: false, readState: 'unread', updatedAt: Date.now() },
+  b49: { tags: ['ebpf', '内核'], note: '周末精读', star: false, readState: 'unread', updatedAt: Date.now() },
+};
+let learned = {
+  domains: {
+    'doc.rust-lang.org': { code: '100', count: 3, at: Date.now() - 86400000 * 2 },
+    'arxiv.org': { code: '500', count: 2, at: Date.now() - 86400000 * 5 },
+  },
+};
+let usageCache = null;
 let mockTheme = 'system';
 let settings = { ...DEFAULT_SETTINGS };
 let plan = null;           // 整理计划（本地预览内存态）
@@ -172,12 +192,17 @@ function emit(msg) {
 }
 
 function stateLoad() {
-  const { items, folders, scheme, inboxId } = parseTree([JSON.parse(JSON.stringify(root))], parseOptsOf(settings.schemeId));
+  const { items, folders, scheme, inboxId } = parseTree(
+    [JSON.parse(JSON.stringify(root))],
+    parseOptsOf(settings.schemeId, settings.customSchemes || []),
+  );
   return {
     items, folders, scheme, inboxId,
-    // 副本：真实 storage 也是结构化克隆，页面改不到存储里
     health: JSON.parse(JSON.stringify(health)),
     pending: JSON.parse(JSON.stringify(pending)),
+    meta: JSON.parse(JSON.stringify(meta)),
+    learned: JSON.parse(JSON.stringify(learned)),
+    usageCache: usageCache ? JSON.parse(JSON.stringify(usageCache)) : null,
     settings: { ...settings },
     aiReady: Boolean(settings.apiKey && settings.model),
     scan: { running: false, done: 0, total: 0 },
@@ -185,18 +210,29 @@ function stateLoad() {
 }
 
 function summaryLoad() {
-  const { items, scheme, inboxId } = parseTree([JSON.parse(JSON.stringify(root))], parseOptsOf(settings.schemeId));
-  let dead = 0, susp = 0, unchecked = 0, inbox = 0;
+  const { items, scheme, inboxId } = parseTree(
+    [JSON.parse(JSON.stringify(root))],
+    parseOptsOf(settings.schemeId, settings.customSchemes || []),
+  );
+  let dead = 0, susp = 0, moved = 0, unchecked = 0, inbox = 0;
   for (const it of items) {
     if (!it.code) inbox += 1;
     const h = health[it.id];
     if (!h) unchecked++;
     else if (['dead', 'error', 'timeout', 'unreachable'].includes(h.status)) dead++;
     else if (h.status === 'blocked') susp++;
+    else if (h.status === 'moved') moved++;
   }
+  const dups = findDuplicates(items);
+  const serendipity = pickSerendipity(items, { health, meta, count: 3, seed: 42 })
+    .map((it) => ({ id: it.id, title: it.title, url: it.url, host: it.host, code: it.code, added: it.added }));
   return {
-    scheme, inboxId, settings, aiReady: Boolean(settings.apiKey && settings.model),
-    counts: { all: items.length, dead, susp, unchecked, inbox, pending: Object.keys(pending).length },
+    scheme, inboxId, settings, meta: JSON.parse(JSON.stringify(meta)), aiReady: Boolean(settings.apiKey && settings.model),
+    counts: {
+      all: items.length, dead, susp, moved, dups: dups.length, unchecked, inbox,
+      pending: Object.keys(pending).length,
+    },
+    serendipity,
     recent: items.slice(0, 8).map((it) => ({
       id: it.id, title: it.title, url: it.url, host: it.host, code: it.code,
       added: it.added, health: health[it.id] ? { ...health[it.id] } : null,
@@ -229,10 +265,132 @@ async function handle(msg) {
       detach(n);
       n.parentId = target.id;
       target.children.push(n);
+      if (msg.learn && msg.code && n.url) {
+        try {
+          const host = new URL(n.url).host.replace(/^www\./, '');
+          learned = recordOverride(learned, { host }, msg.code);
+        } catch {}
+      }
       moved++;
     }
     emit({ type: 'state:changed' });
     return { moved, code: msg.code, name: target.title.replace(/^\S+\s*/, '') };
+  }
+
+  if (type === 'bookmarks:batchRename') {
+    let renamed = 0;
+    const prev = [];
+    for (const c of msg.changes || []) {
+      const n = findNode(c.id);
+      if (!n || !c.title) continue;
+      prev.push({ id: n.id, title: n.title });
+      n.title = c.title;
+      renamed += 1;
+    }
+    emit({ type: 'state:changed' });
+    return { renamed, prev };
+  }
+
+  if (type === 'tabs:stashWindow') {
+    const tabs = [
+      { title: 'HTTP 缓存 · MDN Web 文档', url: 'https://developer.mozilla.org/zh-CN/docs/Web/HTTP/Caching' },
+      { title: 'SQLite Query Planner', url: 'https://www.sqlite.org/queryplanner.html' },
+    ];
+    const st = stateLoad();
+    const seen = new Set(st.items.map((it) => normalizeUrl(it.url)));
+    let saved = 0, skipped = 0;
+    for (const t of tabs) {
+      if (seen.has(normalizeUrl(t.url))) { skipped += 1; continue; }
+      seen.add(normalizeUrl(t.url));
+      buildSave({ url: t.url, title: t.title, folderId: msg.folderId || st.inboxId });
+      saved += 1;
+    }
+    emit({ type: 'state:changed' });
+    return { saved, skipped, closed: 0 };
+  }
+
+  if (type === 'health:applyRedirects') {
+    const targetIds = (msg.ids && msg.ids.length)
+      ? msg.ids
+      : Object.entries(health).filter(([, h]) => h && h.status === 'moved' && h.finalUrl).map(([id]) => id);
+    const prev = [];
+    let updated = 0;
+    for (const id of targetIds) {
+      const h = health[id];
+      const n = findNode(id);
+      if (!h || !h.finalUrl || !n) continue;
+      prev.push({ id, oldUrl: n.url });
+      n.url = h.finalUrl;
+      delete health[id];
+      updated += 1;
+    }
+    emit({ type: 'state:changed' });
+    return { updated, prev };
+  }
+
+  if (type === 'wayback:lookup') {
+    return {
+      available: true,
+      url: `https://web.archive.org/web/20241101120000/${msg.url}`,
+      timestamp: '20241101120000',
+      dateLabel: '2024-11-01',
+      browseUrl: `https://web.archive.org/web/*/${msg.url}`,
+    };
+  }
+
+  if (type === 'meta:set') {
+    const next = normalizeMeta(msg.patch, meta[msg.id]);
+    if (next) meta[msg.id] = next;
+    else delete meta[msg.id];
+    emit({ type: 'state:changed' });
+    return { id: msg.id, entry: next };
+  }
+
+  if (type === 'meta:batchTag') {
+    const clean = String(msg.tag || '').trim().replace(/^#+/, '');
+    if (!clean) throw new Error('标签不能为空');
+    let count = 0;
+    for (const id of msg.ids || []) {
+      const prev = meta[id] || {};
+      const next = normalizeMeta({ tags: [...(prev.tags || []), clean] }, prev);
+      if (next) { meta[id] = next; count += 1; }
+    }
+    emit({ type: 'state:changed' });
+    return { count, tag: clean };
+  }
+
+  if (type === 'learned:list') return JSON.parse(JSON.stringify(learned));
+  if (type === 'learned:remove') {
+    learned = removeLearnedDomain(learned, msg.host);
+    emit({ type: 'state:changed' });
+    return JSON.parse(JSON.stringify(learned));
+  }
+  if (type === 'learned:clear') {
+    learned = emptyLearned();
+    emit({ type: 'state:changed' });
+    return JSON.parse(JSON.stringify(learned));
+  }
+
+  if (type === 'history:analyze') {
+    const st = stateLoad();
+    const now = Date.now();
+    const fakeHistory = [
+      { url: 'https://doc.rust-lang.org/book/zh-CN/', visitCount: 18, lastVisitTime: now - 86400000 * 2 },
+      { url: 'https://github.com/settings/tokens', visitCount: 9, lastVisitTime: now - 86400000 * 4 },
+      { url: 'https://react.dev/reference/rsc/server-components', visitCount: 6, lastVisitTime: now - 86400000 * 6 },
+      { url: 'https://docs.anthropic.com/en/api/getting-started', visitCount: 12, lastVisitTime: now - 86400000 * 1 },
+    ];
+    usageCache = analyzeUsage(st.items, fakeHistory, { now });
+    emit({ type: 'state:changed' });
+    return usageCache;
+  }
+
+  if (type === 'ai:cleanTitles') {
+    const st = stateLoad();
+    const set = new Set(msg.ids || []);
+    const targets = set.size ? st.items.filter((it) => set.has(it.id)) : st.items;
+    const items = await cleanTitles(targets, settings);
+    return { items };
   }
 
   if (type === 'bookmarks:remove') {
@@ -371,6 +529,12 @@ async function handle(msg) {
           parentId: parent.id,
           dateAdded: Date.now(),
         });
+      } else if (it.type === 'url') {
+        const n = findNode(it.id);
+        if (n) n.url = it.oldUrl;
+      } else if (it.type === 'title') {
+        const n = findNode(it.id);
+        if (n) n.title = it.title;
       }
     }
     emit({ type: 'state:changed' });
@@ -379,11 +543,12 @@ async function handle(msg) {
 
   if (type === 'organize:plan') {
     const st = stateLoad();
-    const picked = st.items.filter((it) => !it.code);
+    const scope = msg.scope || 'inbox';
+    const picked = scope === 'all' ? st.items : st.items.filter((it) => !it.code);
     emit({ type: 'organize:start' });
     const suggestions = {};
-    for (const s of classifyHeuristic(picked, st.scheme)) suggestions[s.id] = s;
-    plan = buildPlan({ items: st.items, scheme: st.scheme, scope: msg.scope || 'inbox', suggestions });
+    for (const s of classifyHeuristic(picked, st.scheme, { schemeId: settings.schemeId, learned })) suggestions[s.id] = s;
+    plan = buildPlan({ items: st.items, scheme: st.scheme, scope, folderCode: msg.folderCode || '', suggestions });
     emit({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
     emit({ type: 'organize:done', plan });
     return { started: true };
@@ -486,6 +651,27 @@ async function handle(msg) {
     if (!id || !backupNodes[id]) throw new Error('还没有备份可导出');
     return JSON.stringify(backupNodes[id], null, 2);
   }
+  if (type === 'backup:restore') {
+    const raw = msg.snapshotJson ? validateSnapshot(msg.snapshotJson) : backupNodes[msg.id];
+    if (!raw) throw new Error('这份备份不存在');
+    const bar = findNode('1');
+    const folder = { id: 'rest' + Date.now().toString(36), title: '归藏恢复快照', parentId: bar.id, children: [] };
+    bar.children.push(folder);
+    const roots = rebuildSubtree(raw.nodes);
+    let bookmarks = 0;
+    const addRec = (node, p) => {
+      if (node.url) {
+        p.children.push({ id: 'rn' + (++bookmarks), title: node.title, url: node.url, parentId: p.id, dateAdded: Date.now() });
+        return;
+      }
+      const sub = { id: 'rf' + Math.random().toString(36).slice(2, 6), title: node.title || '恢复目录', parentId: p.id, children: [] };
+      p.children.push(sub);
+      (node.children || []).forEach((c) => addRec(c, sub));
+    };
+    roots.forEach((r) => addRec(r, folder));
+    emit({ type: 'state:changed' });
+    return { folderId: folder.id, label: folder.title, bookmarks };
+  }
   if (type === 'backup:clear') {
     const removed = backups.length;
     backups = [];
@@ -494,16 +680,32 @@ async function handle(msg) {
   }
   if (type === 'backup:check') return checkBackupReady(backups, { id: msg.planId || '', at: msg.planAt || 0 });
 
-  if (type === 'schemes:list') return { schemes: listSchemes(), current: settings.schemeId || '' };
+  if (type === 'schemes:list') return { schemes: listSchemes(settings.customSchemes || []), current: settings.schemeId || '' };
+
+  if (type === 'scheme:saveCustom') {
+    const clean = sanitizeCustomScheme(msg.scheme);
+    const list = [...(settings.customSchemes || [])].filter((s) => s.id !== clean.id);
+    list.push(clean);
+    settings = { ...settings, customSchemes: list };
+    emit({ type: 'state:changed' });
+    return { scheme: clean, schemes: listSchemes(list) };
+  }
+
+  if (type === 'scheme:deleteCustom') {
+    const list = (settings.customSchemes || []).filter((s) => s.id !== msg.schemeId);
+    settings = { ...settings, customSchemes: list, schemeId: settings.schemeId === msg.schemeId ? '' : settings.schemeId };
+    emit({ type: 'state:changed' });
+    return { schemes: listSchemes(list) };
+  }
 
   if (type === 'scheme:preview') {
-    const scheme = getScheme(msg.schemeId);
+    const scheme = getScheme(msg.schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
     return planInstall([JSON.parse(JSON.stringify(root))], scheme);
   }
 
   if (type === 'scheme:install') {
-    const scheme = getScheme(msg.schemeId);
+    const scheme = getScheme(msg.schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
     const plan = planInstall([JSON.parse(JSON.stringify(root))], scheme);
     if (plan.conflict.length) return { installed: false, conflict: plan.conflict, plan };
@@ -655,6 +857,11 @@ export async function install() {
       async create({ url }) { window.open(url, '_blank'); },
       onActivated: { addListener() {} },
       onUpdated: { addListener() {} },
+    },
+    permissions: {
+      async contains() { return true; },
+      async request() { return true; },
+      async remove() { return true; },
     },
     sidePanel: { async setPanelBehavior() {} },
   };

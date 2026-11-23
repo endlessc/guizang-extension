@@ -1,16 +1,30 @@
-/* 管理页：书架 / 列表 / 检查器 */
+/* 管理页：书架 / 列表与卡片墙 / 检查器 / 命令面板 / 逐卷审定 */
 
 import {
-  $, esc, icon, mark, send, toast, triggerUndo, fmtDate, relTime, letterOf, faviconMark,
+  $, esc, icon, mark, send, toast, triggerUndo, fmtDate, relTime, faviconMark, wireFavicons,
   TONE, PROBLEM, SUSPECT, statusMark, onBroadcast, debounce, checkProto,
-  THEMES, getTheme, setTheme,
+  THEMES, getTheme, setThemeAnimated,
 } from './shared.js';
 import { groupByCode } from '../lib/tree.js';
 import { groupOps } from '../lib/organize.js';
+import { findDuplicates, duplicateIdSet, removableCount } from '../lib/dedup.js';
+import { filterAndScore, parseQuery } from '../lib/search.js';
+import { toMarkdown, toSelectionMarkdown, toNetscapeHtml } from '../lib/export.js';
+import { collectAllTags, pickSerendipity } from '../lib/meta.js';
 import { PROTO } from '../lib/version.js';
+import { createTriageController } from './triage.js';
 
 import { ensureEnv } from './env.js';
 await ensureEnv();
+
+function readLocal(key, fallback) {
+  try {
+    const v = localStorage.getItem(key);
+    return v == null ? fallback : v;
+  } catch {
+    return fallback;
+  }
+}
 
 const S = {
   loaded: false,
@@ -18,31 +32,120 @@ const S = {
   scheme: [],
   health: {},
   pending: {},
+  meta: {},
+  learned: { domains: {} },
+  usageCache: null,
+  usageTab: 'dusty',       // 'dusty' | 'frequent'
   settings: {},
   aiReady: false,
   scan: { running: false, done: 0, total: 0 },
   view: { kind: 'all' },
+  viewMode: readLocal('guizang_view_mode', 'list'), // 'list' | 'cards' | 'compact'
   q: '',
-  sortDir: -1,          // -1 新→旧，1 旧→新
+  filterBarOpen: false,
+  sortDir: -1,             // -1 新→旧，1 旧→新
   selected: null,
   sel: new Set(),
   lastCheckedId: null,
   renderLimit: 400,
   drawer: null,
-  picking: null,       // 正在改判的建议 id
-  editing: null,       // 正在编辑的书签 { id, title, url }
+  picking: null,           // 正在改判的建议 id
+  editing: null,           // 正在编辑的书签 { id, title, url }
   aiBusy: false,
   aiProgress: null,
-  plan: null,          // 整理计划
+  plan: null,              // 整理计划
   planBusy: false,
   planProgress: null,
   applyBusy: false,
   applyProgress: null,
-  journal: null,       // 最近一次可撤销的整理
-  done: [],            // 刚归入的，做即时反馈
+  journal: null,           // 最近一次可撤销的整理
+  journals: [],            // 最近 3 次整理日志
+  orgScope: 'inbox',       // 'inbox' | 'all'
+  orgTab: 'plan',          // 'plan' | 'clean'
+  cleanList: null,         // AI 标题洗白建议列表
+  cleanBusy: false,
+  serendipityOpen: false,
+  serendipitySeed: Date.now(),
+  wayback: {},             // id -> { loading, available, url, dateLabel, browseUrl }
+  dragIds: [],
+  recentCodes: (() => {
+    try { return JSON.parse(readLocal('guizang_recent_codes', '[]')) || []; } catch { return []; }
+  })(),
+  done: [],                // 刚归入的，做朱砂落印即时反馈
 };
 
+/* ── 矿物色带（全景比例尺 + 藏书卡片顶边共用） ── */
+
+const MINERAL_PALETTE = [
+  '#2E5E7E', '#3A7A68', '#A67C37', '#6E5A8A', '#B2523A',
+  '#2F728A', '#577D4B', '#8E6A46', '#4C648E', '#9B6558',
+];
+
+function colorOfCode(code) {
+  if (!code || code === 'none') return '#9C927F';
+  const idx = S.scheme.findIndex((f) => f.code === code);
+  if (idx >= 0) return MINERAL_PALETTE[idx % MINERAL_PALETTE.length];
+  let hash = 0;
+  for (const ch of String(code)) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
+  return MINERAL_PALETTE[hash % MINERAL_PALETTE.length];
+}
+
+function rememberRecentCode(code) {
+  if (!code) return;
+  S.recentCodes = [code, ...S.recentCodes.filter((c) => c !== code)].slice(0, 4);
+  try { localStorage.setItem('guizang_recent_codes', JSON.stringify(S.recentCodes)); } catch {}
+}
+
+function setViewMode(mode) {
+  if (!['list', 'cards', 'compact'].includes(mode)) return;
+  S.viewMode = mode;
+  try { localStorage.setItem('guizang_view_mode', mode); } catch {}
+  renderHead();
+  renderList();
+}
+
+function downloadFile(name, text, mime = 'text/plain;charset=utf-8') {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+
+/** 缃黄朱批关键词高亮 */
+function highlightHtml(text) {
+  const safe = esc(text);
+  const q = S.q.trim();
+  if (!q) return safe;
+  const { terms } = parseQuery(q);
+  const usable = terms.filter((t) => t.length >= 1);
+  if (!usable.length) return safe;
+  const pat = usable
+    .map((t) => esc(t).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+    .sort((a, b) => b.length - a.length)
+    .join('|');
+  try {
+    return safe.replace(new RegExp(`(${pat})`, 'gi'), '<mark class="hl">$1</mark>');
+  } catch {
+    return safe;
+  }
+}
+
+/* ── 逐卷审定控制器（Triage 模式） ─────────────── */
+
+const triage = createTriageController({
+  getState: () => S,
+  folderName: (code) => folderName(code),
+  onReload: () => { load().catch(() => {}); },
+});
+
 /* ── 路由与 Hash 监听 ───────────────────────────── */
+
+const BUILTIN_VIEWS = ['all', 'starred', 'unread', 'pending', 'dead', 'susp', 'moved', 'dups', 'unchecked', 'inbox', 'usage'];
 
 function parseHash() {
   const hash = location.hash.replace(/^#/, '');
@@ -53,20 +156,22 @@ function parseHash() {
   const id = p.get('id');
   const q = p.get('q');
   const code = p.get('code');
+  const tag = p.get('tag');
+  const mode = p.get('mode');
 
   if (view) {
-    if (['all', 'pending', 'dead', 'susp', 'unchecked', 'inbox'].includes(view)) {
-      S.view = { kind: view };
-    } else if (view === 'folder') {
-      S.view = { kind: 'folder', code: code || 'none' };
-    } else {
-      S.view = { kind: 'folder', code: view };
-    }
+    if (BUILTIN_VIEWS.includes(view)) S.view = { kind: view };
+    else if (view === 'tag' && tag) S.view = { kind: 'tag', tag };
+    else if (view === 'folder') S.view = { kind: 'folder', code: code || 'none' };
+    else S.view = { kind: 'folder', code: view };
   }
+  if (mode && ['list', 'cards', 'compact'].includes(mode)) S.viewMode = mode;
   if (drawer) S.drawer = drawer;
   if (id) { S.selected = id; S.drawer = 'detail'; }
   if (q != null) S.q = q;
   if (p.get('modal') === 'shortcuts') setTimeout(openShortcutsModal, 50);
+  if (p.get('modal') === 'cmd') setTimeout(openCommandPalette, 50);
+  if (p.get('triage') === '1') setTimeout(() => triage.open(), 120);
 }
 
 window.addEventListener('hashchange', () => {
@@ -76,16 +181,36 @@ window.addEventListener('hashchange', () => {
 
 /* ── 派生数据 ─────────────────────────────────── */
 
+function dupGroups() {
+  return findDuplicates(S.items);
+}
+
 function counts() {
-  const c = { all: S.items.length, dead: 0, susp: 0, unchecked: 0, pending: 0, inbox: 0 };
+  const c = {
+    all: S.items.length,
+    starred: 0,
+    unread: 0,
+    dead: 0,
+    susp: 0,
+    moved: 0,
+    dups: 0,
+    unchecked: 0,
+    pending: 0,
+    inbox: 0,
+  };
   for (const it of S.items) {
     if (!it.code) c.inbox += 1;
+    const m = S.meta[it.id];
+    if (m && m.star) c.starred += 1;
+    if (m && m.readState === 'unread') c.unread += 1;
     const h = S.health[it.id];
     if (!h) c.unchecked += 1;
     else if (PROBLEM.has(h.status)) c.dead += 1;
     else if (SUSPECT.has(h.status)) c.susp += 1;
+    else if (h.status === 'moved') c.moved += 1;
     if (S.pending[it.id]) c.pending += 1;
   }
+  c.dups = removableCount(dupGroups());
   return c;
 }
 
@@ -98,40 +223,74 @@ function visible() {
   let rows = S.items;
   const v = S.view;
   if (v.kind === 'folder') rows = rows.filter((it) => (it.code || 'none') === v.code);
-  if (v.kind === 'dead') rows = rows.filter((it) => PROBLEM.has((S.health[it.id] || {}).status));
-  if (v.kind === 'susp') rows = rows.filter((it) => SUSPECT.has((S.health[it.id] || {}).status));
-  if (v.kind === 'pending') rows = rows.filter((it) => S.pending[it.id]);
-  if (v.kind === 'unchecked') rows = rows.filter((it) => !S.health[it.id]);
-  if (v.kind === 'inbox') rows = rows.filter((it) => !it.code);
-  if (S.q.trim()) {
-    const q = S.q.trim().toLowerCase();
-    rows = rows.filter((it) =>
-      (it.title + ' ' + it.host + ' ' + it.url).toLowerCase().includes(q)
-    );
+  else if (v.kind === 'starred') rows = rows.filter((it) => S.meta[it.id]?.star);
+  else if (v.kind === 'unread') rows = rows.filter((it) => S.meta[it.id]?.readState === 'unread');
+  else if (v.kind === 'dead') rows = rows.filter((it) => PROBLEM.has((S.health[it.id] || {}).status));
+  else if (v.kind === 'susp') rows = rows.filter((it) => SUSPECT.has((S.health[it.id] || {}).status));
+  else if (v.kind === 'moved') rows = rows.filter((it) => (S.health[it.id] || {}).status === 'moved');
+  else if (v.kind === 'dups') {
+    const ids = duplicateIdSet(dupGroups());
+    rows = rows.filter((it) => ids.has(it.id));
+  } else if (v.kind === 'pending') rows = rows.filter((it) => S.pending[it.id]);
+  else if (v.kind === 'unchecked') rows = rows.filter((it) => !S.health[it.id]);
+  else if (v.kind === 'inbox') rows = rows.filter((it) => !it.code);
+  else if (v.kind === 'tag') {
+    const want = String(v.tag || '').toLowerCase();
+    rows = rows.filter((it) => (S.meta[it.id]?.tags || []).some((t) => t.toLowerCase() === want));
+  } else if (v.kind === 'usage') {
+    if (!S.usageCache) return [];
+    const targetIds = new Set(S.usageTab === 'frequent' ? S.usageCache.frequentIds : S.usageCache.dustyIds);
+    rows = rows.filter((it) => targetIds.has(it.id));
   }
+
+  if (S.q.trim()) {
+    const dupIds = duplicateIdSet(dupGroups());
+    const scored = filterAndScore(rows, S.q, {
+      health: S.health,
+      meta: S.meta,
+      scheme: S.scheme,
+      dupIds,
+    });
+    return scored
+      .sort((a, b) => (b.score !== a.score ? b.score - a.score : ((a.item.added || 0) - (b.item.added || 0)) * S.sortDir))
+      .map((x) => x.item);
+  }
+
+  if (v.kind === 'usage' && S.usageCache) {
+    const order = S.usageTab === 'frequent' ? S.usageCache.frequentIds : S.usageCache.dustyIds;
+    const rank = new Map(order.map((id, i) => [id, i]));
+    return rows.slice().sort((a, b) => (rank.get(a.id) ?? 9999) - (rank.get(b.id) ?? 9999));
+  }
+
   return rows.slice().sort((a, b) => ((a.added || 0) - (b.added || 0)) * S.sortDir);
 }
 
 function viewMeta() {
   const v = S.view;
   if (v.kind === 'all') return { label: '全部收藏', note: '' };
+  if (v.kind === 'starred') return { label: '星标精选', note: '加星置顶的常用典藏与参考书目。' };
+  if (v.kind === 'unread') return { label: '稍后阅读', note: '标为未读的待看藏卷，读完可按 U 或在详情页切为已读。' };
   if (v.kind === 'folder') return { label: `${v.code === 'none' ? '—' : v.code} ${v.code === 'none' ? '待归类' : folderName(v.code)}`, note: '' };
   if (v.kind === 'pending') return { label: '归类建议', note: '这些书签拿到了 AI 建议，逐条确认后才会真的移动。' };
-  if (v.kind === 'dead') return { label: '已失效', note: '这些地址已经打不开。删之前可以先导出清单留个底。' };
+  if (v.kind === 'dead') return { label: '已失效', note: '这些地址已经打不开。详情页支持查 Wayback 时光机快照抢救，删前也可导出清单留底。' };
   if (v.kind === 'susp') return { label: '疑似失效', note: '返回 401 / 403 / 429，多半是反爬或需要登录，别急着删。' };
-  if (v.kind === 'unchecked') return { label: '未检测', note: '还没体检过的书签。全选后点「检测」即可。' };
-  if (v.kind === 'inbox') return { label: '待归类', note: '收藏时没选分类的都落在这里，包括 Chrome 默认存进「其他书签」的散条目。让模型给建议，或者自己挑一个类目。' };
+  if (v.kind === 'moved') return { label: '已跳转', note: '这些链接发生了 301 / 302 跳转，可核对新地址后一键批量更新。' };
+  if (v.kind === 'dups') return { label: '重复书签', note: '按规范化 URL（忽略 http/https、尾斜杠、锚点与 utm 追踪参数）识别的重复收藏，每组优先保留已分类条目。' };
+  if (v.kind === 'unchecked') return { label: '未检测', note: '还没体检过的书签。点「检测失效」即可按批推进。' };
+  if (v.kind === 'inbox') return { label: '待归类', note: '可直接拖拽到左侧分类，或按 T 进入「逐卷审定」键盘极速清仓。' };
+  if (v.kind === 'tag') return { label: `#${v.tag}`, note: '按旁挂标签交叉检索的结果，不影响 Chrome 原生书签文件夹结构。' };
+  if (v.kind === 'usage') return { label: '常阅与吃灰', note: '结合本地浏览历史（按需授权）洞察高频常阅与超过半年未打开的尘封藏卷。' };
   return { label: '全部收藏', note: '' };
 }
 
-/* ── 顶栏 ─────────────────────────────────────── */
+/* ── 顶栏与水墨涟漪配色菜单 ──────────────────── */
 
 function renderThemeDropdown() {
   const dd = $('#themeDropdown');
   if (!dd) return;
   const current = getTheme();
   dd.innerHTML = `
-    <div class="theme-drop-head">典籍配色方案</div>
+    <div class="theme-drop-head">典籍配色方案 · 水墨切换</div>
     ${THEMES.map((th) => {
       const active = th.id === current;
       const swatches = th.preview.map((c) => `<span style="background:${c}"></span>`).join('');
@@ -153,25 +312,50 @@ function renderThemeDropdown() {
       e.stopPropagation();
       const id = btn.dataset.themeId;
       if (!id) return;
-      await setTheme(id);
-      renderThemeDropdown();
+      dd.hidden = true;
+      await setThemeAnimated(id, e);
       const th = THEMES.find((t) => t.id === id);
       toast(`已应用配色：${th ? th.name : id}`);
     });
   });
 }
 
+const mobileMq = typeof window !== 'undefined' ? window.matchMedia('(max-width: 720px)') : null;
+
+function syncMobileOverlay() {
+  const overlay = $('#mobileOverlay');
+  if (!overlay) return;
+  const railOpen = Boolean($('.rail')?.classList.contains('is-mobile-open'));
+  const drawerOverlay = Boolean(mobileMq && mobileMq.matches && S.drawer);
+  overlay.hidden = !(railOpen || drawerOverlay);
+}
+
+$('#mobileOverlay')?.addEventListener('click', () => {
+  $('.rail')?.classList.remove('is-mobile-open');
+  if (mobileMq && mobileMq.matches && S.drawer) {
+    S.drawer = null;
+    S.editing = null;
+    renderInspector();
+    renderTop();
+    renderRail();
+  }
+  syncMobileOverlay();
+});
+
+mobileMq?.addEventListener('change', syncMobileOverlay);
+
 function renderTop() {
   const c = counts();
   const wasFocused = document.activeElement && document.activeElement.id === 'q';
   const caret = wasFocused ? document.activeElement.selectionStart : null;
   $('#topbar').innerHTML = `
-    <button class="mobile-menu-btn" id="btnRailToggle" title="切换分类书架">${icon('menu', 16)}</button>
+    <button class="mobile-menu-btn" id="btnRailToggle" title="切换分类书架" aria-label="切换分类书架">${icon('menu', 16)}</button>
     <div class="brand">${mark(24)}<span class="brand-name">归藏</span><span class="brand-sub">GUIZANG</span></div>
     <label class="search">
       ${icon('search', 14)}
-      <input id="q" value="${esc(S.q)}" placeholder="搜标题、域名或地址" spellcheck="false" />
-      ${S.q ? `<span class="search-clear" id="qClear" title="清空搜索">${icon('x', 12)}</span>` : '<kbd>⌘K</kbd>'}
+      <input id="q" value="${esc(S.q)}" placeholder="搜标题、拼音首字母、#标签 或 >命令" spellcheck="false" />
+      <button type="button" class="search-clear" id="qClear" title="清空搜索" aria-label="清空搜索"${S.q ? '' : ' hidden'}>${icon('x', 12)}</button>
+      <kbd id="qKbd"${S.q ? ' hidden' : ''}>⌘K</kbd>
     </label>
     <div class="top-actions">
       <button class="ai-btn${S.drawer === 'ai' ? ' is-open' : ''}" id="btnAi">
@@ -182,26 +366,24 @@ function renderTop() {
         ${icon('pulse', 15)}<span>${S.scan.running ? '检测中 ' + S.scan.done + '/' + S.scan.total : '检测失效'}</span>
       </button>
       <span class="v-rule"></span>
+      <button class="btn btn-ghost btn-md" id="btnCmd" title="命令面板 (⌘⇧P 或输入 >)" aria-label="命令面板">${icon('command', 15)}</button>
       <div class="theme-dropdown-wrap">
-        <button class="btn btn-ghost btn-md" id="btnTheme" title="切换配色方案" aria-haspopup="true">
+        <button class="btn btn-ghost btn-md" id="btnTheme" title="切换配色方案" aria-label="切换配色方案" aria-haspopup="true">
           ${icon('palette', 15)}
         </button>
         <div class="theme-dropdown" id="themeDropdown" hidden></div>
       </div>
-      <button class="btn btn-ghost btn-md" id="btnOpt" title="设置">${icon('sliders', 15)}</button>
+      <button class="btn btn-ghost btn-md" id="btnOpt" title="设置" aria-label="设置">${icon('sliders', 15)}</button>
     </div>`;
 
   $('#btnRailToggle')?.addEventListener('click', () => {
     const rail = $('.rail');
-    const overlay = $('#mobileOverlay');
     if (!rail) return;
-    const open = rail.classList.toggle('is-mobile-open');
-    if (overlay) overlay.hidden = !open;
+    rail.classList.toggle('is-mobile-open');
+    syncMobileOverlay();
   });
-  $('#mobileOverlay')?.addEventListener('click', () => {
-    $('.rail')?.classList.remove('is-mobile-open');
-    $('#mobileOverlay').hidden = true;
-  });
+
+  $('#btnCmd')?.addEventListener('click', openCommandPalette);
 
   const btnTheme = $('#btnTheme');
   const themeDd = $('#themeDropdown');
@@ -219,22 +401,44 @@ function renderTop() {
   }
 
   const qInput = $('#q');
+  const qClear = $('#qClear');
+  const qKbd = $('#qKbd');
+  const syncQClear = () => {
+    const hasVal = Boolean(S.q);
+    if (qClear) qClear.hidden = !hasVal;
+    if (qKbd) qKbd.hidden = hasVal;
+  };
+  qInput.addEventListener('focus', () => {
+    if (!S.filterBarOpen) {
+      S.filterBarOpen = true;
+      renderFilterBar();
+    }
+  });
   qInput.addEventListener('input', (e) => {
+    if (e.target.value === '>') {
+      qInput.value = '';
+      S.q = '';
+      syncQClear();
+      openCommandPalette();
+      return;
+    }
     S.q = e.target.value;
+    syncQClear();
+    renderFilterBar();
     renderList();
     renderHead();
-    const clearBtn = $('#qClear');
-    if (clearBtn && !S.q) renderTop();
   });
 
-  const qClear = $('#qClear');
   if (qClear) {
-    qClear.addEventListener('click', () => {
+    qClear.addEventListener('click', (e) => {
+      e.preventDefault();
       S.q = '';
-      renderTop();
+      qInput.value = '';
+      syncQClear();
+      renderFilterBar();
       renderList();
       renderHead();
-      $('#q').focus();
+      qInput.focus();
     });
   }
 
@@ -249,18 +453,155 @@ function renderTop() {
   }
 }
 
-/* ── 书架 ─────────────────────────────────────── */
+/* ── 搜索快捷筛选芯片 ──────────────────────────── */
 
-function railItem({ code, name, count, bad, active, view, iconName, tone }) {
+function renderFilterBar() {
+  const host = $('#filterBarHost');
+  if (!host) return;
+  const open = S.filterBarOpen || Boolean(S.q.trim());
+  if (!open) { host.innerHTML = ''; return; }
+
+  // 统计高频域名 Top 3
+  const hostCount = new Map();
+  for (const it of S.items) {
+    if (it.host) hostCount.set(it.host, (hostCount.get(it.host) || 0) + 1);
+  }
+  const topHosts = [...hostCount.entries()]
+    .filter(([, n]) => n >= 2)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([h]) => ({ label: h, token: `domain:${h}` }));
+
+  const chips = [
+    { label: '已失效', token: 'status:dead' },
+    { label: '疑似失效', token: 'status:warn' },
+    { label: '已跳转', token: 'status:moved' },
+    { label: '星标', token: 'is:star' },
+    { label: '未读', token: 'is:unread' },
+    { label: '含批注', token: 'is:noted' },
+    ...topHosts,
+  ];
+  const tokens = S.q.trim().split(/\s+/).filter(Boolean);
+
+  host.innerHTML = `<div class="filter-bar">
+    ${chips.map((ch) => {
+      const on = tokens.some((t) => t.toLowerCase() === ch.token.toLowerCase());
+      return `<button type="button" class="filter-chip${on ? ' is-on' : ''}" data-ftoken="${esc(ch.token)}">${esc(ch.label)}</button>`;
+    }).join('')}
+    ${S.q.trim() ? '<button type="button" class="filter-chip" id="btnFilterClear">清空</button>' : ''}
+    <button type="button" class="ibtn" id="btnFilterClose" title="收起筛选条" style="width:22px;height:22px;margin-left:auto">${icon('x', 11)}</button>
+  </div>`;
+
+  host.querySelectorAll('[data-ftoken]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tok = btn.dataset.ftoken;
+      const list = S.q.trim().split(/\s+/).filter(Boolean);
+      const exists = list.some((t) => t.toLowerCase() === tok.toLowerCase());
+      const next = exists
+        ? list.filter((t) => t.toLowerCase() !== tok.toLowerCase())
+        : [...list, tok];
+      S.q = next.join(' ');
+      const qInput = $('#q');
+      if (qInput) qInput.value = S.q;
+      const qClear = $('#qClear');
+      const qKbd = $('#qKbd');
+      if (qClear) qClear.hidden = !S.q;
+      if (qKbd) qKbd.hidden = Boolean(S.q);
+      renderFilterBar();
+      renderHead();
+      renderList();
+    });
+  });
+
+  host.querySelector('#btnFilterClear')?.addEventListener('click', () => {
+    S.q = '';
+    const qInput = $('#q');
+    if (qInput) qInput.value = '';
+    const qClear = $('#qClear');
+    const qKbd = $('#qKbd');
+    if (qClear) qClear.hidden = true;
+    if (qKbd) qKbd.hidden = false;
+    renderFilterBar();
+    renderHead();
+    renderList();
+  });
+
+  host.querySelector('#btnFilterClose')?.addEventListener('click', () => {
+    S.filterBarOpen = false;
+    renderFilterBar();
+  });
+}
+
+/* ── 书架 + 拖拽归类落点 ───────────────────────── */
+
+function railItem({ code, name, count, bad, active, view, iconName, tone, dropKind = '' }) {
   const lead = code
     ? `<span class="rail-num">${esc(code)}</span>`
     : `<span class="rail-icon tone-${tone || 'ink'}">${icon(iconName, 13)}</span>`;
-  return `<button class="rail-item${active ? ' is-active' : ''}" data-view="${view}">
+  const countTone = tone === 'dead' && count ? ' tone-dead' : tone === 'warn' && count ? ' tone-warn' : '';
+  const tip = code ? `${code} ${name}（${count} 条${bad ? `，${bad} 条失效` : ''}，可拖入归类）` : `${name}（${count} 条）`;
+  const dropAttr = dropKind ? ` data-drop-kind="${dropKind}"` : (code ? ` data-drop-code="${esc(code)}"` : '');
+  return `<button class="rail-item${active ? ' is-active' : ''}" data-view="${view}"${dropAttr} title="${esc(tip)}">
     ${lead}
     <span class="rail-name">${esc(name)}</span>
-    <span class="rail-count${tone === 'dead' && count ? ' tone-dead' : ''}">${count}</span>
-    ${bad ? `<span class="rail-bad">${bad}</span>` : ''}
+    ${bad ? `<span class="rail-bad" title="${bad} 条失效">${bad}</span>` : ''}
+    <span class="rail-count${countTone}">${count}</span>
   </button>`;
+}
+
+function wireRailDropTargets() {
+  $('#rail').querySelectorAll('[data-drop-code],[data-drop-kind]').forEach((btn) => {
+    btn.addEventListener('dragover', (e) => {
+      if (!S.dragIds.length) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      btn.classList.add('is-drop-over');
+    });
+    btn.addEventListener('dragleave', () => btn.classList.remove('is-drop-over'));
+    btn.addEventListener('drop', async (e) => {
+      e.preventDefault();
+      btn.classList.remove('is-drop-over');
+      const ids = S.dragIds.slice();
+      S.dragIds = [];
+      if (!ids.length) return;
+
+      const code = btn.dataset.dropCode;
+      const kind = btn.dataset.dropKind;
+      btn.classList.add('is-drop-pulse');
+      setTimeout(() => btn.classList.remove('is-drop-pulse'), 480);
+
+      if (code) {
+        const snapshots = ids.map((id) => ({
+          type: 'move',
+          id,
+          oldParentId: S.items.find((x) => x.id === id)?.parentId || '1',
+        }));
+        const r = await send('bookmarks:moveCode', { ids, code, learn: ids.length === 1 }).catch((err) => ({ error: err.message }));
+        if (r.error) return toast(r.error);
+        rememberRecentCode(code);
+        S.sel.clear();
+        await load();
+        toast(`已拖入 ${code} ${folderName(code)}（${r.moved} 条）`, {
+          actionText: '撤销',
+          onAction: async () => {
+            await send('bookmarks:restore', { items: snapshots });
+            await load();
+            toast('已撤销拖拽移动');
+          },
+        });
+      } else if (kind === 'starred') {
+        for (const id of ids) await send('meta:set', { id, patch: { star: true } }).catch(() => {});
+        S.sel.clear();
+        await load();
+        toast(`已将 ${ids.length} 条加入星标精选`);
+      } else if (kind === 'unread') {
+        for (const id of ids) await send('meta:set', { id, patch: { readState: 'unread' } }).catch(() => {});
+        S.sel.clear();
+        await load();
+        toast(`已将 ${ids.length} 条加入稍后阅读`);
+      }
+    });
+  });
 }
 
 function renderRail() {
@@ -275,22 +616,43 @@ function renderRail() {
 
   const parts = [];
   parts.push(railItem({ name: '全部收藏', count: c.all, view: 'all', iconName: 'stack', tone: 'ink', active: S.view.kind === 'all' }));
+  parts.push(railItem({ name: '星标精选', count: c.starred, view: 'starred', iconName: 'star', tone: 'warn', active: S.view.kind === 'starred', dropKind: 'starred' }));
+  parts.push(railItem({ name: '稍后阅读', count: c.unread, view: 'unread', iconName: 'bookmark', tone: 'brand', active: S.view.kind === 'unread', dropKind: 'unread' }));
+
   parts.push('<div class="section-label">智能视图</div>');
   parts.push(railItem({ name: '待归类', count: c.inbox, view: 'inbox', iconName: 'inbox', tone: 'brand', active: S.view.kind === 'inbox' }));
   parts.push(railItem({ name: '归类建议', count: c.pending, view: 'pending', iconName: 'sparkle', tone: 'brand', active: S.view.kind === 'pending' }));
-  parts.push(railItem({ name: '整理计划', count: S.plan ? S.plan.ops.length : 0, view: '__organize', iconName: 'folder', tone: 'ink', active: S.drawer === 'organize' }));
+  parts.push(railItem({ name: '整理与洗白', count: S.plan ? S.plan.ops.length : 0, view: '__organize', iconName: 'folder', tone: 'ink', active: S.drawer === 'organize' }));
   parts.push(railItem({ name: '已失效', count: c.dead, view: 'dead', iconName: 'alert', tone: 'dead', active: S.view.kind === 'dead' }));
   parts.push(railItem({ name: '疑似失效', count: c.susp, view: 'susp', iconName: 'clock', tone: 'warn', active: S.view.kind === 'susp' }));
+  parts.push(railItem({ name: '已跳转', count: c.moved, view: 'moved', iconName: 'redirect', tone: 'ink', active: S.view.kind === 'moved' }));
+  parts.push(railItem({ name: '重复书签', count: c.dups, view: 'dups', iconName: 'layers', tone: c.dups ? 'warn' : 'ink', active: S.view.kind === 'dups' }));
   parts.push(railItem({ name: '未检测', count: c.unchecked, view: 'unchecked', iconName: 'plus', tone: 'ink', active: S.view.kind === 'unchecked' }));
+  parts.push(railItem({
+    name: '常阅与吃灰',
+    count: S.usageCache ? S.usageCache.summary.dusty : 0,
+    view: 'usage',
+    iconName: 'history',
+    tone: 'ink',
+    active: S.view.kind === 'usage',
+  }));
 
-  if (S.scheme.length) parts.push('<div class="section-label">分类<span class="section-aside">编号</span></div>');
+  if (S.scheme.length) parts.push('<div class="section-label">分类<span class="section-aside">可拖入</span></div>');
   for (const f of S.scheme) {
-    // 空类目也要列出来：装了方案却看不见目录，会以为没装上
     parts.push(railItem({
       code: f.code, name: f.name, count: byCode[f.code] || 0,
       bad: badByCode[f.code] || 0, view: f.code,
       active: S.view.kind === 'folder' && S.view.code === f.code,
     }));
+  }
+
+  const allTags = collectAllTags(S.meta);
+  if (allTags.length) {
+    parts.push('<div class="section-label">标签<span class="section-aside">#</span></div>');
+    parts.push(`<div class="rail-tags">${allTags.slice(0, 18).map((t) => `
+      <button type="button" class="rail-tag-chip${S.view.kind === 'tag' && S.view.tag === t.tag ? ' is-active' : ''}" data-tag="${esc(t.tag)}">
+        <span>#${esc(t.tag)}</span><b>${t.count}</b>
+      </button>`).join('')}</div>`);
   }
 
   $('#rail').innerHTML = parts.join('');
@@ -301,24 +663,33 @@ function renderRail() {
         openOrganize();
         return;
       }
-      S.view = v === 'all' ? { kind: 'all' }
-        : ['pending', 'dead', 'susp', 'unchecked', 'inbox'].includes(v) ? { kind: v }
-        : { kind: 'folder', code: v };
+      S.view = BUILTIN_VIEWS.includes(v) ? { kind: v } : { kind: 'folder', code: v };
       S.selected = null;
       S.drawer = null;
-      // 移动端点选后自动关闭抽屉
       $('.rail')?.classList.remove('is-mobile-open');
-      const overlay = $('#mobileOverlay');
-      if (overlay) overlay.hidden = true;
+      syncMobileOverlay();
       renderAll();
     });
   });
+
+  $('#rail').querySelectorAll('[data-tag]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      S.view = { kind: 'tag', tag: btn.dataset.tag };
+      S.selected = null;
+      S.drawer = null;
+      $('.rail')?.classList.remove('is-mobile-open');
+      syncMobileOverlay();
+      renderAll();
+    });
+  });
+
+  wireRailDropTargets();
 
   const last = newestCheck();
   $('#railFoot').innerHTML = `
     <div class="rail-foot-row"><span class="dot-idle"></span>${last ? '上次检测 ' + relTime(last) : '还没有检测过'}</div>
     <button class="rail-foot-link" id="btnScanAll">${icon('pulse', 12)} 检测当前视图全部</button>
-    <button class="rail-foot-link" id="btnShortcutsHelp" style="color:var(--ink-3);margin-top:2px;">${icon('window', 12)} 快捷键速查 <kbd>?</kbd></button>`;
+    <button class="rail-foot-link is-subtle" id="btnShortcutsHelp">${icon('window', 12)} 快捷键速查 <kbd>?</kbd></button>`;
   $('#btnScanAll').addEventListener('click', scanView);
   $('#btnShortcutsHelp')?.addEventListener('click', openShortcutsModal);
 }
@@ -332,11 +703,75 @@ function newestCheck() {
   return max;
 }
 
-/* ── 列表头 ───────────────────────────────────── */
+/* ── 藏书全景丝带 + 书海拾遗 + 列表头 ──────────── */
+
+function spectrumHtml() {
+  if (S.view.kind !== 'all' || S.q.trim() || !S.items.length) return '';
+  const total = S.items.length;
+  const byCode = new Map();
+  let inboxN = 0;
+  for (const it of S.items) {
+    if (!it.code) inboxN += 1;
+    else byCode.set(it.code, (byCode.get(it.code) || 0) + 1);
+  }
+  const segs = [];
+  for (const f of S.scheme) {
+    const n = byCode.get(f.code) || 0;
+    if (!n) continue;
+    segs.push({ code: f.code, name: `${f.code} ${f.name}`, count: n, color: colorOfCode(f.code), view: f.code });
+  }
+  if (inboxN) {
+    segs.push({ code: 'inbox', name: '待归类', count: inboxN, color: '#9C927F', view: 'inbox' });
+  }
+  if (!segs.length) return '';
+  return `<div class="spectrum" id="spectrum">
+    <div class="spectrum-bar">
+      ${segs.map((s) => {
+        const pct = Math.max(1.5, (s.count / total) * 100);
+        return `<button type="button" class="spectrum-seg" style="flex:${pct} 0 0;background:${s.color}"
+          data-spec-view="${esc(s.view)}" data-spec-name="${esc(s.name)}" data-spec-count="${s.count}" data-spec-color="${s.color}"
+          title="${esc(s.name)} · ${s.count} 卷 (${Math.round((s.count / total) * 100)}%)"></button>`;
+      }).join('')}
+    </div>
+    <div class="spectrum-legend" id="spectrumLegend">
+      <span class="spectrum-legend-hint">藏书分布全景 · 共 ${segs.length} 个分卷 · 悬停查看占比，点击直达</span>
+    </div>
+  </div>`;
+}
+
+function serendipityHtml() {
+  if (!S.serendipityOpen) return '';
+  const picks = pickSerendipity(S.items, { health: S.health, meta: S.meta, count: 3, seed: S.serendipitySeed });
+  if (!picks.length) return '';
+  return `<div class="serendipity">
+    <div class="serendipity-head">
+      <span class="serendipity-title">${icon('compass', 14)} 书海拾遗</span>
+      <span class="serendipity-sub">随机翻出 3 卷久未重温的完好藏书</span>
+      <div class="serendipity-tools">
+        <button type="button" class="btn btn-ghost btn-sm" id="btnSerendipityRefresh">${icon('refresh', 12)}<span>换一批</span></button>
+        <button type="button" class="ibtn" id="btnSerendipityClose" title="收起" style="width:24px;height:24px">${icon('x', 12)}</button>
+      </div>
+    </div>
+    <div class="serendipity-grid">
+      ${picks.map((it) => `<button type="button" class="serendipity-card" data-serendipity-id="${esc(it.id)}">
+        <div class="serendipity-card-title">${esc(it.title)}</div>
+        <div class="serendipity-card-meta">
+          <span class="serendipity-card-host">${esc(it.host)}</span>
+          <span class="tnum">${it.code || '待归类'} · ${fmtDate(it.added)}</span>
+        </div>
+      </button>`).join('')}
+    </div>
+  </div>`;
+}
 
 function renderHead() {
   const rows = visible();
   const meta = viewMeta();
+  const dGroups = S.view.kind === 'dups' ? dupGroups() : [];
+  const dupRemovable = removableCount(dGroups);
+  const movedReady = S.view.kind === 'moved' ? rows.filter((it) => S.health[it.id]?.finalUrl) : [];
+  const canTriage = (S.view.kind === 'inbox' || S.view.kind === 'pending') && rows.length > 0;
+
   $('#listHead').innerHTML = `
     <div class="list-head">
     <div class="crumbs">
@@ -346,63 +781,274 @@ function renderHead() {
       <span class="crumb-count tnum">${rows.length}</span>
     </div>
     <div class="list-tools">
+      ${canTriage ? `<button class="btn btn-line btn-sm" id="btnTriage" title="逐卷审定沉浸归档 (T)">${icon('triage', 13)}<span>逐卷审定</span></button>` : ''}
       ${S.view.kind === 'inbox' && rows.length ? `<button class="btn btn-primary btn-sm" id="btnClassifyInbox">${icon('sparkle', 13)}<span>AI 归类这 ${rows.length} 条</span></button>` : ''}
-      ${S.view.kind === 'dead' ? `<button class="btn btn-line btn-sm" id="btnExport">${icon('external', 13)}<span>导出清单</span></button>` : ''}
+      ${S.view.kind === 'moved' && movedReady.length ? `<button class="btn btn-primary btn-sm" id="btnApplyRedirects">${icon('check', 13)}<span>一键更新 ${movedReady.length} 条跳转</span></button>` : ''}
+      ${S.view.kind === 'dups' && dupRemovable ? `<button class="btn btn-primary btn-sm" id="btnCleanDups">${icon('trash', 13)}<span>一键清理 ${dupRemovable} 条重复</span></button>` : ''}
+      ${S.view.kind === 'dead' ? `<button class="btn btn-line btn-sm" id="btnExport">${icon('download', 13)}<span>导出 TSV</span></button>` : ''}
+      ${S.view.kind === 'usage' && S.usageCache ? `
+        <div class="seg-tabs">
+          <button type="button" class="seg-tab${S.usageTab === 'dusty' ? ' is-active' : ''}" data-usage-tab="dusty">尘封吃灰 (${S.usageCache.summary.dusty})</button>
+          <button type="button" class="seg-tab${S.usageTab === 'frequent' ? ' is-active' : ''}" data-usage-tab="frequent">高频常阅 (${S.usageCache.summary.frequent})</button>
+        </div>
+        <button class="btn btn-ghost btn-sm" id="btnReanalyzeUsage" title="重新扫描浏览历史">${icon('refresh', 13)}</button>
+      ` : ''}
+      <div class="seg-tabs" title="切换视图密度 (V)">
+        <button type="button" class="seg-tab${S.viewMode === 'list' ? ' is-active' : ''}" data-view-mode="list" title="典藏列表" style="padding:3px 6px">${icon('rows', 13)}</button>
+        <button type="button" class="seg-tab${S.viewMode === 'cards' ? ' is-active' : ''}" data-view-mode="cards" title="藏书卡片墙" style="padding:3px 6px">${icon('grid', 13)}</button>
+        <button type="button" class="seg-tab${S.viewMode === 'compact' ? ' is-active' : ''}" data-view-mode="compact" title="紧凑单行索引" style="padding:3px 6px">${icon('compact', 13)}</button>
+      </div>
+      <button class="btn btn-ghost btn-sm${S.serendipityOpen ? ' is-on' : ''}" id="btnSerendipity" title="书海拾遗：随机重温 3 条旧藏卷">${icon('compass', 14)}</button>
+      <button class="btn btn-ghost btn-sm" id="btnExportModal" title="导出书目（Obsidian Markdown / HTML）">${icon('download', 14)}</button>
       <button class="btn btn-ghost btn-sm${S.sortDir === 1 ? ' is-on' : ''}" id="btnSort"
         aria-pressed="${S.sortDir === 1}"
         title="${S.sortDir === -1 ? '添加时间：新→旧，点击切为旧→新' : '添加时间：旧→新，点击切为新→旧'}">${icon('sort', 15)}</button>
     </div>
     </div>
-    ${meta.note ? `<p class="list-note">${esc(meta.note)}</p>` : ''}`;
+    ${meta.note ? `<p class="list-note">${esc(meta.note)}</p>` : ''}
+    ${spectrumHtml()}
+    ${serendipityHtml()}`;
 
-  const exp = $('#btnExport');
-  if (exp) exp.addEventListener('click', exportDead);
-
-  const inboxAi = $('#btnClassifyInbox');
-  if (inboxAi) {
-    inboxAi.addEventListener('click', () => {
-      S.drawer = 'ai';
-      renderInspector();
-      renderTop();
-      runAi(rows.map((r) => r.id));
+  // 全景丝带悬停与点击
+  const spec = $('#spectrum');
+  const specLegend = $('#spectrumLegend');
+  if (spec && specLegend) {
+    const defaultLegend = specLegend.innerHTML;
+    const total = S.items.length || 1;
+    spec.querySelectorAll('.spectrum-seg').forEach((seg) => {
+      seg.addEventListener('mouseenter', () => {
+        const pct = Math.round((Number(seg.dataset.specCount) / total) * 100);
+        specLegend.innerHTML = `<span class="spectrum-legend-now"><span class="spectrum-legend-dot" style="background:${seg.dataset.specColor}"></span>${esc(seg.dataset.specName)} · <b class="tnum">${seg.dataset.specCount}</b> 卷（${pct}%）</span>`;
+      });
+      seg.addEventListener('click', () => {
+        const v = seg.dataset.specView;
+        S.view = v === 'inbox' ? { kind: 'inbox' } : { kind: 'folder', code: v };
+        S.selected = null;
+        renderAll();
+      });
     });
+    spec.addEventListener('mouseleave', () => { specLegend.innerHTML = defaultLegend; });
   }
-  const sort = $('#btnSort');
-  if (sort) {
-    sort.addEventListener('click', () => {
-      S.sortDir = S.sortDir === -1 ? 1 : -1;
+
+  $('#listHead').querySelectorAll('[data-view-mode]').forEach((btn) => {
+    btn.addEventListener('click', () => setViewMode(btn.dataset.viewMode));
+  });
+
+  $('#btnTriage')?.addEventListener('click', () => triage.open(rows));
+  $('#btnExport')?.addEventListener('click', exportDead);
+  $('#btnExportModal')?.addEventListener('click', openExportModal);
+  $('#btnSerendipity')?.addEventListener('click', () => {
+    S.serendipityOpen = !S.serendipityOpen;
+    if (S.serendipityOpen) S.serendipitySeed = Date.now();
+    renderHead();
+  });
+  $('#btnSerendipityRefresh')?.addEventListener('click', () => {
+    S.serendipitySeed = Date.now() + Math.random() * 1000;
+    renderHead();
+  });
+  $('#btnSerendipityClose')?.addEventListener('click', () => {
+    S.serendipityOpen = false;
+    renderHead();
+  });
+  $('#listHead').querySelectorAll('[data-serendipity-id]').forEach((el) => {
+    el.addEventListener('click', () => {
+      S.selected = el.dataset.serendipityId;
+      S.drawer = 'detail';
+      syncSelectionInPlace();
+      renderInspector();
+    });
+  });
+
+  $('#btnClassifyInbox')?.addEventListener('click', () => {
+    S.drawer = 'ai';
+    renderInspector();
+    renderTop();
+    runAi(rows.map((r) => r.id));
+  });
+
+  $('#btnApplyRedirects')?.addEventListener('click', async () => {
+    const ids = movedReady.map((it) => it.id);
+    const r = await send('health:applyRedirects', { ids }).catch((e) => ({ error: e.message }));
+    if (r.error) return toast(r.error);
+    await load();
+    toast(`已更新 ${r.updated} 条跳转链接`, r.prev && r.prev.length ? {
+      actionText: '撤销',
+      onAction: async () => {
+        await send('bookmarks:restore', { items: r.prev.map((x) => ({ type: 'url', id: x.id, oldUrl: x.oldUrl })) });
+        await load();
+        toast('已撤销跳转更新');
+      },
+    } : undefined);
+  });
+
+  $('#btnCleanDups')?.addEventListener('click', async () => {
+    const ids = dGroups.flatMap((g) => g.removeIds);
+    const snapshots = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
+    const r = await send('bookmarks:remove', { ids }).catch((e) => ({ error: e.message }));
+    if (r.error) return toast(r.error);
+    await load();
+    toast(`已清理 ${r.removed} 条重复书签`, {
+      actionText: '撤销',
+      onAction: async () => {
+        await send('bookmarks:restore', { items: snapshots.map((it) => ({ type: 'delete', ...it })) });
+        await load();
+        toast('已撤销重复清理');
+      },
+    });
+  });
+
+  $('#listHead').querySelectorAll('[data-usage-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      S.usageTab = btn.dataset.usageTab;
       renderHead();
       renderList();
     });
+  });
+  $('#btnReanalyzeUsage')?.addEventListener('click', analyzeHistoryNow);
+
+  $('#btnSort')?.addEventListener('click', () => {
+    S.sortDir = S.sortDir === -1 ? 1 : -1;
+    renderHead();
+    renderList();
+  });
+}
+
+async function analyzeHistoryNow() {
+  try {
+    const ok = chrome.permissions?.request
+      ? await chrome.permissions.request({ permissions: ['history'] }).catch(() => false)
+      : true;
+    if (!ok) return toast('未获得浏览历史权限，无法分析访问频次');
+    const res = await send('history:analyze');
+    S.usageCache = res;
+    renderAll();
+    toast(`分析完成：常阅 ${res.summary.frequent} 卷 · 吃灰 ${res.summary.dusty} 卷`);
+  } catch (e) {
+    toast(e.message);
   }
 }
 
-/* ── 列表行 ───────────────────────────────────── */
+/* ── 无闪烁原地更新选中与勾选态（120fps 丝滑巡航） ── */
 
-function rowHtml(it) {
+function syncSelectionInPlace() {
+  const list = $('#list');
+  if (!list) return;
+  list.querySelectorAll('[data-id]').forEach((el) => {
+    const id = el.dataset.id;
+    el.classList.toggle('row-active', S.selected === id);
+    const cb = el.querySelector('[data-check]');
+    if (cb) {
+      const on = S.sel.has(id);
+      cb.classList.toggle('cb-on', on);
+      cb.setAttribute('aria-checked', String(on));
+      cb.innerHTML = on ? icon('check', 10, 2.2) : '';
+    }
+  });
+  const cbAll = $('#cbAll');
+  if (cbAll) {
+    const shown = visible().slice(0, S.renderLimit || 400);
+    const allChecked = shown.length > 0 && shown.every((it) => S.sel.has(it.id));
+    cbAll.classList.toggle('cb-on', allChecked);
+    cbAll.setAttribute('aria-checked', String(allChecked));
+    cbAll.innerHTML = allChecked ? icon('check', 10, 2.2) : '';
+  }
+  renderSelBar();
+}
+
+/* ── 列表行 & 藏书票卡片渲染 ───────────────────── */
+
+function rowHtml(it, opts = {}) {
+  const { showCat = false, dupRole = '' } = opts;
   const h = S.health[it.id];
+  const m = S.meta[it.id] || {};
   const pend = S.pending[it.id];
   const dead = PROBLEM.has((h || {}).status);
   const active = S.selected === it.id;
   const checked = S.sel.has(it.id);
   const moved = h && h.status === 'moved' && h.finalUrl;
+  const catBadge = showCat
+    ? `<span class="row-cat tnum">${it.code ? `${esc(it.code)} ${esc(folderName(it.code))}` : '待归类'}</span>`
+    : '';
+  const dupBadge = dupRole === 'keep'
+    ? '<span class="row-keep-pill">建议保留</span>'
+    : dupRole === 'dup'
+      ? '<span class="row-dup-pill">重复项</span>'
+      : '';
+  const tagsHtml = (m.tags || []).slice(0, 2).map((t) => `<span class="row-tag">#${esc(t)}</span>`).join('');
+  const usagePill = S.view.kind === 'usage' && S.usageCache && S.usageCache.usage[it.id]
+    ? (() => {
+        const u = S.usageCache.usage[it.id];
+        return S.usageTab === 'frequent'
+          ? `<span class="usage-meta-pill tnum">近30天 ${u.visitCount} 次</span>`
+          : `<span class="usage-meta-pill tnum">${u.visitCount ? '最近 ' + relTime(u.lastVisitTime) : '从未打开'}</span>`;
+      })()
+    : '';
 
-  return `<div class="row${active ? ' row-active' : ''}" data-id="${esc(it.id)}" tabindex="0">
+  return `<div class="row${active ? ' row-active' : ''}" data-id="${esc(it.id)}" draggable="true" tabindex="0">
     <span class="cb${checked ? ' cb-on' : ''}" data-check="${esc(it.id)}" role="checkbox" tabindex="0"
       aria-checked="${checked}">${checked ? icon('check', 10, 2.2) : ''}</span>
-    ${faviconMark(it.host, dead)}
+    ${faviconMark(it.host, dead, it.url)}
     <div class="row-main">
-      <div class="row-title">${esc(it.title)}</div>
-      <div class="row-meta"><span class="host">${esc(it.host)}</span></div>
+      <div class="row-title" data-title-host="${esc(it.id)}">${m.star ? '<span class="row-star" title="星标精选">★</span>' : ''}${highlightHtml(it.title)}</div>
+      <div class="row-meta">
+        ${m.readState === 'unread' ? '<span class="row-unread-dot" title="稍后阅读（未读）"></span>' : ''}
+        <span class="host">${highlightHtml(it.host)}</span>
+        ${dupBadge}${catBadge}${tagsHtml}${usagePill}
+      </div>
     </div>
     ${pend ? `<span class="row-suggest" title="AI 建议归入 ${esc(pend.code)} ${esc(folderName(pend.code))}">${icon('arrowRight', 11)}<span class="tnum">${esc(pend.code)}</span></span>` : '<span class="row-suggest is-empty"></span>'}
     ${moved ? `<span class="st st-warn" title="已跳转至新地址，可在详情中更新"><span class="st-dot"></span><span class="st-code">301</span></span>` : statusMark(h)}
     <time class="row-date tnum">${fmtDate(it.added)}</time>
     <div class="row-actions">
-      <button class="act-btn" data-quick-open="${esc(it.id)}" title="在新标签打开">${icon('external', 12)}<span>打开</span></button>
-      <button class="act-btn" data-quick-move="${esc(it.id)}" title="移动分类">${icon('folder', 12)}<span>移动</span></button>
-      <button class="act-btn" data-quick-check="${esc(it.id)}" title="单条重测">${icon('pulse', 12)}<span>重测</span></button>
-      <button class="act-btn" data-quick-del="${esc(it.id)}" title="删除">${icon('trash', 12)}</button>
+      <button class="act-btn" data-quick-open="${esc(it.id)}" title="在新标签打开" aria-label="在新标签打开">${icon('external', 13)}</button>
+      <button class="act-btn" data-quick-move="${esc(it.id)}" title="移动分类" aria-label="移动分类">${icon('folder', 13)}</button>
+      <button class="act-btn" data-quick-check="${esc(it.id)}" title="单条重测" aria-label="单条重测">${icon('pulse', 13)}</button>
+      <button class="act-btn is-danger" data-quick-del="${esc(it.id)}" title="删除" aria-label="删除">${icon('trash', 13)}</button>
+    </div>
+  </div>`;
+}
+
+function cardTileHtml(it, opts = {}) {
+  const { dupRole = '' } = opts;
+  const h = S.health[it.id];
+  const m = S.meta[it.id] || {};
+  const pend = S.pending[it.id];
+  const dead = PROBLEM.has((h || {}).status);
+  const active = S.selected === it.id;
+  const checked = S.sel.has(it.id);
+  const moved = h && h.status === 'moved' && h.finalUrl;
+  const accent = colorOfCode(it.code);
+  const dupBadge = dupRole === 'keep'
+    ? '<span class="row-keep-pill">建议保留</span>'
+    : dupRole === 'dup'
+      ? '<span class="row-dup-pill">重复项</span>'
+      : '';
+  const tagsHtml = (m.tags || []).slice(0, 3).map((t) => `<span class="row-tag">#${esc(t)}</span>`).join('');
+
+  return `<div class="card-tile${active ? ' row-active' : ''}" data-id="${esc(it.id)}" style="--tile-accent:${accent}" draggable="true" tabindex="0">
+    <div class="card-tile-top">
+      <span class="cb${checked ? ' cb-on' : ''}" data-check="${esc(it.id)}" role="checkbox" tabindex="0"
+        aria-checked="${checked}">${checked ? icon('check', 10, 2.2) : ''}</span>
+      ${faviconMark(it.host, dead, it.url)}
+      ${m.star ? '<span class="row-star" title="星标精选">★</span>' : ''}
+      ${m.readState === 'unread' ? '<span class="row-unread-dot" title="未读"></span>' : ''}
+      <span class="card-tile-spacer"></span>
+      ${moved ? '<span class="st st-warn"><span class="st-dot"></span><span class="st-code">301</span></span>' : statusMark(h)}
+    </div>
+    <div class="card-tile-title" data-title-host="${esc(it.id)}">${highlightHtml(it.title)}</div>
+    <div class="card-tile-host">${highlightHtml(it.host)}</div>
+    ${m.note ? `<div class="card-tile-note">${esc(m.note)}</div>` : ''}
+    <div class="card-tile-foot">
+      <span class="row-cat tnum">${it.code ? `${esc(it.code)} ${esc(folderName(it.code))}` : '待归类'}</span>
+      ${dupBadge}${tagsHtml}
+      ${pend ? `<span class="row-suggest">${icon('arrowRight', 10)}<span class="tnum">${esc(pend.code)}</span></span>` : ''}
+      <time class="card-tile-date">${fmtDate(it.added)}</time>
+    </div>
+    <div class="row-actions">
+      <button class="act-btn" data-quick-open="${esc(it.id)}" title="在新标签打开" aria-label="打开">${icon('external', 13)}</button>
+      <button class="act-btn" data-quick-move="${esc(it.id)}" title="移动分类" aria-label="移动">${icon('folder', 13)}</button>
+      <button class="act-btn" data-quick-check="${esc(it.id)}" title="单条重测" aria-label="重测">${icon('pulse', 13)}</button>
+      <button class="act-btn is-danger" data-quick-del="${esc(it.id)}" title="删除" aria-label="删除">${icon('trash', 13)}</button>
     </div>
   </div>`;
 }
@@ -410,8 +1056,26 @@ function rowHtml(it) {
 function renderList() {
   const rows = visible();
   const list = $('#list');
+  const colHost = $('#colHeadHost');
+  const isCards = S.viewMode === 'cards';
+  list.classList.toggle('mode-compact', S.viewMode === 'compact');
+
+  if (S.view.kind === 'usage' && !S.usageCache) {
+    if (colHost) colHost.innerHTML = '';
+    list.innerHTML = `
+      <div class="usage-banner">
+        <div class="usage-banner-text">
+          <strong>按需授权本地浏览历史</strong><br>
+          归藏不会默认索取历史权限。点击右侧按钮授予 <code>history</code> 权限后，将在本机比对书签访问频次，帮你揪出超过半年未打开的「尘封书卷」与高频「常阅藏书」。
+        </div>
+        <button type="button" class="btn btn-primary btn-md" id="btnGrantHistory">${icon('history', 14)}<span>授权并扫描</span></button>
+      </div>`;
+    $('#btnGrantHistory')?.addEventListener('click', analyzeHistoryNow);
+    return;
+  }
 
   if (!S.items.length) {
+    if (colHost) colHost.innerHTML = '';
     list.innerHTML = `<div class="empty"><div class="empty-rule"></div>
       <div class="empty-title">这里还没有书签</div>
       <div class="empty-hint">先在 Chrome 里存几条，或者用扩展弹窗把当前页收进来。</div></div>`;
@@ -421,17 +1085,30 @@ function renderList() {
   const shown = rows.slice(0, S.renderLimit || 400);
 
   if (!shown.length) {
+    if (colHost) colHost.innerHTML = '';
     if (S.q.trim()) {
       list.innerHTML = `<div class="empty">
         <div class="empty-mark">${icon('search', 22)}</div>
         <div class="empty-title">未寻得与「${esc(S.q)}」相符之藏卷</div>
-        <div class="empty-hint">试换关键词、域名，或按 <kbd>Esc</kbd> 清空检索。</div>
+        <div class="empty-hint">支持中文拼音首字母（如 <code>rgzn</code>）、<code>#标签</code>、<code>domain:github.com</code>、<code>status:dead</code>，按 <kbd>Esc</kbd> 清空检索。</div>
       </div>`;
     } else if (S.view.kind === 'dead') {
       list.innerHTML = `<div class="empty">
         <div class="empty-mark tone-ok">${icon('check', 22)}</div>
         <div class="empty-title">卷目完好，未见湮灭链接</div>
         <div class="empty-hint">当前没有检测到失效书签。可点击左下角重新核验。</div>
+      </div>`;
+    } else if (S.view.kind === 'dups') {
+      list.innerHTML = `<div class="empty">
+        <div class="empty-mark tone-ok">${icon('check', 22)}</div>
+        <div class="empty-title">书库洁净，未发现重复收藏</div>
+        <div class="empty-hint">已按规范化地址（忽略追踪参数与锚点）全量扫描。</div>
+      </div>`;
+    } else if (S.view.kind === 'moved') {
+      list.innerHTML = `<div class="empty">
+        <div class="empty-mark tone-ok">${icon('check', 22)}</div>
+        <div class="empty-title">暂无待更新的重定向链接</div>
+        <div class="empty-hint">检测发现 301 / 302 跳转后会在此集中列出，支持一键批量换新。</div>
       </div>`;
     } else if (S.view.kind === 'pending') {
       list.innerHTML = `<div class="empty">
@@ -443,16 +1120,31 @@ function renderList() {
       list.innerHTML = `<div class="empty">
         <div class="empty-rule"></div>
         <div class="empty-title">此部目下尚无藏卷</div>
-        <div class="empty-hint">可使用顶栏搜寻，或在详情抽屉中将其他条目移入此分卷。</div>
+        <div class="empty-hint">可使用顶栏搜寻，或直接把其他书签拖拽到左侧此分卷中。</div>
       </div>`;
     }
     return;
   }
-  let body = '';
-  const flat = S.view.kind === 'folder' || S.view.kind === 'dead' || S.view.kind === 'susp' || S.q.trim();
 
-  if (flat) {
-    body = shown.map(rowHtml).join('');
+  let body = '';
+  const flat = Boolean(
+    ['folder', 'dead', 'susp', 'moved', 'starred', 'unread', 'tag', 'usage'].includes(S.view.kind) || S.q.trim()
+  );
+  const showCat = flat && S.view.kind !== 'folder';
+  const itemRenderer = (it, o) => (isCards ? cardTileHtml(it, o) : rowHtml(it, o));
+  const wrapItems = (html) => (isCards ? `<div class="cards-grid">${html}</div>` : html);
+
+  if (S.view.kind === 'dups' && !S.q.trim()) {
+    const groups = dupGroups();
+    body = groups.map((g, idx) => `<div class="group-head">
+        <span class="group-num">#${idx + 1}</span>
+        <span class="group-name">${esc(g.host || g.key)}</span>
+        <span class="group-count">${g.items.length} 条重复</span>
+        <span class="group-rule"></span>
+      </div>` + wrapItems(g.items.map((it) => itemRenderer(it, { showCat: true, dupRole: it.id === g.keepId ? 'keep' : 'dup' })).join(''))
+    ).join('');
+  } else if (flat) {
+    body = wrapItems(shown.map((it) => itemRenderer(it, { showCat })).join(''));
   } else {
     const groups = groupByCode(shown, S.scheme);
     body = groups.map((g) => {
@@ -463,15 +1155,19 @@ function renderList() {
         <span class="group-count">${g.rows.length} 条</span>
         <span class="group-rule"></span>
         ${bad ? `<span class="group-bad">${bad} 条失效</span>` : ''}
-      </div>` + g.rows.map(rowHtml).join('');
+      </div>` + wrapItems(g.rows.map((it) => itemRenderer(it, { showCat: false })).join(''));
     }).join('');
   }
 
   const allChecked = shown.length > 0 && shown.every((it) => S.sel.has(it.id));
-  const colHead = `<div class="col-head">
-    <span><span class="cb${allChecked ? ' cb-on' : ''}" id="cbAll" role="checkbox" tabindex="0" aria-checked="${allChecked}">${allChecked ? icon('check', 10, 2.2) : ''}</span></span>
-    <span></span><span>书签</span><span class="col-c1">建议</span><span class="col-c2">状态</span><span class="col-c3">添加</span>
-  </div>`;
+  if (colHost) {
+    colHost.innerHTML = isCards
+      ? ''
+      : `<div class="col-head">
+          <span><span class="cb${allChecked ? ' cb-on' : ''}" id="cbAll" role="checkbox" tabindex="0" aria-checked="${allChecked}">${allChecked ? icon('check', 10, 2.2) : ''}</span></span>
+          <span></span><span>书签</span><span class="col-c1">建议</span><span class="col-c2">状态</span><span class="col-c3">添加</span>
+        </div>`;
+  }
 
   const tail = rows.length > shown.length
     ? `<div class="load-more-bar">
@@ -480,22 +1176,18 @@ function renderList() {
       </div>`
     : '<div class="list-tail"></div>';
 
-  list.innerHTML = colHead + (shown.length ? body : `<div class="empty"><div class="empty-rule"></div>
-    <div class="empty-title">这一栏是空的</div>
-    <div class="empty-hint">换个分类，或者把搜索词清掉。</div></div>`) + tail;
+  list.innerHTML = body + tail;
 
-  const btnMore = $('#btnLoadMore');
-  if (btnMore) btnMore.addEventListener('click', () => { S.renderLimit += 200; renderList(); });
-  const btnAll = $('#btnLoadAll');
-  if (btnAll) btnAll.addEventListener('click', () => { S.renderLimit = rows.length; renderList(); });
+  $('#btnLoadMore')?.addEventListener('click', () => { S.renderLimit += 200; renderList(); });
+  $('#btnLoadAll')?.addEventListener('click', () => { S.renderLimit = rows.length; renderList(); });
 
   const cbAll = $('#cbAll');
   if (cbAll) {
     const toggleAll = () => {
-      if (allChecked) shown.forEach((it) => S.sel.delete(it.id));
+      const nowAll = shown.length > 0 && shown.every((it) => S.sel.has(it.id));
+      if (nowAll) shown.forEach((it) => S.sel.delete(it.id));
       else shown.forEach((it) => S.sel.add(it.id));
-      renderList();
-      renderSelBar();
+      syncSelectionInPlace();
     };
     cbAll.addEventListener('click', toggleAll);
     cbAll.addEventListener('keydown', (e) => {
@@ -503,13 +1195,7 @@ function renderList() {
     });
   }
 
-  // Checkbox 选择（含 Shift 范围连选）
-  // 图标加载完成才显示；加载不到就退回首字母
-  list.querySelectorAll('img.row-favicon').forEach((img) => {
-    img.addEventListener('error', () => img.remove());
-    if (img.complete && img.naturalWidth > 0) img.style.opacity = '1';
-    else img.addEventListener('load', () => { img.style.opacity = '1'; });
-  });
+  wireFavicons(list);
 
   list.querySelectorAll('[data-check]').forEach((el) => {
     const handleCheck = (e) => {
@@ -523,28 +1209,22 @@ function renderList() {
           const from = Math.min(lastIdx, curIdx);
           const to = Math.max(lastIdx, curIdx);
           for (let i = from; i <= to; i++) S.sel.add(shown[i].id);
-          renderList();
-          renderSelBar();
+          syncSelectionInPlace();
           return;
         }
       }
 
       S.lastCheckedId = id;
       if (S.sel.has(id)) S.sel.delete(id); else S.sel.add(id);
-      renderList();
-      renderSelBar();
+      syncSelectionInPlace();
     };
 
     el.addEventListener('click', handleCheck);
     el.addEventListener('keydown', (e) => {
-      if (e.key === ' ' || e.key === 'Enter') {
-        e.preventDefault();
-        handleCheck(e);
-      }
+      if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); handleCheck(e); }
     });
   });
 
-  // 单行快捷操作按钮
   list.querySelectorAll('[data-quick-open]').forEach((btn) => {
     btn.addEventListener('click', (e) => {
       e.stopPropagation();
@@ -559,18 +1239,7 @@ function renderList() {
       const it = S.items.find((x) => x.id === btn.dataset.quickMove);
       if (!it) return;
       pickFolder(it.title, '移动到这个分类', async (code) => {
-        const oldParentId = it.parentId || '1';
-        const r = await send('bookmarks:moveCode', { ids: [it.id], code }).catch((err) => ({ error: err.message }));
-        if (r.error) return toast(r.error);
-        await load();
-        toast(`已移动到 ${code} ${folderName(code)}`, {
-          actionText: '撤销',
-          onAction: async () => {
-            await send('bookmarks:restore', { items: [{ type: 'move', id: it.id, oldParentId }] });
-            await load();
-            toast('已撤销移动');
-          },
-        });
+        await moveWithUndo([it.id], code, true);
       });
     });
   });
@@ -578,48 +1247,228 @@ function renderList() {
   list.querySelectorAll('[data-quick-check]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const id = btn.dataset.quickCheck;
-      await send('health:run', { ids: [id] }).catch((err) => toast(err.message));
+      await send('health:run', { ids: [btn.dataset.quickCheck] }).catch((err) => toast(err.message));
     });
   });
 
   list.querySelectorAll('[data-quick-del]').forEach((btn) => {
     btn.addEventListener('click', async (e) => {
       e.stopPropagation();
-      const it = S.items.find((x) => x.id === btn.dataset.quickDel);
-      if (!it) return;
-      const snapshot = { ...it };
-      await send('bookmarks:remove', { ids: [it.id] });
-      if (S.selected === it.id) { S.selected = null; S.drawer = null; }
-      await load();
-      toast(`已删除「${snapshot.title}」`, {
-        actionText: '撤销',
-        onAction: async () => {
-          await send('bookmarks:restore', { items: [{ type: 'delete', ...snapshot }] });
-          await load();
-          toast('已撤销删除');
-        },
-      });
+      await deleteWithUndo([btn.dataset.quickDel]);
     });
   });
 
-  // 点击行打开详情
-  list.querySelectorAll('.row').forEach((el) => {
-    el.addEventListener('click', () => {
+  list.querySelectorAll('[data-id]').forEach((el) => {
+    el.addEventListener('click', (e) => {
+      if (e.target.closest('input, button, [data-check]')) return;
       S.selected = el.dataset.id;
       S.drawer = 'detail';
       S.editing = null;
-      renderList();
+      syncSelectionInPlace();
       renderInspector();
     });
-    el.addEventListener('dblclick', async () => {
+    el.addEventListener('dblclick', (e) => {
+      if (e.target.closest('input, button, [data-check]')) return;
       const it = S.items.find((x) => x.id === el.dataset.id);
       if (it) chrome.tabs.create({ url: it.url });
+    });
+    el.addEventListener('contextmenu', (e) => {
+      e.preventDefault();
+      openContextMenu(e, el.dataset.id);
+    });
+    el.addEventListener('dragstart', (e) => {
+      const id = el.dataset.id;
+      S.dragIds = S.sel.has(id) ? [...S.sel] : [id];
+      el.classList.add('is-dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', S.dragIds.join(','));
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('is-dragging');
+      S.dragIds = [];
+      $('#rail')?.querySelectorAll('.is-drop-over').forEach((n) => n.classList.remove('is-drop-over'));
     });
   });
 
   renderSelBar();
 }
+
+/* ── 公共增删改辅助 + 原地行内重命名 ───────────── */
+
+async function moveWithUndo(ids, code, learn = false) {
+  const snapshots = ids.map((id) => ({
+    type: 'move',
+    id,
+    oldParentId: S.items.find((x) => x.id === id)?.parentId || '1',
+  }));
+  const r = await send('bookmarks:moveCode', { ids, code, learn }).catch((err) => ({ error: err.message }));
+  if (r.error) return toast(r.error);
+  rememberRecentCode(code);
+  S.sel.clear();
+  await load();
+  toast(`已移到 ${code} ${folderName(code)}${ids.length > 1 ? `（${r.moved} 条）` : ''}`, {
+    actionText: '撤销',
+    onAction: async () => {
+      await send('bookmarks:restore', { items: snapshots });
+      await load();
+      toast('已撤销移动');
+    },
+  });
+}
+
+async function deleteWithUndo(ids) {
+  const snapshots = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
+  if (!snapshots.length) return;
+  const r = await send('bookmarks:remove', { ids }).catch((err) => ({ error: err.message }));
+  if (r.error) return toast(r.error);
+  if (ids.includes(S.selected)) { S.selected = null; S.drawer = null; S.editing = null; }
+  S.sel.clear();
+  await load();
+  toast(snapshots.length === 1 ? `已删除「${snapshots[0].title}」` : `已删除 ${r.removed} 条书签`, {
+    actionText: '撤销',
+    onAction: async () => {
+      await send('bookmarks:restore', { items: snapshots.map((it) => ({ type: 'delete', ...it })) });
+      await load();
+      toast('已撤销删除');
+    },
+  });
+}
+
+function startInlineRename(id) {
+  const it = S.items.find((x) => x.id === id);
+  const host = $(`[data-title-host="${id}"]`);
+  if (!it || !host) return;
+  const oldTitle = it.title;
+  host.innerHTML = `<input class="inline-edit-input" value="${esc(oldTitle)}" spellcheck="false" />`;
+  const input = host.querySelector('input');
+  input.focus();
+  input.select();
+
+  let finished = false;
+  const finish = async (save) => {
+    if (finished) return;
+    finished = true;
+    const next = input.value.trim();
+    if (!save || !next || next === oldTitle) {
+      renderList();
+      return;
+    }
+    try {
+      await send('bookmarks:update', { id: it.id, title: next });
+      await load();
+      toast('已重命名', {
+        actionText: '撤销',
+        onAction: async () => {
+          await send('bookmarks:update', { id: it.id, title: oldTitle });
+          await load();
+          toast('已撤销重命名');
+        },
+      });
+    } catch (e) {
+      toast(e.message);
+      renderList();
+    }
+  };
+  input.addEventListener('click', (e) => e.stopPropagation());
+  input.addEventListener('keydown', (e) => {
+    e.stopPropagation();
+    if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+  });
+  input.addEventListener('blur', () => finish(true));
+}
+
+/* ── 自定义磨砂右键菜单 ────────────────────────── */
+
+function closeContextMenu() {
+  const m = $('#ctxMenu');
+  if (m) m.hidden = true;
+}
+
+function openContextMenu(e, id) {
+  const menu = $('#ctxMenu');
+  const it = S.items.find((x) => x.id === id);
+  if (!menu || !it) return;
+
+  S.selected = id;
+  syncSelectionInPlace();
+
+  const targetIds = S.sel.has(id) && S.sel.size > 1 ? [...S.sel] : [id];
+  const multi = targetIds.length > 1;
+  const m = S.meta[id] || {};
+  const recentMoves = S.recentCodes
+    .map((c) => S.scheme.find((f) => f.code === c))
+    .filter(Boolean)
+    .slice(0, 3);
+
+  menu.innerHTML = `
+    ${multi ? `<div class="ctx-label">已选 ${targetIds.length} 条书签</div>` : ''}
+    ${!multi ? `
+      <button type="button" class="ctx-item" data-ctx="open">${icon('external', 13)}<span>在新标签打开</span><kbd>↵</kbd></button>
+      <button type="button" class="ctx-item" data-ctx="open-bg">${icon('window', 13)}<span>后台静默打开</span><kbd>O</kbd></button>
+      <button type="button" class="ctx-item" data-ctx="copy-url">${icon('link', 13)}<span>复制网址</span><kbd>C</kbd></button>
+      <button type="button" class="ctx-item" data-ctx="copy-md">${icon('copy', 13)}<span>复制 Markdown 链接</span></button>
+      <button type="button" class="ctx-item" data-ctx="rename">${icon('pencil', 13)}<span>原地重命名</span><kbd>E</kbd></button>
+      <div class="ctx-sep"></div>
+    ` : ''}
+    ${recentMoves.length ? `
+      <div class="ctx-label">快速移入</div>
+      ${recentMoves.map((f) => `<button type="button" class="ctx-item" data-ctx-move="${esc(f.code)}">${icon('folder', 13)}<span>${esc(f.code)} ${esc(f.name)}</span></button>`).join('')}
+    ` : ''}
+    <button type="button" class="ctx-item" data-ctx="move">${icon('folder', 13)}<span>移动到其他分类…</span><kbd>M</kbd></button>
+    <div class="ctx-sep"></div>
+    <button type="button" class="ctx-item" data-ctx="star">${icon('star', 13)}<span>${!multi && m.star ? '取消星标' : '加入星标精选'}</span><kbd>S</kbd></button>
+    <button type="button" class="ctx-item" data-ctx="unread">${icon('bookmark', 13)}<span>${!multi && m.readState === 'unread' ? '标为已读' : '加入稍后阅读'}</span><kbd>U</kbd></button>
+    <button type="button" class="ctx-item" data-ctx="check">${icon('pulse', 13)}<span>${multi ? '批量检测状态' : '单条重测健康'}</span><kbd>R</kbd></button>
+    <div class="ctx-sep"></div>
+    <button type="button" class="ctx-item is-danger" data-ctx="del">${icon('trash', 13)}<span>${multi ? `删除这 ${targetIds.length} 条` : '删除书签'}</span><kbd>⌫</kbd></button>
+  `;
+
+  menu.hidden = false;
+  const mw = menu.offsetWidth || 220;
+  const mh = menu.offsetHeight || 300;
+  const x = Math.min(e.clientX, window.innerWidth - mw - 10);
+  const y = Math.min(e.clientY, window.innerHeight - mh - 10);
+  menu.style.left = Math.max(8, x) + 'px';
+  menu.style.top = Math.max(8, y) + 'px';
+
+  menu.querySelectorAll('[data-ctx-move]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      closeContextMenu();
+      moveWithUndo(targetIds, btn.dataset.ctxMove, targetIds.length === 1);
+    });
+  });
+
+  menu.querySelectorAll('[data-ctx]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const act = btn.dataset.ctx;
+      closeContextMenu();
+      if (act === 'open') chrome.tabs.create({ url: it.url });
+      else if (act === 'open-bg') { chrome.tabs.create({ url: it.url, active: false }); toast('已在后台标签打开'); }
+      else if (act === 'copy-url') { await navigator.clipboard.writeText(it.url).catch(() => {}); toast('已复制网址'); }
+      else if (act === 'copy-md') { await navigator.clipboard.writeText(`[${it.title}](${it.url})`).catch(() => {}); toast('已复制 Markdown 链接'); }
+      else if (act === 'rename') startInlineRename(it.id);
+      else if (act === 'move') pickFolder(multi ? `${targetIds.length} 条书签` : it.title, '移动到分类', (code) => moveWithUndo(targetIds, code, targetIds.length === 1));
+      else if (act === 'star') {
+        const next = multi ? true : !m.star;
+        for (const tid of targetIds) await send('meta:set', { id: tid, patch: { star: next } });
+        await load();
+        toast(next ? '已加星标' : '已取消星标');
+      } else if (act === 'unread') {
+        const next = multi ? 'unread' : (m.readState === 'unread' ? 'read' : 'unread');
+        for (const tid of targetIds) await send('meta:set', { id: tid, patch: { readState: next } });
+        await load();
+        toast(next === 'unread' ? '已加入稍后阅读' : '已标为已读');
+      } else if (act === 'check') {
+        await send('health:run', { ids: targetIds }).catch((err) => toast(err.message));
+      } else if (act === 'del') {
+        await deleteWithUndo(targetIds);
+      }
+    });
+  });
+}
+
+/* ── 悬浮多选条 ───────────────────────────────── */
 
 function renderSelBar() {
   const existing = $('.selbar');
@@ -635,66 +1484,63 @@ function renderSelBar() {
     <button class="btn btn-ghost btn-sm" id="btnInvertSel" title="反向勾选当前视图条目">反选</button>
     <span class="v-rule"></span>
     <button class="btn btn-ghost btn-sm" data-act="move">${icon('folder', 13)}<span>移动</span></button>
+    <button class="btn btn-ghost btn-sm" data-act="tag">${icon('tag', 13)}<span>标签</span></button>
     <button class="btn btn-ghost btn-sm" data-act="ai">${icon('sparkle', 13)}<span>归类</span></button>
     <button class="btn btn-ghost btn-sm" data-act="check">${icon('pulse', 13)}<span>检测</span></button>
+    <button class="btn btn-ghost btn-sm" data-act="share">${icon('copy', 13)}<span>书单</span></button>
     <span class="v-rule"></span>
     <button class="btn btn-ghost btn-sm" data-act="del">${icon('trash', 13)}<span>删除</span></button>
     <button class="selbar-x" data-act="none" title="取消选择">${icon('x', 12)}</button>`;
   $('.list-pane').appendChild(bar);
 
-  const selAllTotal = bar.querySelector('#btnSelAllTotal');
-  if (selAllTotal) {
-    selAllTotal.addEventListener('click', () => {
-      rows.forEach((r) => S.sel.add(r.id));
-      renderList();
-      renderSelBar();
-    });
-  }
+  bar.querySelector('#btnSelAllTotal')?.addEventListener('click', () => {
+    rows.forEach((r) => S.sel.add(r.id));
+    syncSelectionInPlace();
+  });
 
-  const invertBtn = bar.querySelector('#btnInvertSel');
-  if (invertBtn) {
-    invertBtn.addEventListener('click', () => {
-      rows.forEach((r) => {
-        if (S.sel.has(r.id)) S.sel.delete(r.id);
-        else S.sel.add(r.id);
-      });
-      renderList();
-      renderSelBar();
+  bar.querySelector('#btnInvertSel')?.addEventListener('click', () => {
+    rows.forEach((r) => {
+      if (S.sel.has(r.id)) S.sel.delete(r.id);
+      else S.sel.add(r.id);
     });
-  }
+    syncSelectionInPlace();
+  });
 
   bar.addEventListener('click', async (e) => {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
     const act = btn.dataset.act;
     const ids = [...S.sel];
-    if (act === 'none') { S.sel.clear(); renderList(); return; }
+    if (act === 'none') { S.sel.clear(); syncSelectionInPlace(); return; }
     if (act === 'move') {
-      pickFolder(ids.length + ' 条书签', '移动到这个分类', async (code) => {
-        const snapshots = ids.map((id) => {
-          const it = S.items.find((x) => x.id === id);
-          return { id, oldParentId: it ? it.parentId || '1' : '1' };
-        });
-        const r = await send('bookmarks:moveCode', { ids, code }).catch((err) => ({ error: err.message }));
-        if (r.error) return toast(r.error);
-        S.sel.clear();
-        await load();
-        toast(`已移动 ${r.moved} 条到 ${code} ${folderName(code)}`, {
-          actionText: '撤销',
-          onAction: async () => {
-            await send('bookmarks:restore', { items: snapshots.map((s) => ({ type: 'move', ...s })) });
-            await load();
-            toast('已撤销移动');
-          },
-        });
-      });
+      pickFolder(ids.length + ' 条书签', '移动到这个分类', (code) => moveWithUndo(ids, code, false));
+      return;
+    }
+    if (act === 'tag') {
+      const tag = window.prompt(`为选中的 ${ids.length} 条书签添加标签（不需要带 #）：`, '');
+      if (!tag || !tag.trim()) return;
+      const r = await send('meta:batchTag', { ids, tag: tag.trim() }).catch((err) => ({ error: err.message }));
+      if (r.error) return toast(r.error);
+      await load();
+      toast(`已为 ${r.count} 条打上 #${r.tag}`);
+      return;
+    }
+    if (act === 'share') {
+      const chosen = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
+      const md = toSelectionMarkdown(chosen, S.scheme, { meta: S.meta });
+      try {
+        await navigator.clipboard.writeText(md);
+        toast(`已复制 ${chosen.length} 条精选书单到剪贴板`);
+      } catch {
+        downloadFile('guizang-reading-list.md', md, 'text/markdown;charset=utf-8');
+        toast(`已下载 ${chosen.length} 条精选书单`);
+      }
       return;
     }
     if (act === 'check') {
       const limit = S.settings.checkLimit || 60;
       const batch = ids.slice(0, limit);
       await send('health:run', { ids: batch }).catch((err) => toast(err.message));
-      // 后台还有一道同样的上限，会静默截断——这里必须说明实际测了多少
       if (ids.length > batch.length) {
         toast(`已选 ${ids.length} 条，这次测前 ${batch.length} 条；单次上限可在设置里调`);
       }
@@ -706,19 +1552,7 @@ function renderSelBar() {
       return;
     }
     if (act === 'del') {
-      const itemsToDel = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
-      const r = await send('bookmarks:remove', { ids }).catch((err) => ({ error: err.message }));
-      if (r.error) return toast(r.error);
-      S.sel.clear();
-      await load();
-      toast(`已删除 ${r.removed} 条书签`, {
-        actionText: '撤销',
-        onAction: async () => {
-          await send('bookmarks:restore', { items: itemsToDel.map((it) => ({ type: 'delete', ...it })) });
-          await load();
-          toast('已撤销批量删除');
-        },
-      });
+      await deleteWithUndo(ids);
     }
   });
 }
@@ -729,7 +1563,6 @@ async function scanView() {
   const rows = visible();
   if (!rows.length) return toast('当前视图没有可检测的书签');
   const limit = S.settings.checkLimit || 60;
-  // 同一视图连点要能接力：先把没检测过的跑完，全都测过了才回头复检
   const fresh = rows.filter((it) => !S.health[it.id]).map((it) => it.id);
   const pool = fresh.length ? fresh : rows.map((it) => it.id);
   const batch = pool.slice(0, limit);
@@ -766,54 +1599,135 @@ function renderScan() {
 
 function renderInspector() {
   const box = $('#inspector');
-  if (!S.drawer) { box.hidden = true; box.innerHTML = ''; return; }
+  const resizer = $('#inspResizer');
+  if (!S.drawer) {
+    box.hidden = true;
+    box.innerHTML = '';
+    if (resizer) resizer.hidden = true;
+    syncMobileOverlay();
+    return;
+  }
   box.hidden = false;
+  if (resizer) resizer.hidden = false;
 
   if (S.drawer === 'ai') {
     box.innerHTML = aiPanel();
     wireAi();
+    syncMobileOverlay();
     return;
   }
   if (S.drawer === 'organize') {
     box.innerHTML = organizePanel();
     wireOrganize();
+    syncMobileOverlay();
     return;
   }
   const it = S.items.find((x) => x.id === S.selected);
-  if (!it) { box.hidden = true; S.drawer = null; return; }
+  if (!it) {
+    box.hidden = true;
+    if (resizer) resizer.hidden = true;
+    S.drawer = null;
+    syncMobileOverlay();
+    return;
+  }
   box.innerHTML = detailPanel(it);
   wireDetail(it);
+  syncMobileOverlay();
 }
 
 async function undoJournal(id) {
   const r = await send('organize:undo', { journalId: id }).catch((err) => ({ error: err.message }));
   if (r.error) return toast(r.error);
   toast(`已撤销 ${r.restored} 条`);
-  S.journal = null;
   await load();
 }
 
-function openOrganize() {
+function openOrganize(tab = 'plan') {
   S.drawer = 'organize';
+  S.orgTab = tab;
   S.selected = null;
   renderInspector();
   renderRail();
 }
 
+function journalHistoryHtml() {
+  const list = S.journals || [];
+  if (!list.length) return '';
+  return `<div class="journal-list">
+    <div class="journal-head">最近整理与归类日志（可撤销）</div>
+    ${list.map((j) => `<div class="journal-item">
+      <div class="journal-item-meta">
+        <span>移动 <b>${j.applied || j.count || 0}</b> 条${j.scope === 'all' ? '（全库）' : j.scope === 'ai' ? '（AI 建议）' : '（待归类）'}</span>
+        <span class="journal-item-when">${relTime(j.at)}</span>
+      </div>
+      ${j.undoneAt
+        ? '<span class="journal-done">已撤销</span>'
+        : `<button type="button" class="btn btn-line btn-sm" data-undo-id="${esc(j.id)}">撤销</button>`}
+    </div>`).join('')}
+  </div>`;
+}
+
 function organizePanel() {
   const plan = S.plan;
   const busy = S.planBusy;
+  const isClean = S.orgTab === 'clean';
 
   const head = `<div class="insp-head">
       <div class="insp-head-bar">
-        <div class="insp-kicker">${icon('folder', 12)} 整理计划</div>
+        <div class="insp-kicker">${icon(isClean ? 'wand' : 'folder', 12)} ${isClean ? '标题洗白' : '整理计划'}</div>
         <div class="insp-head-tools">
           <button class="ibtn" data-close title="收起">${icon('x', 13)}</button>
         </div>
       </div>
-      <h2 class="insp-title">${S.applyBusy ? '正在整理' : busy ? '正在生成' : plan ? plan.ops.length + ' 条待整理' : '还没有计划'}</h2>
-      <p class="insp-sub">按已安装的方案把待归类书签归位。生成计划只读，不会移动任何书签。</p>
+      <h2 class="insp-title">${isClean
+        ? (S.cleanBusy ? '正在扫描噪声标题' : S.cleanList ? `${S.cleanList.length} 条可洗白` : '标题规范化')
+        : (S.applyBusy ? '正在整理' : busy ? '正在生成' : plan ? plan.ops.length + ' 条待整理' : '还没有计划')
+      }</h2>
+      <div class="seg-tabs insp-seg">
+        <button type="button" class="seg-tab${!isClean ? ' is-active' : ''}" data-org-tab="plan">归位整理</button>
+        <button type="button" class="seg-tab${isClean ? ' is-active' : ''}" data-org-tab="clean">标题洗白</button>
+      </div>
     </div>`;
+
+  if (isClean) {
+    if (S.cleanBusy) {
+      return head + `<div class="insp-body"><div class="plan-busy">
+        <div class="plan-busy-line">正在识别未读角标、裸网址与冗余后缀…</div>
+        <div class="scan-track"><div class="scan-fill" style="width:45%"></div></div>
+      </div></div>`;
+    }
+    const list = S.cleanList;
+    if (!list) {
+      return head + `<div class="insp-body"><div class="plan-empty">
+        <div class="plan-empty-line">把杂乱标题洗成干净可读的书目名</div>
+        <div class="plan-empty-hint">自动剔除 <code>(3)</code> 未读角标、裸域名后缀或乱码标题；配了模型时还可结合页面摘要精修，逐条确认后才改。</div>
+        <button type="button" class="btn btn-primary btn-md" data-run-clean>${icon('wand', 13)}<span>扫描当前视图噪声标题</span></button>
+      </div></div>`;
+    }
+    if (!list.length) {
+      return head + `<div class="insp-body"><div class="plan-empty">
+        <div class="plan-empty-line">当前视图标题都很干净</div>
+        <div class="plan-empty-hint">未发现需要清洗的未读角标或冗余后缀。</div>
+        <button type="button" class="btn btn-line btn-sm" data-run-clean>重新扫描</button>
+      </div></div>`;
+    }
+    return head + `<div class="insp-body">
+      ${list.map((c) => `<div class="clean-row">
+        <div class="clean-old">${esc(c.from)}</div>
+        <div class="clean-new">${esc(c.to)}</div>
+        <div class="clean-acts">
+          <button type="button" class="btn btn-primary btn-sm" data-apply-clean="${esc(c.id)}">应用</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-drop-clean="${esc(c.id)}">忽略</button>
+        </div>
+      </div>`).join('')}
+    </div>
+    <div class="insp-foot plan-foot">
+      <div class="plan-foot-actions">
+        <button type="button" class="btn btn-primary btn-sm" data-apply-clean-all>应用全部 ${list.length} 条</button>
+        <button type="button" class="btn btn-ghost btn-sm" data-run-clean>重扫</button>
+      </div>
+    </div>`;
+  }
 
   if (S.applyBusy) {
     const ap = S.applyProgress || { done: 0, total: 0 };
@@ -821,7 +1735,7 @@ function organizePanel() {
     return head + `<div class="insp-body">
       <div class="plan-busy">
         <div class="plan-busy-line">正在移动 ${ap.done}/${ap.total || '…'}</div>
-        <div class="scan-track" style="background:rgba(34,73,110,.14)"><div class="scan-fill" style="width:${pct}%"></div></div>
+        <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
         <button class="btn btn-line btn-sm" data-stop style="margin-top:12px">停止</button>
       </div>
     </div>`;
@@ -833,7 +1747,7 @@ function organizePanel() {
     return head + `<div class="insp-body">
       <div class="plan-busy">
         <div class="plan-busy-line">${pr.stage === 'model' ? '模型正在判断' : '正在预筛'} ${pr.done}/${pr.total || '…'}</div>
-        <div class="scan-track" style="background:rgba(34,73,110,.14)"><div class="scan-fill" style="width:${pct}%"></div></div>
+        <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
       </div>
     </div>`;
   }
@@ -843,11 +1757,17 @@ function organizePanel() {
     return head + `<div class="insp-body">
       <div class="plan-empty">
         <div class="plan-empty-line">当前方案：${ready ? `${S.scheme.length} 个类目` : '还没有可用的分类目录'}</div>
+        <div class="seg-tabs">
+          <button type="button" class="seg-tab${S.orgScope === 'inbox' ? ' is-active' : ''}" data-org-scope="inbox">仅待归类</button>
+          <button type="button" class="seg-tab${S.orgScope === 'all' ? ' is-active' : ''}" data-org-scope="all">全库巡检错放</button>
+        </div>
         <div class="plan-empty-hint">${ready
-          ? '生成后会按类目列出「该挪去哪」，你可以逐条剔除或改判；确认无误再执行。'
-          : '先到设置页装一套方案（杜威、中图法等），再回来生成计划。'}</div>
+          ? (S.orgScope === 'all'
+              ? '全库巡检：扫描已分类与待归类书签（每次最多 200 条），仅列出建议跨类目迁徙的错放条目；确认无误且自动备份后才动手。'
+              : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
+          : '先到设置页装一套方案（杜威、中图法或自定义方案），再回来生成计划。'}</div>
         <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
-        ${S.journal ? `<div class="plan-last">上次整理移动了 <b>${S.journal.applied}</b> 条${S.journal.failed ? `，失败 ${S.journal.failed}` : ''}<button class="btn btn-ghost btn-sm" data-undo>撤销</button></div>` : ''}
+        ${journalHistoryHtml()}
       </div>
     </div>`;
   }
@@ -866,12 +1786,13 @@ function organizePanel() {
   return head + `
     <div class="insp-body">
       <div class="plan-stats">
+        <span>范围 <b>${plan.scope === 'all' ? '全库' : '待归类'}</b></span>
         <span>可移 <b>${s.ready}</b></span>
         <span>拿不准 <b>${s.unsure}</b></span>
         <span>跳过 <b>${s.skip}</b></span>
         ${s.blocked ? `<span class="tone-dead">动不了 <b>${s.blocked}</b></span>` : ''}
       </div>
-      ${groups || '<div class="plan-empty-hint">计划是空的：没有需要移动的书签。</div>'}
+      ${groups || '<div class="plan-empty"><div class="plan-empty-hint">计划是空的：没有需要移动的书签。</div></div>'}
     </div>
     <div class="insp-foot plan-foot">
       <div class="plan-foot-line">生成于 ${relTime(plan.at)}${plan.overflow ? ` · 还有 ${plan.overflow} 条没纳入` : ''}</div>
@@ -885,23 +1806,26 @@ function organizePanel() {
 
 function planRow(op) {
   const tone = op.status === 'ready' ? '' : op.status === 'unsure' ? ' tone-warn' : op.status === 'blocked' ? ' tone-dead' : ' tone-ink';
-  const tag = op.status === 'ready' ? `→ ${esc(op.to.code)} ${esc(op.to.name)}`
+  const fromPrefix = op.from && op.from.code ? `${esc(op.from.code)} ` : '';
+  const tag = op.status === 'ready' ? `${fromPrefix}→ ${esc(op.to.code)} ${esc(op.to.name)}`
     : op.status === 'unsure' ? '拿不准'
     : op.status === 'blocked' ? '动不了'
     : '跳过';
   const pickable = op.status === 'ready' || op.status === 'unsure';
   return `<div class="plan-row">
-    <div class="plan-main">
+    <div class="plan-row-top">
       <div class="plan-title" title="${esc(op.title)}">${esc(op.title)}</div>
+      <button class="ibtn plan-drop" data-drop="${esc(op.id)}" title="从计划里剔除" aria-label="从计划里剔除">${icon('x', 11)}</button>
+    </div>
+    <div class="plan-row-bot">
       <div class="plan-sub">
         <span class="plan-tag${tone}">${tag}</span>
         ${op.reason ? `<span class="plan-why" title="${esc(op.reason)}">${esc(op.reason)}</span>` : ''}
       </div>
+      ${pickable ? `<select class="plan-pick" data-pick="${esc(op.id)}" title="改判到哪个类目" aria-label="改判目标类目">
+        ${S.scheme.map((f) => `<option value="${esc(f.code)}"${op.to && op.to.code === f.code ? ' selected' : ''}>${esc(f.code)} ${esc(f.name)}</option>`).join('')}
+      </select>` : ''}
     </div>
-    ${pickable ? `<select class="plan-pick" data-pick="${esc(op.id)}" title="改判到哪个类目">
-      ${S.scheme.map((f) => `<option value="${esc(f.code)}"${op.to && op.to.code === f.code ? ' selected' : ''}>${esc(f.code)} ${esc(f.name)}</option>`).join('')}
-    </select>` : ''}
-    <button class="ibtn plan-drop" data-drop="${esc(op.id)}" title="从计划里剔除">${icon('x', 11)}</button>
   </div>`;
 }
 
@@ -912,35 +1836,88 @@ function wireOrganize() {
     renderInspector();
     renderRail();
   });
-
-  const gen = box.querySelector('[data-gen]');
-  if (gen) {
-    gen.addEventListener('click', async () => {
-      S.planBusy = true;
-      S.planProgress = { stage: 'preselect', done: 0, total: 0 };
+  box.querySelectorAll('[data-org-tab]').forEach((btn) => {
+    btn.addEventListener('click', () => { S.orgTab = btn.dataset.orgTab; renderInspector(); });
+  });
+  box.querySelectorAll('[data-org-scope]').forEach((btn) => {
+    btn.addEventListener('click', () => { S.orgScope = btn.dataset.orgScope; renderInspector(); });
+  });
+  box.querySelector('[data-run-clean]')?.addEventListener('click', async () => {
+    S.cleanBusy = true;
+    renderInspector();
+    try {
+      const ids = visible().slice(0, 40).map((x) => x.id);
+      const r = await send('ai:cleanTitles', { ids });
+      S.cleanList = r.items || [];
+    } catch (e) {
+      toast(e.message);
+      S.cleanList = [];
+    } finally {
+      S.cleanBusy = false;
       renderInspector();
-      await send('organize:plan', { scope: 'inbox' }).catch((err) => {
-        S.planBusy = false;
-        toast(err.message);
-        renderInspector();
+    }
+  });
+  box.querySelectorAll('[data-apply-clean]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const id = btn.dataset.applyClean;
+      const item = (S.cleanList || []).find((x) => x.id === id);
+      if (!item) return;
+      const r = await send('bookmarks:batchRename', { changes: [{ id: item.id, title: item.to }] });
+      S.cleanList = S.cleanList.filter((x) => x.id !== id);
+      await load();
+      toast('已更新标题', {
+        actionText: '撤销',
+        onAction: async () => {
+          await send('bookmarks:restore', { items: r.prev.map((p) => ({ type: 'title', ...p })) });
+          await load();
+          toast('已撤销标题修改');
+        },
       });
     });
-  }
-
+  });
+  box.querySelectorAll('[data-drop-clean]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      S.cleanList = (S.cleanList || []).filter((x) => x.id !== btn.dataset.dropClean);
+      renderInspector();
+    });
+  });
+  box.querySelector('[data-apply-clean-all]')?.addEventListener('click', async () => {
+    const list = S.cleanList || [];
+    if (!list.length) return;
+    const r = await send('bookmarks:batchRename', { changes: list.map((x) => ({ id: x.id, title: x.to })) });
+    S.cleanList = [];
+    await load();
+    toast(`已洗白 ${r.renamed} 条标题`, {
+      actionText: '撤销',
+      onAction: async () => {
+        await send('bookmarks:restore', { items: r.prev.map((p) => ({ type: 'title', ...p })) });
+        await load();
+        toast('已撤销批量改名');
+      },
+    });
+  });
+  box.querySelector('[data-gen]')?.addEventListener('click', async () => {
+    S.planBusy = true;
+    S.planProgress = { stage: 'preselect', done: 0, total: 0 };
+    renderInspector();
+    await send('organize:plan', { scope: S.orgScope }).catch((err) => {
+      S.planBusy = false;
+      toast(err.message);
+      renderInspector();
+    });
+  });
   box.querySelector('[data-clear]')?.addEventListener('click', async () => {
     await send('organize:cancel');
     S.plan = null;
     renderInspector();
     renderRail();
   });
-
   box.querySelectorAll('[data-drop]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const plan = await send('organize:drop', { id: btn.dataset.drop }).catch(() => null);
       if (plan) { S.plan = plan; renderInspector(); renderRail(); }
     });
   });
-
   box.querySelector('[data-apply]')?.addEventListener('click', async () => {
     S.applyBusy = true;
     S.applyProgress = { done: 0, total: (S.plan && S.plan.stats.ready) || 0 };
@@ -951,23 +1928,22 @@ function wireOrganize() {
       renderInspector();
     });
   });
-
   box.querySelector('[data-stop]')?.addEventListener('click', async () => {
     await send('organize:stop').catch(() => {});
     toast('正在停下…');
   });
-
-  box.querySelector('[data-undo]')?.addEventListener('click', () => {
-    if (S.journal) undoJournal(S.journal.id);
+  box.querySelectorAll('[data-undo-id]').forEach((btn) => {
+    btn.addEventListener('click', () => undoJournal(btn.dataset.undoId));
   });
-
   box.querySelectorAll('[data-pick]').forEach((sel) => {
     sel.addEventListener('change', async () => {
       const plan = await send('organize:override', { id: sel.dataset.pick, code: sel.value }).catch(() => null);
-      if (plan) { S.plan = plan; renderInspector(); renderRail(); }
+      if (plan) { S.plan = plan; renderInspector(); renderRail(); toast('已改判并记住此域名偏好'); }
     });
   });
 }
+
+/* ── AI 归类抽屉（带朱砂「已归」落印动效） ────── */
 
 function aiPanel() {
   const pend = Object.entries(S.pending)
@@ -977,12 +1953,13 @@ function aiPanel() {
 
   const doneRows = S.done.map((d) => `<div class="sg sg-done"><div class="sg-done-line">
       <span class="sg-done-mark">${icon('check', 11, 2)}</span>
-      <span>已归入 <b class="tnum">${esc(d.code)}</b> ${esc(d.name)}</span>
+      <span style="flex:1">已归入 <b class="tnum">${esc(d.code)}</b> ${esc(d.name)}</span>
+      <span class="seal-stamp">已归</span>
     </div></div>`).join('');
 
   const busy = S.aiBusy
     ? `<div class="sg"><div class="sg-why">正在生成建议 ${S.aiProgress ? `${S.aiProgress.done}/${S.aiProgress.total}` : '…'}</div>
-       <div class="scan-track" style="margin-top:8px;background:rgba(34,73,110,.14)">
+       <div class="scan-track" style="margin-top:8px">
        <div class="scan-fill" style="width:${S.aiProgress ? Math.round(S.aiProgress.done / S.aiProgress.total * 100) : 8}%"></div></div></div>`
     : '';
 
@@ -992,11 +1969,12 @@ function aiPanel() {
       <div class="insp-head-bar">
         <div class="insp-kicker">${icon('sparkle', 12)} 归类建议</div>
         <div class="insp-head-tools">
+          ${pend.length ? `<button class="ibtn" id="btnAiTriage" title="切入逐卷审定大卡模式 (T)">${icon('triage', 13)}</button>` : ''}
           <button class="ibtn" data-close title="收起">${icon('x', 13)}</button>
         </div>
       </div>
       <h2 class="insp-title">${pend.length ? `${pend.length} 条待确认` : (S.aiBusy ? '正在判断' : '没有待确认的建议')}</h2>
-      <p class="insp-sub">模型读标题与域名，按你现有的编号目录判断；确认之后才会真的移动。</p>
+      <p class="insp-sub">优先复用你的历史改判偏好，模型结合标题、域名与页面摘要判断；确认之后才会真的移动。</p>
     </div>
     <div class="insp-body">
       ${body || `<div class="empty" style="padding:22px 14px">
@@ -1017,7 +1995,7 @@ function suggestionCard(p) {
   return `<div class="sg" data-sg="${esc(p.id)}">
     <div class="sg-top">
       <button class="sg-title" data-locate="${esc(p.id)}">${esc(it.title)}</button>
-      <span class="sg-conf${unsure ? ' is-unsure' : ''}" title="${unsure ? '模型对这个判断不太确定' : '模型置信度'}">
+      <span class="sg-conf${unsure ? ' is-unsure' : ''}" title="${unsure ? '对这个判断不太确定' : '置信度'}">
         <span class="sg-conf-bar"><span style="width:${Math.round(p.conf * 100)}%"></span></span>
         ${p.conf.toFixed(2)}
       </span>
@@ -1028,6 +2006,7 @@ function suggestionCard(p) {
       <span class="chip chip-to"><b>${esc(p.code)}</b>${esc(folderName(p.code))}</span>
       ${unsure ? '<span class="sg-unsure-tag">拿不准</span>' : ''}
       ${p.source === 'heuristic' ? '<span class="sg-unsure-tag">本地规则</span>' : ''}
+      ${p.source === 'learned' ? '<span class="sg-unsure-tag" style="color:var(--ok);background:var(--ok-wash)">历史偏好</span>' : ''}
     </div>
     <p class="sg-why">${esc(p.reason || '模型没有给出理由')}</p>
     ${picking ? `<div class="sg-picker">${S.scheme.map((f) => `
@@ -1043,8 +2022,12 @@ function suggestionCard(p) {
 
 function wireAi() {
   const box = $('#inspector');
-  box.querySelector('[data-close]').addEventListener('click', () => {
+  box.querySelector('[data-close]')?.addEventListener('click', () => {
     S.drawer = null; S.picking = null; renderInspector(); renderTop();
+  });
+  box.querySelector('#btnAiTriage')?.addEventListener('click', () => {
+    const items = Object.keys(S.pending).map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
+    triage.open(items);
   });
 
   const acceptAll = box.querySelector('[data-acceptall]');
@@ -1069,9 +2052,7 @@ function wireAi() {
 
   box.querySelectorAll('[data-locate]').forEach((el) => {
     el.addEventListener('click', () => {
-      const id = el.dataset.locate;
-      const target = $(`[data-id="${id}"]`);
-      if (target) target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      $(`[data-id="${el.dataset.locate}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
     });
   });
   box.querySelectorAll('[data-accept]').forEach((el) => {
@@ -1101,7 +2082,10 @@ async function acceptIds(ids) {
   S.done = S.done.slice(0, 6);
   S.picking = null;
   await load();
-  toast(`已归入 ${r.moved} 条`);
+  toast(`已归入 ${r.moved} 条`, r.journalId ? {
+    actionText: '撤销',
+    onAction: () => undoJournal(r.journalId),
+  } : undefined);
 }
 
 async function ignoreIds(ids) {
@@ -1112,13 +2096,14 @@ async function ignoreIds(ids) {
 
 async function overrideSuggestion(id, code) {
   await send('ai:ignore', { ids: [id] }).catch(() => {});
-  const r = await send('bookmarks:moveCode', { ids: [id], code }).catch((err) => ({ error: err.message }));
+  const r = await send('bookmarks:moveCode', { ids: [id], code, learn: true }).catch((err) => ({ error: err.message }));
   if (r.error) return toast(r.error);
+  rememberRecentCode(code);
   S.done.unshift({ code, name: folderName(code), title: '' });
   S.done = S.done.slice(0, 6);
   S.picking = null;
   await load();
-  toast(`已按你的判断归入 ${code} ${folderName(code)}`);
+  toast(`已归入 ${code} ${folderName(code)}（已记住此域名偏好）`);
 }
 
 async function runAi(ids) {
@@ -1147,8 +2132,8 @@ function toggleAi() {
   renderTop();
 }
 
-/* 网址没有空格，浏览器只能硬切；在路径分隔符后插 <wbr> 让它断得好看些。
-   复制走的是 it.url 原值，不受影响。 */
+/* ── 详情抽屉 ─────────────────────────────────── */
+
 function breakableUrl(url) {
   return String(url)
     .split(/([\/?#&=_-])/)
@@ -1156,8 +2141,40 @@ function breakableUrl(url) {
     .join('');
 }
 
+function waybackHtml(it, h) {
+  if (!h || !PROBLEM.has(h.status)) return '';
+  const wb = S.wayback[it.id];
+  if (!wb) {
+    return `<div class="wayback-box">
+      <div class="wayback-row">
+        <button type="button" class="btn btn-line btn-sm" id="btnWayback">${icon('archive', 12)}<span>查 Wayback 时光机存档</span></button>
+      </div>
+    </div>`;
+  }
+  if (wb.loading) {
+    return `<div class="wayback-box"><div class="wayback-msg">正在向 Internet Archive 查询历史快照…</div></div>`;
+  }
+  if (wb.available && wb.url) {
+    return `<div class="wayback-box">
+      <div class="wayback-msg">找到历史快照${wb.dateLabel ? `（${esc(wb.dateLabel)}）` : ''}，可预览或直接替换为存档地址：</div>
+      <div class="wayback-row">
+        <button type="button" class="btn btn-primary btn-sm" id="btnApplyWayback">${icon('check', 11)}<span>替换为存档链接</span></button>
+        <button type="button" class="btn btn-line btn-sm" id="btnOpenWayback">${icon('external', 11)}<span>预览快照</span></button>
+      </div>
+    </div>`;
+  }
+  return `<div class="wayback-box">
+    <div class="wayback-msg">未查到自动快照，可前往 Wayback 时间轴手动检索。</div>
+    <div class="wayback-row">
+      <button type="button" class="btn btn-line btn-sm" id="btnBrowseWayback">${icon('external', 11)}<span>打开 Wayback 检索页</span></button>
+    </div>
+  </div>`;
+}
+
 function detailPanel(it) {
   const h = S.health[it.id];
+  const m = S.meta[it.id] || {};
+  const tags = Array.isArray(m.tags) ? m.tags : [];
   const tone = h ? (TONE[h.status] || TONE.invalid) : null;
   const cls = h ? (PROBLEM.has(h.status) ? ' is-dead' : SUSPECT.has(h.status) ? ' is-warn' : (h.status === 'ok' ? ' is-ok' : '')) : '';
   const isEditing = S.editing && S.editing.id === it.id;
@@ -1166,6 +2183,8 @@ function detailPanel(it) {
       <div class="insp-head-bar">
         <div class="insp-kicker">${icon('folder', 12)} 收藏详情</div>
         <div class="insp-head-tools">
+          <button class="ibtn${m.star ? ' is-starred' : ''}" id="btnStarItem" title="${m.star ? '取消星标 (S)' : '加星标 (S)'}">${icon('star', 13)}</button>
+          <button class="ibtn${m.readState === 'unread' ? ' is-marked' : ''}" id="btnReadItem" title="${m.readState === 'unread' ? '标为已读 (U)' : '加入稍后阅读 (U)'}">${icon('bookmark', 13)}</button>
           <button class="ibtn" id="btnEditItem" title="编辑标题和地址">${icon('pencil', 13)}</button>
           <button class="ibtn" data-close title="收起">${icon('x', 13)}</button>
         </div>
@@ -1187,7 +2206,7 @@ function detailPanel(it) {
           </div>
         </div>
       ` : `
-        <div class="url-box" title="点击复制网址">
+        <div class="url-box" title="点击复制网址 (C)">
           <span class="url-box-text">${breakableUrl(it.url)}</span>
           <span class="url-box-icon" title="点击复制">${icon('copy', 13)}</span>
         </div>
@@ -1209,7 +2228,24 @@ function detailPanel(it) {
             <button class="btn btn-primary btn-sm" id="btnApplyFinalUrl">${icon('check', 11)}<span>一键更新</span></button>
           </div>
         ` : ''}
+        ${waybackHtml(it, h)}
       </div>
+
+      <div class="insp-meta-box">
+        <div class="insp-meta-head">
+          <span>标签与批注</span>
+          <span>${m.readState === 'unread' ? '未读' : m.readState === 'read' ? '已读' : ''}</span>
+        </div>
+        ${tags.length ? `<div class="tag-list">${tags.map((t) => `
+          <span class="tag-pill">#${esc(t)}<button type="button" class="tag-pill-x" data-rm-tag="${esc(t)}" title="移除标签">${icon('x', 9)}</button></span>`).join('')}
+        </div>` : ''}
+        <div class="tag-add-row">
+          <input class="tag-add-input" id="tagAddInput" placeholder="输入标签按回车（如 rust）" spellcheck="false" />
+          <button type="button" class="btn btn-line btn-sm" id="btnAddTag">加标签</button>
+        </div>
+        <textarea class="note-area" id="noteArea" placeholder="记一句摘录或收藏理由（失焦自动保存）">${esc(m.note || '')}</textarea>
+      </div>
+
       <dl class="kv">
         <div class="kv-row"><dt>分类</dt><dd>${it.code ? `<span class="tnum">${esc(it.code)}</span> ${esc(folderName(it.code))}` : '待归类'}</dd></div>
         <div class="kv-row"><dt>添加</dt><dd>${it.added ? new Date(it.added).toLocaleDateString('zh-CN') : '—'} <span style="color:var(--ink-4)">· ${relTime(it.added)}</span></dd></div>
@@ -1243,63 +2279,146 @@ function statusNote(h) {
 
 function wireDetail(it) {
   const box = $('#inspector');
-  box.querySelector('[data-close]').addEventListener('click', () => {
+  const m = S.meta[it.id] || {};
+
+  box.querySelector('[data-close]')?.addEventListener('click', () => {
     S.drawer = null; S.editing = null; renderInspector();
   });
 
-  // 编辑标题与URL
-  const editBtn = box.querySelector('#btnEditItem');
-  if (editBtn) {
-    editBtn.addEventListener('click', () => {
-      S.editing = { id: it.id, title: it.title, url: it.url };
+  box.querySelector('#btnStarItem')?.addEventListener('click', async () => {
+    const nextStar = !m.star;
+    const r = await send('meta:set', { id: it.id, patch: { star: nextStar } });
+    if (r.entry) S.meta[it.id] = r.entry; else delete S.meta[it.id];
+    renderRail();
+    renderList();
+    renderInspector();
+    toast(nextStar ? '已加入星标精选' : '已取消星标');
+  });
+
+  box.querySelector('#btnReadItem')?.addEventListener('click', async () => {
+    const nextState = m.readState === 'unread' ? 'read' : 'unread';
+    const r = await send('meta:set', { id: it.id, patch: { readState: nextState } });
+    if (r.entry) S.meta[it.id] = r.entry; else delete S.meta[it.id];
+    renderRail();
+    renderList();
+    renderInspector();
+    toast(nextState === 'unread' ? '已加入稍后阅读' : '已标为已读');
+  });
+
+  const addTag = async () => {
+    const input = box.querySelector('#tagAddInput');
+    const raw = (input && input.value || '').trim();
+    if (!raw) return;
+    const nextTags = [...(m.tags || []), ...raw.split(/[,，\s#]+/).filter(Boolean)];
+    const r = await send('meta:set', { id: it.id, patch: { tags: nextTags } });
+    if (r.entry) S.meta[it.id] = r.entry; else delete S.meta[it.id];
+    renderRail();
+    renderList();
+    renderInspector();
+  };
+  box.querySelector('#btnAddTag')?.addEventListener('click', addTag);
+  box.querySelector('#tagAddInput')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') { e.preventDefault(); addTag(); }
+  });
+  box.querySelectorAll('[data-rm-tag]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const target = btn.dataset.rmTag;
+      const nextTags = (m.tags || []).filter((t) => t !== target);
+      const r = await send('meta:set', { id: it.id, patch: { tags: nextTags } });
+      if (r.entry) S.meta[it.id] = r.entry; else delete S.meta[it.id];
+      renderRail();
+      renderList();
       renderInspector();
     });
-  }
-  const editCancel = box.querySelector('#btnEditCancel');
-  if (editCancel) {
-    editCancel.addEventListener('click', () => {
-      S.editing = null;
-      renderInspector();
-    });
-  }
-  const editSave = box.querySelector('#btnEditSave');
-  if (editSave) {
-    editSave.addEventListener('click', async () => {
-      const newTitle = $('#editTitleInput').value.trim();
-      const newUrl = $('#editUrlInput').value.trim();
-      if (!newUrl) return toast('网址不能为空');
-      const oldTitle = it.title;
-      const oldUrl = it.url;
-      try {
-        await send('bookmarks:update', { id: it.id, title: newTitle, url: newUrl });
-        it.title = newTitle;
-        it.url = newUrl;
-        S.editing = null;
-        await load();
-        toast('已更新书签信息', {
-          actionText: '撤销',
-          onAction: async () => {
-            await send('bookmarks:update', { id: it.id, title: oldTitle, url: oldUrl });
-            await load();
-            toast('已撤销修改');
-          },
-        });
-      } catch (e) {
-        toast(e.message);
-      }
+  });
+
+  const noteArea = box.querySelector('#noteArea');
+  if (noteArea) {
+    const saveNote = async () => {
+      const val = noteArea.value.trim();
+      if (val === (m.note || '')) return;
+      const r = await send('meta:set', { id: it.id, patch: { note: val } });
+      if (r.entry) S.meta[it.id] = r.entry; else delete S.meta[it.id];
+      if (S.viewMode === 'cards') renderList();
+      toast('批注已保存');
+    };
+    noteArea.addEventListener('blur', saveNote);
+    noteArea.addEventListener('keydown', (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === 'Enter') { e.preventDefault(); noteArea.blur(); }
     });
   }
 
-  // 301 重定向顺手一键更新
+  box.querySelector('#btnWayback')?.addEventListener('click', async () => {
+    S.wayback[it.id] = { loading: true };
+    renderInspector();
+    try {
+      const r = await send('wayback:lookup', { url: it.url });
+      S.wayback[it.id] = { loading: false, ...r };
+    } catch {
+      S.wayback[it.id] = { loading: false, available: false, browseUrl: `https://web.archive.org/web/*/${it.url}` };
+    }
+    renderInspector();
+  });
+  box.querySelector('#btnOpenWayback')?.addEventListener('click', () => {
+    const wb = S.wayback[it.id];
+    if (wb && wb.url) chrome.tabs.create({ url: wb.url });
+  });
+  box.querySelector('#btnBrowseWayback')?.addEventListener('click', () => {
+    const wb = S.wayback[it.id];
+    chrome.tabs.create({ url: (wb && wb.browseUrl) || `https://web.archive.org/web/*/${it.url}` });
+  });
+  box.querySelector('#btnApplyWayback')?.addEventListener('click', async () => {
+    const wb = S.wayback[it.id];
+    if (!wb || !wb.url) return;
+    const oldUrl = it.url;
+    await send('bookmarks:update', { id: it.id, url: wb.url });
+    await load();
+    toast('已替换为 Wayback 时光机存档地址', {
+      actionText: '撤销',
+      onAction: async () => {
+        await send('bookmarks:update', { id: it.id, url: oldUrl });
+        await load();
+        toast('已还原原地址');
+      },
+    });
+  });
+
+  box.querySelector('#btnEditItem')?.addEventListener('click', () => {
+    S.editing = { id: it.id, title: it.title, url: it.url };
+    renderInspector();
+  });
+  box.querySelector('#btnEditCancel')?.addEventListener('click', () => { S.editing = null; renderInspector(); });
+  box.querySelector('#btnEditSave')?.addEventListener('click', async () => {
+    const newTitle = $('#editTitleInput').value.trim();
+    const newUrl = $('#editUrlInput').value.trim();
+    if (!newUrl) return toast('网址不能为空');
+    const oldTitle = it.title;
+    const oldUrl = it.url;
+    try {
+      await send('bookmarks:update', { id: it.id, title: newTitle, url: newUrl });
+      S.editing = null;
+      await load();
+      toast('已更新书签信息', {
+        actionText: '撤销',
+        onAction: async () => {
+          await send('bookmarks:update', { id: it.id, title: oldTitle, url: oldUrl });
+          await load();
+          toast('已撤销修改');
+        },
+      });
+    } catch (e) {
+      toast(e.message);
+    }
+  });
+
   const applyFinalUrl = box.querySelector('#btnApplyFinalUrl');
-  if (applyFinalUrl && it && S.health[it.id] && S.health[it.id].finalUrl) {
+  if (applyFinalUrl && S.health[it.id]?.finalUrl) {
     applyFinalUrl.addEventListener('click', async () => {
       const finalUrl = S.health[it.id].finalUrl;
       const oldUrl = it.url;
       try {
         await send('bookmarks:update', { id: it.id, url: finalUrl });
         await load();
-        // 新地址还没验过，顺手跑一次单条检测
         await send('health:run', { ids: [it.id] }).catch(() => {});
         toast('地址已更新，正在重测新地址', {
           actionText: '撤销',
@@ -1315,60 +2434,196 @@ function wireDetail(it) {
     });
   }
 
-  const urlBox = box.querySelector('.url-box');
-  if (urlBox) {
-    urlBox.addEventListener('click', async () => {
-      try {
-        await navigator.clipboard.writeText(it.url);
-        toast('已复制网址到剪贴板');
-      } catch (e) {
-        toast('复制失败: ' + e.message);
-      }
-    });
-  }
-
-  box.querySelector('[data-open]').addEventListener('click', () => chrome.tabs.create({ url: it.url }));
-  box.querySelector('[data-move]').addEventListener('click', () => {
-    pickFolder(it.title, '移动到这个分类', async (code) => {
-      const oldParentId = it.parentId || '1';
-      const r = await send('bookmarks:moveCode', { ids: [it.id], code }).catch((err) => ({ error: err.message }));
-      if (r.error) return toast(r.error);
-      await load();
-      toast(`已移到 ${code} ${folderName(code)}`, {
-        actionText: '撤销',
-        onAction: async () => {
-          await send('bookmarks:restore', { items: [{ type: 'move', id: it.id, oldParentId }] });
-          await load();
-          toast('已撤销移动');
-        },
-      });
-    });
+  box.querySelector('.url-box')?.addEventListener('click', async () => {
+    try {
+      await navigator.clipboard.writeText(it.url);
+      toast('已复制网址到剪贴板');
+    } catch (e) {
+      toast('复制失败: ' + e.message);
+    }
   });
-  box.querySelector('[data-check]').addEventListener('click', async () => {
+
+  box.querySelector('[data-open]')?.addEventListener('click', () => chrome.tabs.create({ url: it.url }));
+  box.querySelector('[data-move]')?.addEventListener('click', () => {
+    pickFolder(it.title, '移动到这个分类', (code) => moveWithUndo([it.id], code, true));
+  });
+  box.querySelector('[data-check]')?.addEventListener('click', async () => {
     await send('health:run', { ids: [it.id] }).catch((err) => toast(err.message));
   });
-
-  // 非阻塞删除 + 撤销
-  box.querySelector('[data-del]').addEventListener('click', async () => {
-    const snapshot = { ...it };
-    await send('bookmarks:remove', { ids: [it.id] });
-    S.selected = null; S.drawer = null; S.editing = null;
-    await load();
-    toast(`已删除「${snapshot.title}」`, {
-      actionText: '撤销',
-      onAction: async () => {
-        await send('bookmarks:restore', { items: [{ type: 'delete', ...snapshot }] });
-        await load();
-        toast('已撤销删除');
-      },
-    });
+  box.querySelector('[data-del]')?.addEventListener('click', () => deleteWithUndo([it.id]));
+  box.querySelector('[data-ai]')?.addEventListener('click', () => {
+    S.drawer = 'ai'; renderInspector(); runAi([it.id]);
   });
-
-  const ai = box.querySelector('[data-ai]');
-  if (ai) ai.addEventListener('click', () => { S.drawer = 'ai'; renderInspector(); runAi([it.id]); });
 }
 
-/* ── 分类选择弹层 ─────────────────────────────── */
+/* ── 命令面板 / 导出 / 分类选择 / 快捷键 ──────── */
+
+function buildCommands() {
+  const cmds = [
+    { id: 'triage', name: '进入「逐卷审定」沉浸清仓模式', desc: '全键盘 0-9 秒速归档待归类与 AI 建议书签 (快捷键 T)', ico: 'triage', run: () => triage.open() },
+    { id: 'mode-cards', name: '切换为「藏书卡片墙」视图', desc: '多列藏书票网格，展示批注、标签与站点色带', ico: 'grid', run: () => setViewMode('cards') },
+    { id: 'mode-list', name: '切换为「典藏列表」视图', desc: '经典双行高可读索引列表', ico: 'rows', run: () => setViewMode('list') },
+    { id: 'mode-compact', name: '切换为「极致紧凑」视图', desc: '34px 单行超高密度，一屏快速扫视 25+ 条', ico: 'compact', run: () => setViewMode('compact') },
+    { id: 'org', name: '打开整理计划', desc: '按分类方案批量归位待归类或全库错放巡检', ico: 'folder', run: () => openOrganize('plan') },
+    { id: 'clean', name: 'AI 标题洗白', desc: '识别并清理未读角标、裸网址与冗余站点后缀', ico: 'wand', run: () => openOrganize('clean') },
+    { id: 'ai', name: '切换 AI 归类抽屉', desc: '查看待确认建议或为当前视图生成建议', ico: 'sparkle', run: toggleAi },
+    { id: 'scan', name: '检测当前视图失效链接', desc: '并发轻量请求核验 HTTP 状态码', ico: 'pulse', run: scanView },
+    { id: 'dups', name: '查看重复书签', desc: '按规范化地址合并历史重复收藏', ico: 'layers', run: () => { S.view = { kind: 'dups' }; renderAll(); } },
+    { id: 'moved', name: '查看已跳转链接', desc: '集中核对 301 / 302 跳转并一键更新', ico: 'redirect', run: () => { S.view = { kind: 'moved' }; renderAll(); } },
+    { id: 'serendipity', name: '书海拾遗（随机翻阅 3 卷）', desc: '从老藏卷中随机抽取 3 条完好书签重温', ico: 'compass', run: () => { S.serendipityOpen = true; S.serendipitySeed = Date.now(); renderHead(); } },
+    { id: 'usage', name: '常阅与吃灰分析', desc: '结合本地浏览历史发现高频与尘封藏卷', ico: 'history', run: () => { S.view = { kind: 'usage' }; renderAll(); } },
+    { id: 'stash', name: '收纳当前窗口全部标签页', desc: '一键收进「待归类」，自动跳过已收藏链接', ico: 'inbox', run: async () => {
+      const r = await send('tabs:stashWindow', { closeTabs: false });
+      await load();
+      toast(r.saved ? `已收进 ${r.saved} 个标签页` : '本窗标签页都已在收藏夹中');
+    } },
+    { id: 'export-md', name: '导出 Obsidian / Markdown 书目', desc: '按分类分卷导出干净 .md 文件（自动剔除失效链接）', ico: 'download', run: () => {
+      const md = toMarkdown(S.items, S.scheme, { health: S.health, meta: S.meta, excludeDead: true });
+      downloadFile(`guizang-library-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
+      toast('已导出 Obsidian Markdown 书目');
+    } },
+    { id: 'export-html', name: '导出标准 HTML 书签文件', desc: '标准 Netscape 格式，可直接导入任意浏览器', ico: 'download', run: () => {
+      const html = toNetscapeHtml(S.items, S.scheme);
+      downloadFile(`guizang-bookmarks-${new Date().toISOString().slice(0, 10)}.html`, html, 'text/html;charset=utf-8');
+      toast('已导出标准 HTML 书签');
+    } },
+    { id: 'shortcuts', name: '查看键盘快捷键速查', desc: '全键盘流导航与操作清单', ico: 'window', run: openShortcutsModal },
+    { id: 'options', name: '打开设置页', desc: '配置模型、方案、改判记忆与备份恢复', ico: 'sliders', run: () => chrome.runtime.openOptionsPage() },
+  ];
+  for (const th of THEMES) {
+    cmds.push({
+      id: 'theme-' + th.id,
+      name: `切换配色：${th.name}`,
+      desc: th.desc,
+      ico: 'palette',
+      run: async (ev) => { await setThemeAnimated(th.id, ev); toast(`已应用配色：${th.name}`); },
+    });
+  }
+  return cmds;
+}
+
+function openCommandPalette() {
+  const sheet = $('#sheet');
+  const all = buildCommands();
+  let filter = '';
+  let idx = 0;
+
+  const render = () => {
+    const q = filter.trim().toLowerCase();
+    const list = q ? all.filter((c) => (c.name + ' ' + c.desc).toLowerCase().includes(q)) : all;
+    if (idx >= list.length) idx = 0;
+    const listEl = sheet.querySelector('#cmdList');
+    if (!listEl) return [];
+    listEl.innerHTML = list.length
+      ? list.map((c, i) => `<button type="button" class="cmd-item${i === idx ? ' is-active' : ''}" data-cmd-idx="${i}">
+          ${icon(c.ico, 14)}
+          <span class="cmd-item-info">
+            <span class="cmd-item-name">${esc(c.name)}</span>
+            <div class="cmd-item-desc">${esc(c.desc)}</div>
+          </span>
+        </button>`).join('')
+      : '<div class="cmd-empty">没有匹配的命令</div>';
+    listEl.querySelectorAll('[data-cmd-idx]').forEach((btn) => {
+      btn.addEventListener('click', (ev) => {
+        const hit = list[Number(btn.dataset.cmdIdx)];
+        $('#modal').hidden = true;
+        if (hit) hit.run(ev);
+      });
+    });
+    return list;
+  };
+
+  sheet.innerHTML = `
+    <div class="cmd-input-wrap">
+      ${icon('command', 15)}
+      <input class="cmd-input" id="cmdInput" placeholder="输入命令名称（如：审定、卡片、导出、主题、重复…）" spellcheck="false" />
+      <kbd>Esc</kbd>
+    </div>
+    <div class="cmd-list" id="cmdList"></div>`;
+
+  $('#modal').hidden = false;
+  let curList = render();
+  const input = $('#cmdInput');
+  input?.focus();
+  input?.addEventListener('input', (e) => {
+    filter = e.target.value;
+    idx = 0;
+    curList = render();
+  });
+  input?.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      if (curList.length) { idx = (idx + 1) % curList.length; curList = render(); }
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      if (curList.length) { idx = (idx - 1 + curList.length) % curList.length; curList = render(); }
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const hit = curList[idx];
+      $('#modal').hidden = true;
+      if (hit) hit.run();
+    }
+  });
+}
+
+function openExportModal() {
+  const sheet = $('#sheet');
+  const rows = visible();
+  sheet.innerHTML = `
+    <div class="sheet-head">
+      <div style="display:flex;align-items:center;justify-content:space-between">
+        <h3 class="sheet-title">导出典藏书目</h3>
+        <button class="ibtn" id="btnCloseExport" title="关闭">${icon('x', 13)}</button>
+      </div>
+      <div class="sheet-sub">适配 Obsidian / Notion 知识库或浏览器标准迁移</div>
+    </div>
+    <div class="sheet-body">
+      <button class="fold-row" id="expMdClean">
+        ${icon('download', 14)}
+        <span class="fold-name">全库 Obsidian Markdown（自动剔除失效链接）</span>
+        <span class="fold-path">.md</span>
+      </button>
+      <button class="fold-row" id="expMdView">
+        ${icon('download', 14)}
+        <span class="fold-name">当前视图 Markdown（${rows.length} 条）</span>
+        <span class="fold-path">.md</span>
+      </button>
+      <button class="fold-row" id="expHtmlAll">
+        ${icon('download', 14)}
+        <span class="fold-name">标准 Netscape HTML 书签文件（全库）</span>
+        <span class="fold-path">.html</span>
+      </button>
+      <button class="fold-row" id="expTsvView">
+        ${icon('download', 14)}
+        <span class="fold-name">当前视图表格清单（含状态码）</span>
+        <span class="fold-path">.tsv</span>
+      </button>
+    </div>`;
+  $('#modal').hidden = false;
+  $('#btnCloseExport')?.addEventListener('click', () => { $('#modal').hidden = true; });
+  $('#expMdClean')?.addEventListener('click', () => {
+    const md = toMarkdown(S.items, S.scheme, { health: S.health, meta: S.meta, excludeDead: true });
+    downloadFile(`guizang-library-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
+    $('#modal').hidden = true;
+    toast('已导出全库 Obsidian Markdown 书目');
+  });
+  $('#expMdView')?.addEventListener('click', () => {
+    const md = toMarkdown(rows, S.scheme, { health: S.health, meta: S.meta, excludeDead: false, title: `归藏 · ${viewMeta().label}` });
+    downloadFile(`guizang-view-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
+    $('#modal').hidden = true;
+    toast(`已导出当前视图 ${rows.length} 条 Markdown`);
+  });
+  $('#expHtmlAll')?.addEventListener('click', () => {
+    const html = toNetscapeHtml(S.items, S.scheme);
+    downloadFile(`guizang-bookmarks-${new Date().toISOString().slice(0, 10)}.html`, html, 'text/html;charset=utf-8');
+    $('#modal').hidden = true;
+    toast('已导出标准 HTML 书签');
+  });
+  $('#expTsvView')?.addEventListener('click', () => {
+    $('#modal').hidden = true;
+    exportDead();
+  });
+}
 
 let pickCallback = null;
 
@@ -1405,21 +2660,19 @@ function openShortcutsModal() {
         <h3 class="sheet-title">快捷键速查</h3>
         <button class="ibtn" id="btnCloseShortcuts" title="关闭">${icon('x', 13)}</button>
       </div>
-      <div class="sheet-sub">全键盘流高效整理与检索</div>
+      <div class="sheet-sub">支持拖拽书签到左栏归类 · 列表右键菜单 · 地址栏 gz 秒搜</div>
     </div>
     <div class="sheet-body shortcuts-sheet">
-      <div class="sc-row"><span>聚焦搜索框</span><div><kbd>/</kbd> 或 <kbd>⌘ K</kbd></div></div>
+      <div class="sc-row"><span>聚焦搜索框（支持拼音首字母 / #标签 / domain:）</span><div><kbd>/</kbd> 或 <kbd>⌘ K</kbd></div></div>
+      <div class="sc-row"><span>打开命令面板</span><div><kbd>⌘ ⇧ P</kbd> 或搜索框输 <kbd>&gt;</kbd></div></div>
+      <div class="sc-row"><span>进入「逐卷审定」沉浸清仓模式</span><div><kbd>T</kbd></div></div>
+      <div class="sc-row"><span>循环切换视图（列表 / 卡片墙 / 紧凑）</span><div><kbd>V</kbd></div></div>
       <div class="sc-row"><span>上 / 下切换选择行</span><div><kbd>↑</kbd> / <kbd>↓</kbd></div></div>
-      <div class="sc-row"><span>勾选 / 取消勾选当前项</span><div><kbd>Space</kbd></div></div>
-      <div class="sc-row"><span>连续范围多选</span><div><kbd>Shift + Click</kbd></div></div>
-      <div class="sc-row"><span>在新标签页打开</span><div><kbd>Enter</kbd></div></div>
-      <div class="sc-row"><span>展开 / 收起详情抽屉</span><div><kbd>I</kbd></div></div>
-      <div class="sc-row"><span>移动当前项或选中项</span><div><kbd>M</kbd></div></div>
-      <div class="sc-row"><span>单条或批量重测健康</span><div><kbd>R</kbd></div></div>
-      <div class="sc-row"><span>删除当前项或选中项</span><div><kbd>Delete</kbd> 或 <kbd>Backspace</kbd></div></div>
-      <div class="sc-row"><span>撤销上一步操作</span><div><kbd>⌘ Z</kbd></div></div>
-      <div class="sc-row"><span>关闭抽屉 / 弹窗 / 清空搜索</span><div><kbd>Esc</kbd></div></div>
-      <div class="sc-row"><span>快捷键速查</span><div><kbd>?</kbd></div></div>
+      <div class="sc-row"><span>勾选 / 连续范围多选</span><div><kbd>Space</kbd> / <kbd>Shift + Click</kbd></div></div>
+      <div class="sc-row"><span>前景打开 / 后台静默打开</span><div><kbd>Enter</kbd> / <kbd>O</kbd></div></div>
+      <div class="sc-row"><span>星标 / 稍后阅读 / 复制网址 / 原地改名</span><div><kbd>S</kbd> <kbd>U</kbd> <kbd>C</kbd> <kbd>E</kbd></div></div>
+      <div class="sc-row"><span>详情抽屉 / 移动分类 / 重测 / 删除</span><div><kbd>I</kbd> <kbd>M</kbd> <kbd>R</kbd> <kbd>⌫</kbd></div></div>
+      <div class="sc-row"><span>撤销上一步操作 / 关闭浮层</span><div><kbd>⌘ Z</kbd> / <kbd>Esc</kbd></div></div>
     </div>`;
   $('#modal').hidden = false;
   $('#btnCloseShortcuts')?.addEventListener('click', () => { $('#modal').hidden = true; });
@@ -1429,22 +2682,68 @@ $('#modal').addEventListener('click', (e) => {
   if (e.target.id === 'modal') $('#modal').hidden = true;
 });
 
-/* ── 导出失效清单 ─────────────────────────────── */
-
 function exportDead() {
   const rows = visible().map((it) => {
     const h = S.health[it.id] || {};
     return [it.title, it.url, h.status || '', h.code || '', fmtDate(it.added)].join('\t');
   });
   const text = '标题\t地址\t状态\t代码\t添加\n' + rows.join('\n');
-  const blob = new Blob([text], { type: 'text/tab-separated-values;charset=utf-8' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = 'guizang-dead-links.tsv';
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+  downloadFile('guizang-links.tsv', text, 'text/tab-separated-values;charset=utf-8');
   toast(`已导出 ${rows.length} 条`);
 }
+
+/* ── 分栏拖拽调节宽度 + 卡片鼠标追光 ───────────── */
+
+function initResizers() {
+  const root = document.documentElement;
+  const savedRail = Number(readLocal('guizang_rail_w', '0'));
+  const savedInsp = Number(readLocal('guizang_insp_w', '0'));
+  if (savedRail >= 180 && savedRail <= 360) root.style.setProperty('--rail-w', savedRail + 'px');
+  if (savedInsp >= 300 && savedInsp <= 520) root.style.setProperty('--insp-w', savedInsp + 'px');
+
+  const wireHandle = (el, side, varName, storageKey, min, max, def) => {
+    if (!el) return;
+    el.addEventListener('dblclick', () => {
+      root.style.setProperty(varName, def + 'px');
+      try { localStorage.removeItem(storageKey); } catch {}
+    });
+    el.addEventListener('pointerdown', (startEv) => {
+      startEv.preventDefault();
+      el.classList.add('is-resizing');
+      document.body.classList.add('is-col-resizing');
+      const startX = startEv.clientX;
+      const current = parseInt(getComputedStyle(root).getPropertyValue(varName), 10) || def;
+      const onMove = (ev) => {
+        const delta = side === 'left' ? (ev.clientX - startX) : (startX - ev.clientX);
+        const next = Math.max(min, Math.min(max, Math.round(current + delta)));
+        root.style.setProperty(varName, next + 'px');
+      };
+      const onUp = () => {
+        el.classList.remove('is-resizing');
+        document.body.classList.remove('is-col-resizing');
+        window.removeEventListener('pointermove', onMove);
+        window.removeEventListener('pointerup', onUp);
+        const val = parseInt(root.style.getPropertyValue(varName), 10);
+        if (val) try { localStorage.setItem(storageKey, String(val)); } catch {}
+      };
+      window.addEventListener('pointermove', onMove);
+      window.addEventListener('pointerup', onUp);
+    });
+  };
+
+  wireHandle($('#railResizer'), 'left', '--rail-w', 'guizang_rail_w', 180, 360, 256);
+  wireHandle($('#inspResizer'), 'right', '--insp-w', 'guizang_insp_w', 300, 520, 360);
+}
+
+// 暗色卡片鼠标追光（轻量事件委托，零额外 DOM）
+$('#list')?.addEventListener('pointermove', (e) => {
+  const tile = e.target.closest('.card-tile');
+  if (!tile) return;
+  const r = tile.getBoundingClientRect();
+  tile.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+  tile.style.setProperty('--my', (e.clientY - r.top) + 'px');
+});
+$('#list')?.addEventListener('scroll', closeContextMenu, { passive: true });
 
 /* ── 组装与事件 ───────────────────────────────── */
 
@@ -1452,13 +2751,12 @@ function renderAll() {
   renderTop();
   renderRail();
   renderHead();
+  renderFilterBar();
   renderList();
   renderInspector();
   renderScan();
 }
 
-/* 页面读的是磁盘上的新代码，service worker 可能还是旧脚本。
-   不握手的话，用户只会看到“没有回应”这种没头没尾的提示。 */
 function showStaleBar(info) {
   if (document.getElementById('staleBar')) return;
   const bar = document.createElement('div');
@@ -1471,12 +2769,10 @@ function showStaleBar(info) {
   bar.querySelector('#staleReload').addEventListener('click', () => {
     chrome.tabs.create({ url: 'chrome://extensions/' });
   });
-  // 放在应用层级：窄屏时详情栏是浮层，挂在列表里会被它盖住
   const app = document.querySelector('.app');
   const body = document.querySelector('.manager-body');
   if (!app || !body) return;
   app.insertBefore(bar, body);
-  // 窄屏时详情栏是 fixed 浮层，要让它从横幅下方开始
   app.classList.add('has-stale');
   requestAnimationFrame(() => {
     app.style.setProperty('--stale-h', bar.offsetHeight + 'px');
@@ -1494,6 +2790,9 @@ async function load() {
   S.scheme = st.scheme;
   S.health = st.health || {};
   S.pending = st.pending || {};
+  S.meta = st.meta || {};
+  S.learned = st.learned || { domains: {} };
+  S.usageCache = st.usageCache || null;
   S.settings = st.settings || {};
   S.aiReady = st.aiReady;
   S.scan = st.scan || { running: false, done: 0, total: 0 };
@@ -1504,7 +2803,10 @@ async function load() {
     S.applyBusy = Boolean(org.applying);
   }
   const jr = await send('organize:journal').catch(() => null);
-  if (jr) S.journal = jr.latest;
+  if (jr) {
+    S.journal = jr.latest;
+    S.journals = jr.list || [];
+  }
   S.loaded = true;
   renderAll();
 }
@@ -1585,8 +2887,7 @@ onBroadcast((msg) => {
     S.applyBusy = false;
     S.applyProgress = null;
     S.journal = msg.entry || null;
-    renderInspector();
-    renderRail();
+    reloadSoon();
     toast(
       `已移动 ${msg.entry ? msg.entry.applied : 0} 条${msg.failed ? `，失败 ${msg.failed}` : ''}${msg.stopped ? '（已停止）' : ''}`,
       msg.entry ? { actionText: '撤销', onAction: () => undoJournal(msg.entry.id) } : undefined,
@@ -1616,106 +2917,133 @@ onBroadcast((msg) => {
   }
 });
 
-// 键盘全套导航（⌘K搜索、上下移动高亮行、空格勾选、回车打开、删除撤销）
+// 全键盘流导航（零重绘原地巡航 + 单键操作 + 逐卷审定）
 document.addEventListener('keydown', async (e) => {
+  if (triage.handleKeydown(e)) return;
+
   const isInput = ['INPUT', 'TEXTAREA'].includes(document.activeElement?.tagName);
+
+  if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
+    e.preventDefault();
+    closeContextMenu();
+    openCommandPalette();
+    return;
+  }
 
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
     e.preventDefault();
-    const q = $('#q');
-    if (q) q.focus();
+    closeContextMenu();
+    $('#q')?.focus();
     return;
   }
 
   if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
-    if (triggerUndo()) {
+    if (!isInput && triggerUndo()) {
       e.preventDefault();
       return;
     }
   }
 
   if (e.key === 'Escape') {
+    if (!$('#ctxMenu').hidden) { closeContextMenu(); return; }
     if (!$('#modal').hidden) { $('#modal').hidden = true; return; }
     if (isInput && document.activeElement.id === 'q') {
       if (S.q) {
         S.q = '';
         renderTop();
+        renderFilterBar();
         renderList();
         renderHead();
+      } else if (S.filterBarOpen) {
+        S.filterBarOpen = false;
+        renderFilterBar();
       }
       document.activeElement.blur();
       return;
     }
-    if (S.editing) {
-      S.editing = null;
-      renderInspector();
-      return;
-    }
-    if (S.drawer) {
-      S.drawer = null;
-      S.editing = null;
-      renderInspector();
-      renderTop();
-      return;
-    }
+    if (S.editing) { S.editing = null; renderInspector(); return; }
+    if (S.drawer) { S.drawer = null; S.editing = null; renderInspector(); renderTop(); return; }
   }
 
   if (isInput) return;
 
-  if (e.key === '/') {
+  const key = e.key.toLowerCase();
+
+  if (e.key === '/') { e.preventDefault(); $('#q')?.focus(); return; }
+  if (e.key === '?') { e.preventDefault(); openShortcutsModal(); return; }
+  if (key === 't') { e.preventDefault(); triage.open(); return; }
+  if (key === 'v') {
     e.preventDefault();
-    const q = $('#q');
-    if (q) q.focus();
+    const order = ['list', 'cards', 'compact'];
+    setViewMode(order[(order.indexOf(S.viewMode) + 1) % order.length]);
     return;
   }
 
-  if (e.key === '?') {
+  if (key === 'i') {
     e.preventDefault();
-    openShortcutsModal();
-    return;
-  }
-
-  if (e.key.toLowerCase() === 'i') {
-    e.preventDefault();
-    if (S.drawer === 'detail') {
-      S.drawer = null;
-      S.editing = null;
-    } else if (S.selected) {
-      S.drawer = 'detail';
-    }
+    if (S.drawer === 'detail') { S.drawer = null; S.editing = null; }
+    else if (S.selected) S.drawer = 'detail';
     renderInspector();
     renderTop();
     return;
   }
 
-  if (e.key.toLowerCase() === 'm') {
+  if (key === 's' && S.selected) {
+    e.preventDefault();
+    const cur = S.meta[S.selected] || {};
+    const next = !cur.star;
+    const r = await send('meta:set', { id: S.selected, patch: { star: next } });
+    if (r.entry) S.meta[S.selected] = r.entry; else delete S.meta[S.selected];
+    renderRail();
+    renderList();
+    if (S.drawer === 'detail') renderInspector();
+    toast(next ? '已加星标' : '已取消星标');
+    return;
+  }
+
+  if (key === 'u' && S.selected) {
+    e.preventDefault();
+    const cur = S.meta[S.selected] || {};
+    const next = cur.readState === 'unread' ? 'read' : 'unread';
+    const r = await send('meta:set', { id: S.selected, patch: { readState: next } });
+    if (r.entry) S.meta[S.selected] = r.entry; else delete S.meta[S.selected];
+    renderRail();
+    renderList();
+    if (S.drawer === 'detail') renderInspector();
+    toast(next === 'unread' ? '已加入稍后阅读' : '已标为已读');
+    return;
+  }
+
+  if (key === 'c' && S.selected) {
+    e.preventDefault();
+    const it = S.items.find((x) => x.id === S.selected);
+    if (it) { await navigator.clipboard.writeText(it.url).catch(() => {}); toast('已复制网址'); }
+    return;
+  }
+
+  if (key === 'o' && S.selected) {
+    e.preventDefault();
+    const it = S.items.find((x) => x.id === S.selected);
+    if (it) { chrome.tabs.create({ url: it.url, active: false }); toast('已在后台标签打开'); }
+    return;
+  }
+
+  if (key === 'e' && S.selected) {
+    e.preventDefault();
+    startInlineRename(S.selected);
+    return;
+  }
+
+  if (key === 'm') {
     e.preventDefault();
     const targetIds = S.sel.size ? [...S.sel] : (S.selected ? [S.selected] : []);
     if (!targetIds.length) return;
     const title = targetIds.length === 1 ? (S.items.find((x) => x.id === targetIds[0])?.title || '') : `${targetIds.length} 条选中的书签`;
-    pickFolder(title, '移动到分类', async (code) => {
-      const moves = targetIds.map((id) => ({
-        type: 'move',
-        id,
-        oldParentId: S.items.find((x) => x.id === id)?.parentId || '1',
-      }));
-      const r = await send('bookmarks:moveCode', { ids: targetIds, code }).catch((err) => ({ error: err.message }));
-      if (r.error) return toast(r.error);
-      S.sel.clear();
-      await load();
-      toast(`已移到 ${code} ${folderName(code)}`, {
-        actionText: '撤销',
-        onAction: async () => {
-          await send('bookmarks:restore', { items: moves });
-          await load();
-          toast('已撤销移动');
-        },
-      });
-    });
+    pickFolder(title, '移动到分类', (code) => moveWithUndo(targetIds, code, targetIds.length === 1));
     return;
   }
 
-  if (e.key.toLowerCase() === 'r') {
+  if (key === 'r') {
     e.preventDefault();
     const targetIds = S.sel.size ? [...S.sel] : (S.selected ? [S.selected] : []);
     if (targetIds.length) {
@@ -1731,16 +3059,12 @@ document.addEventListener('keydown', async (e) => {
   if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
     e.preventDefault();
     let curIdx = shown.findIndex((x) => x.id === S.selected);
-    if (e.key === 'ArrowDown') {
-      curIdx = curIdx < shown.length - 1 ? curIdx + 1 : 0;
-    } else {
-      curIdx = curIdx > 0 ? curIdx - 1 : shown.length - 1;
-    }
+    if (e.key === 'ArrowDown') curIdx = curIdx < shown.length - 1 ? curIdx + 1 : 0;
+    else curIdx = curIdx > 0 ? curIdx - 1 : shown.length - 1;
     S.selected = shown[curIdx].id;
+    syncSelectionInPlace();
     if (S.drawer === 'detail') renderInspector();
-    renderList();
-    const targetEl = $(`[data-id="${S.selected}"]`);
-    if (targetEl) targetEl.scrollIntoView({ block: 'nearest' });
+    $(`[data-id="${S.selected}"]`)?.scrollIntoView({ block: 'nearest' });
     return;
   }
 
@@ -1757,54 +3081,24 @@ document.addEventListener('keydown', async (e) => {
       e.preventDefault();
       if (S.sel.has(S.selected)) S.sel.delete(S.selected);
       else S.sel.add(S.selected);
-      renderList();
-      renderSelBar();
+      syncSelectionInPlace();
     }
     return;
   }
 
   if (e.key === 'Delete' || e.key === 'Backspace') {
-    if (S.sel.size) {
+    const targetIds = S.sel.size ? [...S.sel] : (S.selected ? [S.selected] : []);
+    if (targetIds.length) {
       e.preventDefault();
-      const ids = [...S.sel];
-      const itemsToDel = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
-      await send('bookmarks:remove', { ids });
-      S.sel.clear();
-      await load();
-      toast(`已删除 ${ids.length} 条书签`, {
-        actionText: '撤销',
-        onAction: async () => {
-          await send('bookmarks:restore', { items: itemsToDel.map((it) => ({ type: 'delete', ...it })) });
-          await load();
-          toast('已撤销批量删除');
-        },
-      });
-    } else if (S.selected) {
-      e.preventDefault();
-      const it = S.items.find((x) => x.id === S.selected);
-      if (it) {
-        const snapshot = { ...it };
-        await send('bookmarks:remove', { ids: [it.id] });
-        S.selected = null; S.drawer = null;
-        await load();
-        toast(`已删除「${snapshot.title}」`, {
-          actionText: '撤销',
-          onAction: async () => {
-            await send('bookmarks:restore', { items: [{ type: 'delete', ...snapshot }] });
-            await load();
-            toast('已撤销删除');
-          },
-        });
-      }
+      await deleteWithUndo(targetIds);
     }
   }
 });
 
 document.addEventListener('click', (e) => {
   const dd = $('#themeDropdown');
-  if (dd && !dd.hidden && !e.target.closest('.theme-dropdown-wrap')) {
-    dd.hidden = true;
-  }
+  if (dd && !dd.hidden && !e.target.closest('.theme-dropdown-wrap')) dd.hidden = true;
+  if (!$('#ctxMenu').hidden && !e.target.closest('#ctxMenu')) closeContextMenu();
 });
 
 if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
@@ -1816,6 +3110,7 @@ if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage)
   });
 }
 
+initResizers();
 parseHash();
 load()
   .then(() => checkHealthProtocol())

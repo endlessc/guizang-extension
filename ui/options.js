@@ -1,18 +1,32 @@
 /* 设置页 */
 
-import { $, esc, mark, send, toast, THEMES, getTheme, setTheme } from './shared.js';
+import { $, esc, icon, mark, send, toast, openManager, THEMES, getTheme, setThemeAnimated } from './shared.js';
+import { toMarkdown, toNetscapeHtml } from '../lib/export.js';
 
 import { ensureEnv } from './env.js';
 await ensureEnv();
 
 const FIELDS = ['baseUrl', 'model', 'apiKey', 'maxTokens', 'concurrency', 'timeout', 'checkLimit'];
+let currentSettings = {};
 
 function appVersion() {
   try {
     return chrome.runtime.getManifest().version;
-  } catch (e) {
+  } catch {
     return 'dev';
   }
+}
+
+function download(name, text, mime = 'application/json') {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 async function boot() {
@@ -23,14 +37,19 @@ async function boot() {
       <div class="sub">GUIZANG · SETTINGS</div>
     </div>
     <div class="gap"></div>
+    <button type="button" class="btn btn-line btn-sm" id="backToManager">${icon('window', 13)}<span>打开书库</span></button>
     <span class="ver mono">v${appVersion()}</span>`;
+  $('#backToManager')?.addEventListener('click', () => openManager());
 
   const summary = await send('summary:load');
-  fill(summary.settings);
+  currentSettings = summary.settings || {};
+  fill(currentSettings);
   renderThemes();
   renderScheme(summary.scheme);
-  // 旧版后台不认识 schemes:list，别让它把整页拖垮
   await renderPicker().catch(() => {});
+  await renderPermissions().catch(() => {});
+  await renderLearned().catch(() => {});
+  await renderBackups().catch(() => {});
 
   if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg) => {
@@ -42,34 +61,161 @@ async function boot() {
   $('#form').addEventListener('submit', save);
   $('#clearHealth').addEventListener('click', () => clear('health:clear', '检测结果'));
   $('#clearPending').addEventListener('click', () => clear('ai:ignoreAll', '归类建议'));
+  $('#openShortcuts')?.addEventListener('click', () => chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }));
+  $('#exportMd')?.addEventListener('click', exportMarkdown);
+  $('#exportHtml')?.addEventListener('click', exportHtml);
+  wireCustomSchemes();
+  wireLearned();
   wireBackup();
-  await renderBackups().catch(() => {});
 }
+
+/* ── 导出全库书目 ─────────────────────────────── */
+
+async function exportMarkdown() {
+  try {
+    const st = await send('state:load');
+    const md = toMarkdown(st.items, st.scheme, { health: st.health, meta: st.meta, excludeDead: true });
+    download(`guizang-library-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
+    toast('已导出 Obsidian / Markdown 书目');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function exportHtml() {
+  try {
+    const st = await send('state:load');
+    const html = toNetscapeHtml(st.items, st.scheme);
+    download(`guizang-bookmarks-${new Date().toISOString().slice(0, 10)}.html`, html, 'text/html;charset=utf-8');
+    toast('已导出标准 HTML 书签文件');
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+/* ── Chrome 按需可选权限（alarms / history） ──── */
+
+async function hasPerm(perm) {
+  if (!chrome.permissions?.contains) return false;
+  try {
+    return await chrome.permissions.contains({ permissions: [perm] });
+  } catch {
+    return false;
+  }
+}
+
+async function renderPermissions() {
+  const box = $('#permList');
+  if (!box) return;
+  const [hasAlarms, hasHistory] = await Promise.all([hasPerm('alarms'), hasPerm('history')]);
+  const weeklyOn = Boolean(currentSettings.autoCheckWeekly && hasAlarms);
+
+  box.innerHTML = `
+    <div class="perm-item">
+      <div class="perm-info">
+        <div class="perm-title">
+          每周静默体检失效链接
+          <span class="perm-badge${weeklyOn ? ' is-on' : ''}">${weeklyOn ? '已开启' : '未开启'}</span>
+        </div>
+        <div class="perm-desc">按需申请 <code>alarms</code> 权限。每周在后台静默检测最久未检的 60 条书签，仅在发现新失效时在工具栏图标亮起角标。</div>
+      </div>
+      <button type="button" class="btn ${weeklyOn ? 'btn-line' : 'btn-primary'} btn-sm" id="toggleWeekly">
+        ${weeklyOn ? '关闭静默检测' : '授权并开启'}
+      </button>
+    </div>
+    <div class="perm-item">
+      <div class="perm-info">
+        <div class="perm-title">
+          常阅 / 尘封吃灰感知
+          <span class="perm-badge${hasHistory ? ' is-on' : ''}">${hasHistory ? '已授权' : '未授权'}</span>
+        </div>
+        <div class="perm-desc">按需申请 <code>history</code> 权限，仅在本地比对书签访问频次，找出高频常阅与超过半年未打开的尘封书卷。</div>
+      </div>
+      <button type="button" class="btn ${hasHistory ? 'btn-line' : 'btn-primary'} btn-sm" id="toggleHistory">
+        ${hasHistory ? '撤销历史权限' : '授权浏览历史'}
+      </button>
+    </div>`;
+
+  $('#toggleWeekly')?.addEventListener('click', async () => {
+    if (weeklyOn) {
+      const r = await send('settings:save', { settings: { autoCheckWeekly: false } });
+      currentSettings = r.settings;
+      toast('已关闭每周静默检测');
+      renderPermissions();
+      return;
+    }
+    const ok = chrome.permissions?.request
+      ? await chrome.permissions.request({ permissions: ['alarms'] }).catch(() => false)
+      : true;
+    if (!ok) return toast('未获得定时任务权限');
+    const r = await send('settings:save', { settings: { autoCheckWeekly: true } });
+    currentSettings = r.settings;
+    toast('已开启每周静默体检');
+    renderPermissions();
+  });
+
+  $('#toggleHistory')?.addEventListener('click', async () => {
+    if (hasHistory) {
+      await chrome.permissions?.remove?.({ permissions: ['history'] }).catch(() => {});
+      toast('已撤销浏览历史权限');
+      renderPermissions();
+      return;
+    }
+    const ok = chrome.permissions?.request
+      ? await chrome.permissions.request({ permissions: ['history'] }).catch(() => false)
+      : true;
+    if (!ok) return toast('未获得浏览历史权限');
+    await send('history:analyze').catch(() => {});
+    toast('已授权并完成首次常阅/吃灰分析');
+    renderPermissions();
+  });
+}
+
+/* ── 主题配色 ─────────────────────────────────── */
 
 function renderThemes() {
   const current = getTheme();
+  const sysHost = $('#themeSystemHost');
   const box = $('#themeGrid');
   if (!box) return;
-  box.innerHTML = THEMES.map((th) => {
+
+  const sysTheme = THEMES.find((t) => t.id === 'system');
+  const namedThemes = THEMES.filter((t) => t.id !== 'system');
+
+  if (sysHost && sysTheme) {
+    const active = current === 'system';
+    const stripes = sysTheme.preview.map((c) => `<span style="background:${c}"></span>`).join('');
+    sysHost.innerHTML = `
+      <button type="button" class="theme-system-bar${active ? ' is-active' : ''}" data-theme-id="system" aria-pressed="${active}">
+        <span class="theme-system-swatch">${stripes}</span>
+        <span class="theme-system-info">
+          <span class="theme-card-title">${esc(sysTheme.name)}</span>
+          <span class="theme-card-desc">${esc(sysTheme.desc)}</span>
+        </span>
+        <span class="theme-card-badge">当前使用</span>
+      </button>`;
+  }
+
+  box.innerHTML = namedThemes.map((th) => {
     const active = th.id === current;
     const stripes = th.preview.map((c) => `<span style="background:${c}"></span>`).join('');
     return `
-      <div class="theme-card${active ? ' is-active' : ''}" data-theme-id="${th.id}">
-        <div class="theme-card-preview">${stripes}</div>
-        <div class="theme-card-head">
+      <button type="button" class="theme-card${active ? ' is-active' : ''}" data-theme-id="${th.id}" aria-pressed="${active}">
+        <span class="theme-card-preview">${stripes}</span>
+        <span class="theme-card-head">
           <span class="theme-card-title">${esc(th.name)}</span>
           <span class="theme-card-badge">当前使用</span>
-        </div>
-        <div class="theme-card-desc">${esc(th.desc)}</div>
-      </div>
+        </span>
+        <span class="theme-card-desc">${esc(th.desc)}</span>
+      </button>
     `;
   }).join('');
 
-  box.querySelectorAll('.theme-card').forEach((card) => {
-    card.addEventListener('click', async () => {
+  document.querySelectorAll('[data-theme-id]').forEach((card) => {
+    card.addEventListener('click', async (e) => {
       const id = card.dataset.themeId;
       if (!id) return;
-      await setTheme(id);
+      await setThemeAnimated(id, e);
       renderThemes();
       const th = THEMES.find((t) => t.id === id);
       toast(`已应用配色：${th ? th.name : id}`);
@@ -82,6 +228,8 @@ function fill(s) {
     const el = document.querySelector(`[name="${k}"]`);
     if (el) el.value = s[k] == null ? '' : s[k];
   }
+  const headCb = document.querySelector('[name="fetchHeadOnAi"]');
+  if (headCb) headCb.checked = s.fetchHeadOnAi !== false;
 }
 
 function collect() {
@@ -91,10 +239,12 @@ function collect() {
     if (!el) continue;
     out[k] = /maxTokens|concurrency|timeout|checkLimit/.test(k) ? Number(el.value) || 0 : el.value.trim();
   }
+  const headCb = document.querySelector('[name="fetchHeadOnAi"]');
+  if (headCb) out.fetchHeadOnAi = Boolean(headCb.checked);
   return out;
 }
 
-/* ── 整理方案 ─────────────────────────────── */
+/* ── 整理方案 + 自定义方案 ────────────────────── */
 
 async function renderPicker() {
   const box = $('#schemePicker');
@@ -104,19 +254,24 @@ async function renderPicker() {
     const active = s.id === current;
     return `
       <button type="button" class="scheme-card${active ? ' is-active' : ''}" data-scheme="${esc(s.id)}">
-        <span class="scheme-card-name">${esc(s.name)}${active ? '<i class="scheme-card-tag">当前</i>' : ''}</span>
+        <span class="scheme-card-name">
+          ${esc(s.name)}
+          ${active ? '<i class="scheme-card-tag">当前</i>' : ''}
+          ${s.custom ? '<i class="scheme-card-tag" style="background:var(--paper-2);color:var(--ink-2)">自定</i>' : ''}
+        </span>
         <span class="scheme-card-desc">${esc(s.desc)}</span>
         <span class="scheme-card-meta">${s.kind === 'letter' ? '字母编码' : '数字编码'} · ${s.codes.length} 类</span>
       </button>`;
   }).join('');
   box.querySelectorAll('[data-scheme]').forEach((el) => {
-    el.addEventListener('click', () => previewScheme(el.dataset.scheme));
+    el.addEventListener('click', () => previewScheme(el.dataset.scheme, schemes));
   });
 }
 
-async function previewScheme(id) {
+async function previewScheme(id, schemes = []) {
   const box = $('#schemePreview');
   if (!box) return;
+  const meta = schemes.find((s) => s.id === id);
   box.innerHTML = '<div class="scheme-plan"><span class="test-msg">正在核对书签栏…</span></div>';
   try {
     const plan = await send('scheme:preview', { schemeId: id });
@@ -134,26 +289,85 @@ async function previewScheme(id) {
           s.conflict ? `，<b class="bad">${s.conflict} 个撞车</b>` : ''
         }</div>
         ${conflicts}
-        <div class="row">
+        <div class="opt-row">
           <button type="button" class="btn btn-primary btn-md" id="btnInstall"${
             plan.conflict.length ? ' disabled' : ''
           }>安装并启用</button>
+          ${meta && meta.custom ? `
+            <button type="button" class="btn btn-line btn-sm" id="btnExportScheme">导出此方案 JSON</button>
+            <button type="button" class="btn btn-danger-ghost btn-sm" id="btnDeleteScheme">删除方案</button>
+          ` : ''}
         </div>
       </div>`;
-    const btn = $('#btnInstall');
-    if (btn) btn.addEventListener('click', () => installScheme(id));
+    $('#btnInstall')?.addEventListener('click', () => installScheme(id));
+    $('#btnExportScheme')?.addEventListener('click', () => {
+      download(`guizang-scheme-${meta.id}.json`, JSON.stringify(meta, null, 2));
+      toast('已导出自定义方案');
+    });
+    $('#btnDeleteScheme')?.addEventListener('click', async () => {
+      await send('scheme:deleteCustom', { schemeId: id });
+      box.innerHTML = '';
+      await renderPicker();
+      toast('已删除自定义方案');
+    });
   } catch (err) {
     box.innerHTML = `<div class="scheme-plan"><span class="test-msg bad">${esc(err.message)}</span></div>`;
   }
 }
 
+function wireCustomSchemes() {
+  const editor = $('#customEditor');
+  $('#btnNewCustom')?.addEventListener('click', () => {
+    editor.hidden = !editor.hidden;
+    if (!editor.hidden) $('#customSchemeName')?.focus();
+  });
+  $('#btnCancelCustom')?.addEventListener('click', () => { editor.hidden = true; });
+  $('#btnSaveCustom')?.addEventListener('click', async () => {
+    const name = $('#customSchemeName').value.trim();
+    const desc = $('#customSchemeDesc').value.trim();
+    const rawLines = $('#customSchemeLines').value.split('\n');
+    const folders = [];
+    for (const line of rawLines) {
+      const t = line.trim();
+      if (!t) continue;
+      const [head, hint = ''] = t.split('|');
+      const m = /^([A-Za-z]{1,3}|\d{1,3})\s+(.+)$/.exec(head.trim());
+      if (m) folders.push({ code: m[1], name: m[2].trim(), hint: hint.trim() });
+    }
+    try {
+      await send('scheme:saveCustom', { scheme: { name, desc, folders } });
+      editor.hidden = true;
+      $('#customSchemeName').value = '';
+      $('#customSchemeDesc').value = '';
+      $('#customSchemeLines').value = '';
+      await renderPicker();
+      toast(`已保存自定义方案「${name}」，点击卡片即可安装`);
+    } catch (e) {
+      toast(e.message);
+    }
+  });
+
+  const fileInput = $('#schemeFileInput');
+  $('#btnImportScheme')?.addEventListener('click', () => fileInput?.click());
+  fileInput?.addEventListener('change', async () => {
+    const f = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (!f) return;
+    try {
+      const parsed = JSON.parse(await f.text());
+      await send('scheme:saveCustom', { scheme: parsed });
+      await renderPicker();
+      toast(`已导入方案「${parsed.name || '未命名'}」`);
+    } catch (e) {
+      toast('导入失败：' + e.message);
+    }
+  });
+}
+
 async function installScheme(id) {
   try {
     const r = await send('scheme:install', { schemeId: id });
-    if (!r.installed) {
-      toast('有编码冲突，未安装');
-      return;
-    }
+    if (!r.installed) return toast('有编码冲突，未安装');
     toast(`已启用：新建 ${r.created} 个目录，复用 ${r.reused} 个`);
     $('#schemePreview').innerHTML = '';
     const summary = await send('summary:load');
@@ -178,11 +392,47 @@ function renderScheme(scheme) {
     .join('');
 }
 
+/* ── 个人改判记忆管理 ─────────────────────────── */
+
+async function renderLearned() {
+  const box = $('#learnedList');
+  if (!box) return;
+  const data = await send('learned:list');
+  const entries = Object.entries((data && data.domains) || {}).sort((a, b) => (b[1].count || 1) - (a[1].count || 1));
+  if (!entries.length) {
+    box.innerHTML = '<div class="backup-empty">还没有改判记忆。你在归类或整理计划里手动改判域名后，会自动沉淀到这里。</div>';
+    return;
+  }
+  box.innerHTML = `<div class="learned-list">${entries.map(([host, info]) => `
+    <div class="learned-item">
+      <span class="learned-host" title="${esc(host)}">${esc(host)}</span>
+      <span class="learned-code">→ ${esc(info.code)}</span>
+      <button type="button" class="ibtn" data-drop-learned="${esc(host)}" title="删除此偏好" style="width:22px;height:22px">${icon('x', 11)}</button>
+    </div>`).join('')}</div>`;
+  box.querySelectorAll('[data-drop-learned]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      await send('learned:remove', { host: btn.dataset.dropLearned });
+      await renderLearned();
+      toast('已移除此域名偏好');
+    });
+  });
+}
+
+function wireLearned() {
+  $('#clearLearned')?.addEventListener('click', async () => {
+    await send('learned:clear');
+    await renderLearned();
+    const msg = $('#learnedMsg');
+    if (msg) { msg.textContent = '已清空改判记忆'; msg.className = 'test-msg ok'; }
+  });
+}
+
 async function save(e) {
   e.preventDefault();
   const msg = $('#saveMsg');
   try {
-    await send('settings:save', { settings: collect() });
+    const r = await send('settings:save', { settings: collect() });
+    currentSettings = r.settings;
     msg.textContent = '已保存';
     msg.className = 'test-msg ok';
     toast('设置已保存');
@@ -206,19 +456,7 @@ async function test() {
   }
 }
 
-/* ── 书签树备份 ───────────────────────────── */
-
-function download(name, text) {
-  const blob = new Blob([text], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement('a');
-  a.href = url;
-  a.download = name;
-  document.body.appendChild(a);
-  a.click();
-  a.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
-}
+/* ── 书签树备份与安全恢复 ─────────────────────── */
 
 async function renderBackups() {
   const box = $('#backupList');
@@ -234,10 +472,26 @@ async function renderBackups() {
       return `<div class="backup-item">
         <span class="backup-when">${esc(when)}</span>
         <span class="backup-meta">${b.counts.nodes} 节点 · ${Math.round(b.bytes / 1024)} KB</span>
-        <span class="backup-tag">${b.planId ? '整理前' : '手动'}</span>
+        <span class="backup-acts">
+          <span class="backup-tag">${b.planId ? '整理前' : '手动'}</span>
+          <button type="button" class="btn btn-line btn-sm" data-restore-backup="${esc(b.id)}">安全恢复</button>
+        </span>
       </div>`;
     })
     .join('');
+
+  box.querySelectorAll('[data-restore-backup]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (!window.confirm('将此快照安全恢复到书签栏新建的「归藏恢复」目录中？（会先自动备份当前树，不会覆盖现有书签）')) return;
+      try {
+        const r = await send('backup:restore', { id: btn.dataset.restoreBackup });
+        await renderBackups();
+        toast(`已安全恢复 ${r.bookmarks} 条书签到「${r.label}」`);
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+  });
 }
 
 function wireBackup() {
@@ -270,8 +524,23 @@ function wireBackup() {
     }
   });
 
+  const fileInput = $('#backupFileInput');
+  $('#importBackupBtn')?.addEventListener('click', () => fileInput?.click());
+  fileInput?.addEventListener('change', async () => {
+    const f = fileInput.files && fileInput.files[0];
+    fileInput.value = '';
+    if (!f) return;
+    if (!window.confirm(`从「${f.name}」安全恢复？会先备份当前书签，并在书签栏新建独立恢复目录，不覆盖现有书签。`)) return;
+    try {
+      const r = await send('backup:restore', { snapshotJson: await f.text() });
+      await renderBackups();
+      say(`已安全恢复 ${r.bookmarks} 条书签到「${r.label}」`);
+    } catch (err) {
+      say(err.message, false);
+    }
+  });
+
   $('#clearBackup')?.addEventListener('click', async () => {
-    // 删备份是不可逆的，确认一次
     if (!window.confirm('删除全部书签树备份？删掉之后，整理就没有退路了。')) return;
     try {
       const r = await send('backup:clear', {});

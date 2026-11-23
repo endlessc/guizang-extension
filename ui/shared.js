@@ -44,6 +44,22 @@ const PATHS = {
   palette: 'M8 1.8a6.2 6.2 0 100 12.4c.9 0 1.6-.7 1.6-1.6 0-.4-.2-.8-.4-1.1-.3-.3-.4-.7-.4-1.1 0-.9.7-1.6 1.6-1.6h1.4c1.9 0 3.4-1.5 3.4-3.4 0-4-3.4-7.2-7.2-7.2zm-3.6 6a1.1 1.1 0 110-2.2 1.1 1.1 0 010 2.2zm2.6-2.6a1.1 1.1 0 110-2.2 1.1 1.1 0 010 2.2zm4 0a1.1 1.1 0 110-2.2 1.1 1.1 0 010 2.2zm2.6 2.6a1.1 1.1 0 110-2.2 1.1 1.1 0 010 2.2z',
   sun: 'M8 4.2a3.8 3.8 0 100 7.6 3.8 3.8 0 000-7.6zM8 1.5v1.5M8 13v1.5M2.5 8H4M12 8h1.5M3.8 3.8l1.1 1.1M11.1 11.1l1.1 1.1M3.8 12.2l1.1-1.1M11.1 4.9l1.1-1.1',
   moon: 'M13.2 9.4A6.2 6.2 0 016.6 2.8a6.4 6.4 0 106.6 6.6z',
+  star: 'M8 2.2l1.8 3.7 4.1.6-3 2.9.7 4.1L8 11.5l-3.6 2 .7-4.1-3-2.9 4.1-.6z',
+  tag: 'M2.4 7.8V3.4a1 1 0 011-1h4.4l5.8 5.8a1 1 0 010 1.4l-4 4a1 1 0 01-1.4 0L2.4 7.8zM5.6 5.6h.1',
+  bookmark: 'M4 2.4h8v11.4L8 11l-4 2.8z',
+  archive: 'M2.2 3.2h11.6v2.6H2.2zM3.2 5.8v7h9.6v-7M6.4 8.6h3.2',
+  download: 'M8 2.4v7.6M5 7.4L8 10.4l3-3M2.8 12.8h10.4',
+  layers: 'M2.4 8l5.6 3 5.6-3M2.4 11l5.6 3 5.6-3M8 2L2.4 5 8 8l5.6-3z',
+  compass: 'M8 2a6 6 0 100 12A6 6 0 008 2zm2.4 3.6l-1.5 3.3-3.3 1.5 1.5-3.3 3.3-1.5z',
+  wand: 'M2.6 13.4L10 6M8.2 4.2l1.6 1.6M11.4 2.2v1.6M13.8 4.6h-1.6M12.2 8.4v1.6M6.8 2.2v1.4',
+  command: 'M4.5 6a1.5 1.5 0 111.5-1.5V11.5a1.5 1.5 0 11-1.5-1.5h7a1.5 1.5 0 11-1.5 1.5v-7a1.5 1.5 0 111.5 1.5z',
+  history: 'M3 8a5 5 0 101.4-3.5L2.6 6.2M2.6 3.4v2.8h2.8M8 5.4V8l2 1.2',
+  redirect: 'M10 3.5h3.5V7M13.5 3.5L8.2 8.8M3 12.5a5.2 5.2 0 015.2-5.2',
+  grid: 'M2.4 2.4h4.6v4.6H2.4zM9 2.4h4.6v4.6H9zM2.4 9h4.6v4.6H2.4zM9 9h4.6v4.6H9z',
+  compact: 'M2.4 3.6h11.2M2.4 6.5h11.2M2.4 9.5h11.2M2.4 12.4h11.2',
+  triage: 'M3 3.5h10v7.5H3zM5.2 13h5.6M6 6.5l1.6 1.6L10.4 5.3',
+  zap: 'M9 1.8L3.6 8.8H8L7 14.2l5.4-7H8L9 1.8z',
+  link: 'M6.5 9.5l3-3M5 7.5L3.6 8.9a2.5 2.5 0 003.5 3.5L8.5 11M11 8.5l1.4-1.4a2.5 2.5 0 00-3.5-3.5L7.5 5',
 };
 
 export function icon(name, size = 16, sw = 1.4) {
@@ -56,9 +72,9 @@ export function icon(name, size = 16, sw = 1.4) {
 
 export function mark(size = 22) {
   return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" aria-hidden="true">
-    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="4.5" fill="#1B1811"/>
-    <path d="M8.4 5.6v12.8" stroke="#F2EFE5" stroke-width="1.5" stroke-linecap="round"/>
-    <path d="M12.4 8.4h5.4M12.4 12h5.4M12.4 15.6h3.2" stroke="#F2EFE5" stroke-width="1.3"
+    <rect x="0.75" y="0.75" width="22.5" height="22.5" rx="4.5" fill="var(--mark-bg, #1B1811)" stroke="var(--mark-ring, transparent)" stroke-width="1"/>
+    <path d="M8.4 5.6v12.8" stroke="var(--mark-fg, #F2EFE5)" stroke-width="1.5" stroke-linecap="round"/>
+    <path d="M12.4 8.4h5.4M12.4 12h5.4M12.4 15.6h3.2" stroke="var(--mark-fg, #F2EFE5)" stroke-width="1.3"
       stroke-linecap="round" opacity="0.85"/></svg>`;
 }
 
@@ -154,14 +170,33 @@ export function letterOf(host) {
   return core.slice(0, 1).toUpperCase();
 }
 
-export function faviconMark(host, isDead = false) {
+/**
+ * 网站图标：在扩展环境下优先读 Chrome 本地 /_favicon/ 缓存（零外发请求、离线秒开），
+ * 本地 HTTP 预览模式退回 Google favicon 或首字母印章。
+ */
+export function faviconMark(host, isDead = false, url = '') {
   const h = host || '';
-  const favUrl = h ? `https://www.google.com/s2/favicons?domain=${encodeURIComponent(h)}&sz=32` : '';
+  let favUrl = '';
+  const isExt = typeof location !== 'undefined' && location.protocol === 'chrome-extension:' && typeof chrome !== 'undefined' && chrome.runtime?.getURL;
+  if (isExt && url && /^https?:/i.test(url)) {
+    favUrl = chrome.runtime.getURL(`/_favicon/?pageUrl=${encodeURIComponent(url)}&size=32`);
+  } else if (h) {
+    favUrl = `https://www.google.com/s2/favicons?domain=${encodeURIComponent(h)}&sz=32`;
+  }
   const letter = esc(letterOf(h));
   return `<span class="row-mark${isDead ? ' mark-dead' : ''}">
-    ${h && !isDead ? `<img class="row-favicon" src="${favUrl}" loading="lazy" alt="" />` : ''}
+    ${favUrl && !isDead ? `<img class="row-favicon" src="${favUrl}" loading="lazy" alt="" />` : ''}
     <span>${letter}</span>
   </span>`;
+}
+
+export function wireFavicons(root = document) {
+  if (!root) return;
+  root.querySelectorAll('img.row-favicon').forEach((img) => {
+    img.addEventListener('error', () => img.remove());
+    if (img.complete && img.naturalWidth > 0) img.classList.add('is-loaded');
+    else img.addEventListener('load', () => img.classList.add('is-loaded'));
+  });
 }
 
 if (typeof document !== 'undefined') {
@@ -257,8 +292,10 @@ export const THEMES = [
   { id: 'celadon', name: '雨过天青', desc: '北宋汝窑 · 黛绿素瓷', preview: ['#F4F7F6', '#132223', '#225C58'] },
   { id: 'amber', name: '琅嬛缃素', desc: '蜜蜡老卷 · 焦茶青铁', preview: ['#F7F2E2', '#261D15', '#2A4860'] },
   { id: 'bamboo', name: '竹简青霭', desc: '幽篁寒玉 · 苍竹青翠', preview: ['#F3F6F0', '#162119', '#2E5C3B'] },
-  { id: 'dark', name: '宣纸夜泊', desc: '徽州老墨 · 素绢微光', preview: ['#141311', '#ECE7DA', '#467FA8'] },
+  { id: 'landscape', name: '青绿千里', desc: '千里江山 · 石青矿绿', preview: ['#F1F6F5', '#13262B', '#1B5E72'] },
+  { id: 'dark', name: '宣纸夜泊', desc: '徽州老墨 · 素绢微光', preview: ['#141311', '#ECE7DA', '#3B739E'] },
   { id: 'lacquer', name: '玄玉泥金', desc: '深邃黑漆 · 泥金描纹', preview: ['#0F1215', '#E8EBF0', '#C9983E'] },
+  { id: 'obsidian', name: '夜雨琉璃', desc: '深空靛蓝 · 冰青琉璃', preview: ['#0B101B', '#E6EEF8', '#38BDF8'] },
 ];
 
 export function applyTheme(theme) {
@@ -309,6 +346,42 @@ export async function setTheme(theme) {
     localStorage.setItem('guizang_theme', theme);
   }
   applyTheme(theme);
+  try {
+    await send('theme:set', { theme });
+  } catch {
+    // 忽略
+  }
+}
+
+/**
+ * 水墨涟漪主题切换（Chrome 原生 View Transitions API）。
+ * 从点击坐标以圆形扩散切换至新主题，若用户开启减弱动效则自动降级为瞬切。
+ */
+export async function setThemeAnimated(theme, origin) {
+  const reduced = typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+  if (typeof document === 'undefined' || !document.startViewTransition || reduced) {
+    return setTheme(theme);
+  }
+  const x = (origin && typeof origin.clientX === 'number' && origin.clientX > 0)
+    ? origin.clientX
+    : Math.round(window.innerWidth * 0.85);
+  const y = (origin && typeof origin.clientY === 'number' && origin.clientY > 0)
+    ? origin.clientY
+    : 28;
+  const maxR = Math.hypot(
+    Math.max(x, window.innerWidth - x),
+    Math.max(y, window.innerHeight - y),
+  );
+  const transition = document.startViewTransition(() => {
+    if (typeof localStorage !== 'undefined') localStorage.setItem('guizang_theme', theme);
+    applyTheme(theme);
+  });
+  transition.ready.then(() => {
+    document.documentElement.animate(
+      { clipPath: [`circle(0px at ${x}px ${y}px)`, `circle(${maxR}px at ${x}px ${y}px)`] },
+      { duration: 500, easing: 'cubic-bezier(0.22, 1, 0.36, 1)', pseudoElement: '::view-transition-new(root)' },
+    );
+  }).catch(() => {});
   try {
     await send('theme:set', { theme });
   } catch {
