@@ -224,3 +224,8 @@ dev/*-test.mjs         六套断言（解析基线、字母识别、方案安装
 
 界面截图是本地预览（mock 层）下拍的：`docs/manager.png`。
 
+## 开源协议
+
+本项目基于 [MIT License](LICENSE) 开源。
+
+
