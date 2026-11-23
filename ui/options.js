@@ -368,7 +368,9 @@ async function installScheme(id) {
   try {
     const r = await send('scheme:install', { schemeId: id });
     if (!r.installed) return toast('有编码冲突，未安装');
-    toast(`已启用：新建 ${r.created} 个目录，复用 ${r.reused} 个`);
+    const base = `已启用：新建 ${r.created} 个目录，复用 ${r.reused} 个`;
+    // 换方案会让旧建议全部作废（不同方案会撞码但语义不同），必须说清楚
+    toast(r.dropped ? `${base}；换了方案，${r.dropped} 条旧建议已作废` : base);
     $('#schemePreview').innerHTML = '';
     const summary = await send('summary:load');
     renderScheme(summary.scheme);

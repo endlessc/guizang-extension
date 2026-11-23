@@ -53,6 +53,7 @@ const S = {
   editing: null,           // 正在编辑的书签 { id, title, url }
   aiBusy: false,
   aiProgress: null,
+  pendingNote: 0,          // 因方案变化/类目消失而被清掉的建议数（提示一次）
   plan: null,              // 整理计划
   planBusy: false,
   planProgress: null,
@@ -1963,7 +1964,12 @@ function aiPanel() {
        <div class="scan-fill" style="width:${S.aiProgress ? Math.round(S.aiProgress.done / S.aiProgress.total * 100) : 8}%"></div></div></div>`
     : '';
 
-  const body = busy + doneRows + pend.map((p) => suggestionCard(p)).join('');
+  const note = S.pendingNote
+    ? `<div class="sg sg-note"><div class="sg-why">有 ${S.pendingNote} 条建议的目标类目已不存在（多半是换了分类方案），已自动清除。</div>
+       <button class="btn btn-ghost btn-sm" data-note-ok style="margin-top:6px">知道了</button></div>`
+    : '';
+
+  const body = note + busy + doneRows + pend.map((p) => suggestionCard(p)).join('');
 
   return `<div class="insp-head">
       <div class="insp-head-bar">
@@ -2025,6 +2031,11 @@ function wireAi() {
   box.querySelector('[data-close]')?.addEventListener('click', () => {
     S.drawer = null; S.picking = null; renderInspector(); renderTop();
   });
+  box.querySelector('[data-note-ok]')?.addEventListener('click', () => {
+    S.pendingNote = 0;
+    renderInspector();
+  });
+
   box.querySelector('#btnAiTriage')?.addEventListener('click', () => {
     const items = Object.keys(S.pending).map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
     triage.open(items);
@@ -2078,11 +2089,18 @@ async function acceptIds(ids) {
   }));
   const r = await send('ai:accept', { ids }).catch((err) => ({ error: err.message }));
   if (r.error) return toast(r.error);
-  snapshot.slice(0, 12).forEach((s) => S.done.unshift({ ...s, name: folderName(s.code) }));
+  const movedIds = new Set(r.movedIds || []);
+  snapshot
+    .filter((s) => !movedIds.size || movedIds.has(s.id))
+    .slice(0, 12)
+    .forEach((s) => S.done.unshift({ ...s, name: folderName(s.code) }));
   S.done = S.done.slice(0, 6);
   S.picking = null;
   await load();
-  toast(`已归入 ${r.moved} 条`, r.journalId ? {
+  const tip = r.failed
+    ? `已归入 ${r.moved} 条，${r.failed} 条没能归入（${(r.missing || []).join('、')} 已不存在）`
+    : `已归入 ${r.moved} 条`;
+  toast(tip, r.journalId ? {
     actionText: '撤销',
     onAction: () => undoJournal(r.journalId),
   } : undefined);
@@ -2796,6 +2814,7 @@ async function load() {
   S.settings = st.settings || {};
   S.aiReady = st.aiReady;
   S.scan = st.scan || { running: false, done: 0, total: 0 };
+  if (st.pendingDropped) S.pendingNote = st.pendingDropped;
   const org = await send('organize:load').catch(() => null);
   if (org) {
     S.plan = org.plan || null;

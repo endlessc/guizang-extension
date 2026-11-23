@@ -12,6 +12,7 @@ import { planInstall } from '../lib/scheme-install.js';
 import { flattenTree, checkBackupReady, validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { PROTO } from '../lib/version.js';
 import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS } from '../lib/llm.js';
+import { runAccept } from '../lib/pending.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
 import {
@@ -196,10 +197,17 @@ function stateLoad() {
     [JSON.parse(JSON.stringify(root))],
     parseOptsOf(settings.schemeId, settings.customSchemes || []),
   );
+  // 与真实后台一致：目标编码已不存在的建议直接剔除
+  const codes = new Set(scheme.map((f) => f.code));
+  let pendingDropped = 0;
+  for (const [id, p] of Object.entries(pending)) {
+    if (!p || !p.code || !codes.has(p.code)) { delete pending[id]; pendingDropped += 1; }
+  }
   return {
     items, folders, scheme, inboxId,
     health: JSON.parse(JSON.stringify(health)),
     pending: JSON.parse(JSON.stringify(pending)),
+    pendingDropped,
     meta: JSON.parse(JSON.stringify(meta)),
     learned: JSON.parse(JSON.stringify(learned)),
     usageCache: usageCache ? JSON.parse(JSON.stringify(usageCache)) : null,
@@ -453,17 +461,17 @@ async function handle(msg) {
   }
 
   if (type === 'ai:accept') {
-    const ids = msg.ids.filter((id) => pending[id]);
-    const groups = {};
-    ids.forEach((id) => { (groups[pending[id].code] ||= []).push(id); });
-    let moved = 0;
-    for (const [code, group] of Object.entries(groups)) {
-      const r = await handle({ type: 'bookmarks:moveCode', ids: group, code });
-      moved += r.moved;
-      group.forEach((id) => delete pending[id]);
+    // 与真实后台一致：逐组执行，某组的目标类目找不到不影响其它组
+    const r = await runAccept({
+      pending,
+      ids: msg.ids.filter((id) => pending[id]),
+      move: (code, group) => handle({ type: 'bookmarks:moveCode', ids: group, code }),
+    });
+    for (const id of Object.keys(pending)) {
+      if (!Object.prototype.hasOwnProperty.call(r.pending, id)) delete pending[id];
     }
     emit({ type: 'state:changed' });
-    return { moved };
+    return { moved: r.moved, movedIds: r.ops.map((o) => o.id), failed: r.failed, missing: r.missing };
   }
 
   if (type === 'ai:ignore') {
@@ -713,9 +721,14 @@ async function handle(msg) {
     for (const f of plan.missing) {
       bar.children.push({ id: 'f' + scheme.id + f.code, title: `${f.code} ${f.name}`, parentId: bar.id, children: [] });
     }
+    let dropped = 0;
+    if ((settings.schemeId || '') !== msg.schemeId) {
+      dropped = Object.keys(pending).length;
+      if (dropped) for (const k of Object.keys(pending)) delete pending[k];
+    }
     settings = { ...settings, schemeId: msg.schemeId };
     emit({ type: 'state:changed' });
-    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId: msg.schemeId };
+    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId: msg.schemeId, dropped };
   }
 
   if (type === 'settings:save') { settings = { ...settings, ...msg.settings }; return { settings }; }

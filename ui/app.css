@@ -1677,3 +1677,4 @@ body.is-col-resizing{cursor:col-resize !important;user-select:none !important;}
 }
 
 
+.sg-note{ background:var(--warn-wash, #F8F3E3); border-color:var(--warn, #B98A2E); }

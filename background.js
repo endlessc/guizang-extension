@@ -20,6 +20,7 @@ import {
 } from './lib/llm.js';
 import { buildPlan, dropOp, overrideOp, readyOps, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
+import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
 import { buildOmniboxSuggestions } from './lib/search.js';
 import {
@@ -92,6 +93,15 @@ async function loadState() {
   for (const id of Object.keys(pending)) {
     if (!alive.has(id)) { delete pending[id]; dirty = true; }
   }
+  // 目标编码已经不存在（换了方案，或文件夹被改名/删掉）→ 建议作废，别让它一直挂着
+  const codes = new Set(scheme.map((f) => f.code));
+  const stale = prunePending(pending, codes);
+  if (stale.dropped) {
+    for (const id of Object.keys(pending)) {
+      if (!Object.prototype.hasOwnProperty.call(stale.pending, id)) delete pending[id];
+    }
+    dirty = true;
+  }
   const pruned = pruneMeta(rawMeta, alive);
   if (dirty || pruned.dirty) {
     await chrome.storage.local.set({ health, pending, meta: pruned.meta });
@@ -104,6 +114,7 @@ async function loadState() {
     inboxId,
     health,
     pending,
+    pendingDropped: stale.dropped || 0,
     meta: pruned.meta,
     learned,
     usageCache,
@@ -832,22 +843,14 @@ const handlers = {
   'ai:accept': async ({ ids }) => {
     const { pending } = await chrome.storage.local.get('pending');
     const p = pending || {};
-    const targets = ids.filter((id) => p[id]);
-    const byCode = new Map();
-    for (const id of targets) {
-      const code = p[id].code;
-      if (!byCode.has(code)) byCode.set(code, []);
-      byCode.get(code).push(id);
-    }
-    let moved = 0;
-    const allOps = [];
-    for (const [code, group] of byCode) {
-      const r = await moveToCode(group, code);
-      moved += r.moved;
-      allOps.push(...(r.ops || []));
-      group.forEach((id) => delete p[id]);
-    }
-    await chrome.storage.local.set({ pending: p });
+    // 按编码分组逐组执行：某一组的目标类目找不到，只记失败，其它组照常移动
+    const r = await runAccept({
+      pending: p,
+      ids: ids.filter((id) => p[id]),
+      move: (code, group) => moveToCode(group, code),
+    });
+    const { moved, failed, missing, ops: allOps } = r;
+    await chrome.storage.local.set({ pending: r.pending });
     let journalId = null;
     if (allOps.length) {
       const entry = {
@@ -856,7 +859,7 @@ const handlers = {
         planId: 'ai-accept',
         scope: 'ai',
         applied: allOps.length,
-        failed: 0,
+        failed,
         ops: allOps,
       };
       const journal = pushEntry(await readJournal(), entry);
@@ -864,7 +867,7 @@ const handlers = {
       journalId = entry.id;
     }
     broadcast({ type: 'state:changed' });
-    return { moved, journalId };
+    return { moved, movedIds: allOps.map((o) => o.id), failed, missing, journalId };
   },
 
   'ai:ignore': async ({ ids }) => {
@@ -947,9 +950,12 @@ const handlers = {
     const settings = await readSettings();
     const list = (settings.customSchemes || []).filter((s) => s.id !== schemeId);
     const next = { ...settings, customSchemes: list, schemeId: settings.schemeId === schemeId ? '' : settings.schemeId };
+    const { pending: curPending = {} } = await chrome.storage.local.get('pending');
+    const sw = onSchemeChange(settings.schemeId, next.schemeId, curPending);
+    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
-    return { schemes: listSchemes(list) };
+    return { schemes: listSchemes(list), dropped: sw.dropped };
   },
 
   'scheme:preview': async ({ schemeId }) => {
@@ -1054,10 +1060,15 @@ const handlers = {
     for (const f of plan.missing) {
       await chrome.bookmarks.create({ parentId: plan.barId, title: `${f.code} ${f.name}` });
     }
+    // 换方案 → 旧建议全部作废：不同方案会撞码但语义不同（杜威 100 哲学 / PARA 100 项目）
+    const { pending: curPending = {} } = await chrome.storage.local.get('pending');
+    const sw = onSchemeChange(settings.schemeId, schemeId, curPending);
+    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
+
     const next = { ...settings, schemeId };
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
-    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId };
+    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId, dropped: sw.dropped };
   },
 
   'bookmarks:update': async ({ id, title, url }) => {
