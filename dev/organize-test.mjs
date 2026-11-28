@@ -10,7 +10,7 @@
 
 import {
   preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes, readyOps,
-  subCodeFor, splitSubs, applySubs, planFolders,
+  subCodeFor, splitSubs, applySubs, planFolders, deriveSubs, schemeCreated,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -267,6 +267,49 @@ console.log('拆二级：子类编码');
   eq('字母编码不支持二级', splitSubs('T', [{ name: '前端' }]), []);
   eq('最多 9 个二级', splitSubs('100', Array.from({ length: 12 }, (_, i) => ({ name: '子' + i }))).length, 9);
   eq('没名字的丢掉、编码不重排', splitSubs('100', [{ name: '  ' }, { name: '真' }]).map((s) => s.code), ['120']);
+}
+
+console.log('按收藏派生二级（生成计划时自动跑）');
+{
+  const sch = [{ code: '100', name: '编程' }, { code: '200', name: '数据' }, { code: 'T', name: '技术' }];
+  const mk = (n, code) => Array.from({ length: n }, (_, i) => ({ id: code + i, title: 't', url: 'https://a.com/' + i, host: 'a.com', code: '' }));
+  const items = [...mk(7, 'a'), ...mk(3, 'b'), ...mk(7, 'c')];
+  const suggestions = {
+    ...Object.fromEntries(mk(7, 'a').map((x) => [x.id, { code: '100', conf: 0.9 }])),
+    ...Object.fromEntries(mk(3, 'b').map((x) => [x.id, { code: '200', conf: 0.9 }])),
+    ...Object.fromEntries(mk(7, 'c').map((x) => [x.id, { code: 'T', conf: 0.9 }])),
+  };
+  const plan = buildPlan({ items, scheme: sch, scope: 'scheme', suggestions, existing: new Set() });
+
+  const calls = [];
+  const derive = async ({ code, items: part }) => {
+    calls.push([code, part.length]);
+    const subs = [{ name: '语言' }, { name: '框架' }];
+    return { subs, assign: Object.fromEntries(part.map((x, i) => [x.id, i % 2])) };
+  };
+  const r = await deriveSubs(plan, items, derive, { minPerTop: 6 });
+  eq('只处理 ≥6 条且是数字编码的类目', calls, [['100', 7]]);
+  eq('子类编码按父首位 + 10n', r.plan.subs['100'].map((x) => x.code), ['110', '120']);
+  eq('条目挂到二级上', r.plan.ops.filter((o) => o.to.code === '100' && o.to.sub).length, 7);
+  eq('父与子（以及其它要建的一级）一起进新建清单', r.plan.created.map((c) => c.code).sort(), ['100', '110', '120', '200', 'T']);
+  eq('统计报出处理了几个类目', [r.groups, r.split], [1, 1]);
+
+  const bad = await deriveSubs(plan, items, async () => { throw new Error('模型挂了'); }, { minPerTop: 6 });
+  eq('某一个类目分不动，不影响整张计划', [bad.split, bad.plan.ops.filter((o) => o.to.sub).length], [0, 0]);
+}
+
+console.log('目录结构的两种来源');
+{
+  const full = [
+    { code: '100', name: '编程' },
+    { code: '110', name: '语言', parent: '100' },
+    { code: '200', name: '数据' },
+  ];
+  eq('默认分类：缺几个建几个（含空的二级）', schemeCreated(full, new Set(['100'])), [
+    { code: '110', name: '语言' }, { code: '200', name: '数据' },
+  ]);
+  eq('全建过了就是空清单', schemeCreated(full, new Set(['100', '110', '200'])), []);
+  eq('空方案不报错', schemeCreated(undefined, new Set()), []);
 }
 
 if (failed) {

@@ -69,6 +69,8 @@ const S = {
   orgTab: 'plan',          // 'plan' | 'clean'
   orgLimit: '200',
   orgIncludeUnsure: false,
+  orgAutoSubs: true,        // 生成计划时按收藏自动派生二级
+  orgTree: 'collection',    // 'collection' 按收藏生成 | 'scheme' 用方案的默认分类
   splitBusy: false,
   splitProgress: null,         // 每轮条数：'200' | '500' | '1000' | 'all'
   cleanList: null,         // AI 标题洗白建议列表
@@ -1908,9 +1910,14 @@ function organizePanel() {
     const batchWaited = pr.batchAt ? Math.max(0, Math.round((Date.now() - pr.batchAt) / 1000)) : 0;
     const perBatch = pr.batchSize || 0;
     // 把「本轮总数」和「每批条数」分开写：193 是本轮要判的总条数，一批只有 24 条
-    const batchLine = pr.stage === 'model' && pr.batch && pr.batches
-      ? `第 ${pr.batch}/${pr.batches} 批（${perBatch ? `每批 ${perBatch} 条，` : ''}需模型判断 ${pr.total || '…'} 条）· 本批已等 ${batchWaited} 秒`
-      : '正在预筛书签';
+    const stageText = pr.stage === 'model' ? '模型正在判断'
+      : pr.stage === 'subs' ? '正在按收藏派生二级'
+        : '正在预筛';
+    const batchLine = pr.stage === 'subs'
+      ? `第 ${pr.done || 0}/${pr.total || '…'} 个一级类目（≥6 条的才派生）`
+      : pr.stage === 'model' && pr.batch && pr.batches
+        ? `第 ${pr.batch}/${pr.batches} 批（${perBatch ? `每批 ${perBatch} 条，` : ''}需模型判断 ${pr.total || '…'} 条）· 本批已等 ${batchWaited} 秒`
+        : '正在预筛书签';
     const scopeLine = pr.candidates
       ? `本轮候选 ${pr.candidates} 条，其中 ${pr.total || '…'} 条本地没把握、需要模型判断`
       : '';
@@ -1919,7 +1926,7 @@ function organizePanel() {
       : '';
     return head + `<div class="insp-body">
       <div class="plan-busy">
-        <div class="plan-busy-line">${pr.stage === 'model' ? '模型正在判断' : '正在预筛'} ${pr.done}/${pr.total || '…'}</div>
+        <div class="plan-busy-line">${stageText} ${pr.done}/${pr.total || '…'}</div>
         <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
         <div class="plan-empty-hint" style="margin-top:10px">${scopeLine}</div>
         <div class="plan-empty-hint">${batchLine}${slowHint}</div>
@@ -1963,6 +1970,27 @@ function organizePanel() {
           ${['200', '500', '1000', 'all'].map((v) => `<button type="button" class="seg-tab${S.orgLimit === v ? ' is-active' : ''}" data-org-limit="${v}">${v === 'all' ? '全部' : v}</button>`).join('')}
         </div>
         <div class="plan-empty-hint">一次跑完 = 本轮不设上限；条数越多，模型请求越久，但进度和「停止」都可用。</div>
+        ${S.orgScope === 'scheme' ? `
+        <div class="plan-foot-line" style="margin-top:10px">
+          <span class="plan-limit-label">目录结构</span>
+          <button type="button" class="seg-tab${S.orgTree === 'collection' ? ' is-active' : ''}" data-org-tree="collection">按我的收藏生成</button>
+          <button type="button" class="seg-tab${S.orgTree === 'scheme' ? ' is-active' : ''}" data-org-tree="scheme">用方案的默认分类</button>
+        </div>
+        <div class="plan-empty-hint">${
+          S.orgTree === 'scheme'
+            ? '照用方案的默认分类：方案里有几个类目就建几个（含空目录），书签按方案类目归位。'
+            : '按收藏生成：只建真正用得到的目录，空类目一个都不建。'
+        }</div>` : ''}
+        ${S.orgScope === 'scheme' && S.orgTree === 'scheme' ? '' : `
+        <div class="plan-foot-line" style="margin-top:10px">
+          <label class="opt-toggle" style="display:inline-flex;gap:6px;align-items:center">
+            <input type="checkbox" data-auto-subs ${S.orgAutoSubs ? 'checked' : ''} ${S.aiReady ? '' : 'disabled'} />
+            <span>按收藏派生二级目录（每个一级 ≥6 条时，需模型）</span>
+          </label>
+        </div>
+        ${S.orgAutoSubs && !S.aiReady
+          ? '<div class="plan-empty-hint">没配模型：这一轮只生成一级目录。</div>'
+          : ''}`}
         <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
         ${journalHistoryHtml()}
       </div>
@@ -2012,6 +2040,7 @@ function organizePanel() {
         <span>跳过 <b>${s.skip}</b></span>
         ${s.blocked ? `<span class="tone-dead">动不了 <b>${s.blocked}</b></span>` : ''}
       </div>
+      ${plan.tree === 'scheme' ? '<div class="plan-empty-hint" style="margin-top:8px">目录结构：用方案的默认分类（方案里有几个建几个，含空目录）</div>' : ''}
       ${groups || '<div class="plan-empty"><div class="plan-empty-hint">计划是空的：没有需要移动的书签。</div></div>'}
     </div>
     <div class="insp-foot plan-foot">
@@ -2140,7 +2169,7 @@ function wireOrganize(root) {
     S.planProgress = { stage: 'preselect', done: 0, total: 0 };
     renderOrgArea();
     const limit = S.orgLimit === 'all' ? 'all' : Number(S.orgLimit) || 200;
-    await send('organize:plan', { scope: S.orgScope, limit }).catch((err) => {
+    await send('organize:plan', { scope: S.orgScope, limit, autoSubs: S.orgAutoSubs, tree: S.orgTree }).catch((err) => {
       S.planBusy = false;
       toast(err.message);
       renderOrgArea();
@@ -2153,6 +2182,16 @@ function wireOrganize(root) {
   box.querySelector('[data-include-unsure]')?.addEventListener('change', (e) => {
     S.orgIncludeUnsure = Boolean(e.target.checked);
     renderOrgArea();
+  });
+  box.querySelector('[data-auto-subs]')?.addEventListener('change', (e) => {
+    S.orgAutoSubs = Boolean(e.target.checked);
+    renderOrgArea();
+  });
+  box.querySelectorAll('[data-org-tree]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      S.orgTree = btn.dataset.orgTree;
+      renderOrgArea();
+    });
   });
   box.querySelector('[data-split]')?.addEventListener('click', async () => {
     S.splitBusy = true;

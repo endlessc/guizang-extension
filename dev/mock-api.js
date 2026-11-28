@@ -307,7 +307,9 @@ function summaryLoad() {
   const serendipity = pickSerendipity(items, { health, meta, count: 3, seed: 42 })
     .map((it) => ({ id: it.id, title: it.title, url: it.url, host: it.host, code: it.code, added: it.added }));
   return {
-    scheme, parentOf, inboxId, settings, meta: JSON.parse(JSON.stringify(meta)), aiReady: Boolean(settings.apiKey && settings.model),
+    // 与真实后台同名：设置页读的是 folderScheme，之前这里只给了 scheme，预览才一直空白
+    folderScheme: scheme, scheme, parentOf, inboxId, settings,
+    meta: JSON.parse(JSON.stringify(meta)), aiReady: Boolean(settings.apiKey && settings.model),
     counts: {
       all: items.length, dead, susp, moved, dups: dups.length, unchecked, inbox,
       pending: Object.keys(pending).length,
@@ -1060,7 +1062,10 @@ async function handle(msg) {
   if (type === 'scheme:preview') {
     const scheme = getScheme(msg.schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
-    return planInstall([JSON.parse(JSON.stringify(root))], scheme);
+    const plan = planInstall([JSON.parse(JSON.stringify(root))], scheme);
+    const st = stateLoad();
+    const used = new Set(st.items.map((it) => it.code || ''));
+    return { ...plan, empty: scheme.folders.filter((f) => !used.has(f.code)).map((f) => f.code) };
   }
 
   if (type === 'scheme:select') {
@@ -1145,7 +1150,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.23.1-mock' }),
+      getManifest: () => ({ version: '0.24.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

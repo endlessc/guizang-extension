@@ -19,7 +19,7 @@ import {
   callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, deriveSubs, schemeCreated, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal } from './lib/wal.js';
 import { migratePending, prunePending, runAccept } from './lib/pending.js';
@@ -384,10 +384,13 @@ async function runApply({ includeUnsure = false } = {}) {
   const ops = readyOps(plan, { includeUnsure });
   if (!ops.length) throw new Error('计划里没有可执行的条目');
 
+  let folders = planFolders(plan, ops);
+  // 默认分类：方案里没建过的类目也一起建（哪怕这轮没有书签落进去）
+  if (plan.tree === 'scheme') folders = [...folders, ...(plan.scheme || [])];
   const res = await commitOps({
     planId: plan.id,
     planAt: plan.at,
-    folders: planFolders(plan, ops),
+    folders,
     ops,
     backup: true,
     journal: true,
@@ -536,7 +539,7 @@ async function writePlan(plan) {
  * 生成整理计划：预筛 → 历史偏好/本地规则 → 低置信度送模型（附带弱标题 <head> 摘要）→ 冲突消解。
  * 全程只读书签，不动任何数据。
  */
-async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES) {
+async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES, { autoSubs = true, tree = 'collection' } = {}) {
   orgCtl = { stop: false };
   organize = { running: true, stage: 'preselect', done: 0, total: 0 };
   broadcast({ type: 'organize:start' });
@@ -628,7 +631,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
     }
 
     const tree = await chrome.bookmarks.getTree();
-    const plan = buildPlan({
+    let plan = buildPlan({
       items,
       scheme: targets,
       scope,
@@ -638,6 +641,35 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
       existing: new Set(folderScheme.map((f) => f.code)),
       limit,
     });
+
+    // 结构来源二选一：照用方案的默认分类（建全，含空目录），或按收藏生成（只建用到的 + 派生二级）
+    if (scope === 'scheme' && tree === 'scheme') {
+      plan.tree = 'scheme';
+      plan.created = schemeCreated(targets, new Set(folderScheme.map((f) => f.code)));
+    } else if (autoSubs) {
+      if (!hasModel(settings)) {
+        broadcast({ type: 'organize:warn', message: '还没配模型：这一轮只生成一级目录' });
+      } else {
+        organize.stage = 'subs';
+        broadcast({ type: 'organize:progress', stage: 'subs', done: 0, total: 0, at: Date.now() });
+        const derived = await deriveSubs(
+          plan,
+          items,
+          ({ code, name, items: part }) => splitByModel({ code, name }, part, settings),
+          {
+            minPerTop: 6,
+            shouldStop: () => orgCtl.stop,
+            onStep: (done, total) => broadcast({
+              type: 'organize:progress', stage: 'subs', done, total, at: Date.now(),
+            }),
+          },
+        );
+        plan = derived.plan;
+        if (!derived.groups) {
+          broadcast({ type: 'organize:warn', message: '这轮没有 ≥6 条的类目，暂不派生二级' });
+        }
+      }
+    }
     if (orgCtl.stop) broadcast({ type: 'organize:warn', message: '已停止生成，计划按已拿到的建议出' });
     await writePlan(plan);
     return plan;
@@ -1302,7 +1334,12 @@ const handlers = {
     const scheme = getScheme(schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
     const tree = await chrome.bookmarks.getTree();
-    return planInstall(tree, scheme);
+    const plan = planInstall(tree, scheme);
+    // 哪些类目现在一条书签都没有：预建只会留下空目录，先说清楚
+    const { items } = parseTree(tree, parseOptsFor(settings));
+    const used = new Set(items.map((it) => it.code || ''));
+    const empty = scheme.folders.filter((f) => !used.has(f.code)).map((f) => f.code);
+    return { ...plan, empty };
   },
 
   /** 分类法设计：抽样 → 归纳骨架 → 规则铺全量 → 剪枝，只产出 draft */
@@ -1438,9 +1475,9 @@ const handlers = {
     return { ok: true };
   },
 
-  'organize:plan': async ({ scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES } = {}) => {
+  'organize:plan': async ({ scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES, autoSubs = true, tree = 'collection' } = {}) => {
     if (organize.running) throw new Error('上一次整理计划还在生成');
-    runOrganize(scope, folderCode, limit).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
+    runOrganize(scope, folderCode, limit, { autoSubs, tree }).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
     return { started: true };
   },
 

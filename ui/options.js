@@ -508,27 +508,23 @@ async function previewScheme(id, schemes = []) {
       : '';
     box.innerHTML = `
       <div class="scheme-plan">
-        <div class="scheme-plan-line">将新建 <b>${s.missing}</b> 个目录，复用 <b>${s.exists}</b> 个${
+        <div class="scheme-plan-line">方案定义 <b>${s.missing + s.exists}</b> 个类目，其中 <b>${Math.max(0, s.missing + s.exists - (s.empty || []).length)}</b> 个现在能找到书签${
           s.conflict ? `，<b class="bad">${s.conflict} 个撞车</b>` : ''
         }</div>
         ${conflicts}
         <div class="opt-row">
-          <button type="button" class="btn btn-primary btn-md" id="btnInstall"${
-            plan.conflict.length ? ' disabled' : ''
-          }>安装并启用</button>
+          <button type="button" class="btn btn-primary btn-md" id="btnSelectScheme">选用这套方案</button>
           <button type="button" class="btn btn-line btn-sm" id="btnTrimScheme">按我的收藏裁剪</button>
-          <button type="button" class="btn btn-ghost btn-sm" id="btnSelectScheme">仅选用（不建目录）</button>
           ${meta && meta.custom ? `
             <button type="button" class="btn btn-line btn-sm" id="btnExportScheme">导出此方案 JSON</button>
             <button type="button" class="btn btn-danger-ghost btn-sm" id="btnDeleteScheme">删除方案</button>
           ` : ''}
         </div>
-        <div class="hint" style="margin-top:6px">「安装并启用」把方案里 ${
-          s.missing + s.exists
-        } 个类目原样建全；「按我的收藏裁剪」先用本地规则把你的收藏铺进这套编码，只留下真有收藏的类目，做成草稿等你审定；
-        「仅选用」只把方案设为当前判定依据，一个目录都不建——书库里的「按方案建档」用它。</div>
+        <div class="hint" style="margin-top:6px">「选用」只把方案设为分类规则，一个目录都不建。
+        之后到书库 →「整理」→「按方案建档」，那里再选目录结构怎么来：
+        <b>用方案的默认分类</b>（照方案建全，含空目录）或 <b>按我的收藏生成</b>（只建用得到的，还能派生二级）。
+        「按我的收藏裁剪」是另一条路：先用本地规则铺一遍、剪掉空类目，做成草稿等你审定。</div>
       </div>`;
-    $('#btnInstall')?.addEventListener('click', () => installScheme(id));
     $('#btnTrimScheme')?.addEventListener('click', () => trimScheme(id));
     $('#btnSelectScheme')?.addEventListener('click', () => selectScheme(id));
     $('#btnExportScheme')?.addEventListener('click', () => {
@@ -602,7 +598,7 @@ async function selectScheme(id) {
   try {
     const r = await send('scheme:select', { schemeId: id });
     await renderPicker();
-    toast(`已选用这套方案（没有建任何目录）${schemeNote(r)}`);
+    toast(`已选用（没有建任何目录）${schemeNote(r)}；到书库「整理 → 按方案建档 → 生成计划」才会按收藏建目录`);
   } catch (err) {
     toast(err.message);
   }
@@ -615,21 +611,6 @@ async function trimScheme(id) {
     $('#txStatus')?.closest('.card')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     const removed = (draft.removed || []).length;
     toast(`已生成草稿：留下 ${draft.nodes.length} 个类目${removed ? `，剪掉 ${removed} 个空类目` : ''}；审定后点「落成目录」才建文件夹`);
-  } catch (err) {
-    toast(err.message);
-  }
-}
-
-async function installScheme(id) {
-  try {
-    const r = await send('scheme:install', { schemeId: id });
-    if (!r.installed) return toast('有编码冲突，未安装');
-    const base = `已启用：新建 ${r.created} 个目录，复用 ${r.reused} 个`;
-    toast(base + schemeNote(r));
-    $('#schemePreview').innerHTML = '';
-    const summary = await send('summary:load');
-    renderScheme(summary.folderScheme, summary.parentOf);
-    await renderPicker();
   } catch (err) {
     toast(err.message);
   }
