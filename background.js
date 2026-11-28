@@ -23,7 +23,7 @@ import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js'
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
-  approveTaxonomy, toScheme,
+  approveTaxonomy, toScheme, planExtend, applyExtend, acceptProposals,
 } from './lib/taxonomy.js';
 import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
 import { buildOmniboxSuggestions } from './lib/search.js';
@@ -1098,6 +1098,39 @@ const handlers = {
     broadcast({ type: 'taxonomy:done', draft: installed });
     broadcast({ type: 'state:changed' });
     return { installed: true, created: made, reused: plan.exists.length, schemeId: scheme.id, dropped: sw.dropped };
+  },
+
+  /**
+   * 增量扩展：只处理「还没归入任何类目」的条目，先按规则归类，塞不下的按站点聚成建议。
+   * 不建目录、不改结构，建议要经 acceptProposals → 审定 → 落成目录 才生效。
+   */
+  'taxonomy:extend': async ({ minCluster = 8 } = {}) => {
+    const draft = await readTaxonomy();
+    const state = await loadState();
+    const plan = planExtend(draft, state.items, { minCluster });
+    const assigned = Object.values(plan.assign).reduce((n, ids) => n + ids.length, 0);
+
+    const next = applyExtend(draft, plan.assign);
+    const saved = {
+      ...next,
+      proposals: [...(draft.proposals || []), ...plan.proposals],
+      lastExtendAt: Date.now(),
+      lastExtend: { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length },
+    };
+    await chrome.storage.local.set({ [TAXONOMY_KEY]: saved });
+    broadcast({ type: 'taxonomy:done', draft: saved });
+    if (assigned) broadcast({ type: 'state:changed' });
+    return { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length };
+  },
+
+  /** 接受建议：变成正式节点，状态回 draft（还要再审定才能落成目录） */
+  'taxonomy:acceptProposals': async ({ keys = [] } = {}) => {
+    const draft = await readTaxonomy();
+    const next = acceptProposals(draft, keys);
+    if (next === draft) throw new Error('没有可接受的建议，或父类目已满');
+    await chrome.storage.local.set({ [TAXONOMY_KEY]: next });
+    broadcast({ type: 'taxonomy:done', draft: next });
+    return next;
   },
 
   'taxonomy:cancel': async () => {

@@ -12,6 +12,7 @@ import {
   normalizeName, normalizeNames, toScheme, computeStats, groupMembers, validateTaxonomy,
   sampleForSkeleton, buildTaxonomyFromSkeleton, assignByRules, TOP_LIMIT,
   renameNodes, removeNodes, approveTaxonomy,
+  planExtend, applyExtend, acceptProposals, siteLabel,
 } from '../lib/taxonomy.js';
 
 let failed = 0;
@@ -295,6 +296,77 @@ console.log('审定：改名 / 删类 / 状态流转');
   const scheme = toScheme(approved);
   eq('折装后仍带父级', scheme.folders.filter((f) => f.parent).map((f) => f.code), ['010']);
   eq('折装顺序父在前', scheme.folders.map((f) => f.code), ['000', '010', '100']);
+}
+
+console.log('站点标签');
+{
+  eq('blog.csdn.net → Csdn', siteLabel('blog.csdn.net'), 'Csdn');
+  eq('mp.weixin.qq.com → Weixin', siteLabel('mp.weixin.qq.com'), 'Weixin');
+  eq('github.com → Github', siteLabel('github.com'), 'Github');
+  eq('zhuanlan.zhihu.com → Zhihu', siteLabel('zhuanlan.zhihu.com'), 'Zhihu');
+  eq('www.example.io → Example', siteLabel('www.example.io'), 'Example');
+  eq('localhost 原样', siteLabel('localhost'), 'localhost');
+  eq('超长截到 12', siteLabel('a'.repeat(30) + '.com').length, 12);
+}
+
+console.log('增量扩展：不动结构，只归类 + 出建议');
+{
+  const base = createTaxonomy({
+    id: 'ext',
+    nodes: [
+      { code: '100', name: '编程与后端', hint: 'java 并发 框架', members: ['old1'] },
+      { code: '110', name: 'Java', parent: '100', hint: 'java jvm 并发', members: ['old2'] },
+      { code: '200', name: '资讯', hint: '新闻 社区', members: [] },
+    ],
+  });
+
+  const items = [
+    { id: 'old1', title: 'x', host: 'a.com', url: 'https://a.com/1' },           // 已归入 → 忽略
+    { id: 'new1', title: 'Java 并发编程实践', host: 'b.com', url: 'https://b.com/2' }, // 标题命中 110
+    { id: 'new2', title: 'zzz', host: 'java.example.com', url: 'https://java.example.com/3' }, // 只有域名命中
+  ];
+  for (let i = 0; i < 7; i += 1) {
+    items.push({ id: 'site' + i, title: 'zzz' + i, host: 'java.example.com', url: 'https://java.example.com/p' + i });
+  }
+  items.push({ id: 'lone', title: 'qqq', host: 'nowhere.test', url: 'https://nowhere.test/9' });
+
+  const plan = planExtend(base, items, { minCluster: 8 });
+  eq('已归入的不重复处理', Object.values(plan.assign).flat().includes('old1'), false);
+  // 标题同时命中 100 的 hint 与 110，100 分更高（编程 + java + 并发）
+  eq('标题命中的直接归入 100', plan.assign['100'], ['new1']);
+
+  eq('够大的站点簇出一条建议', plan.proposals.length, 1);
+  const p = plan.proposals[0];
+  eq('建议名字取站点', p.name, 'Example');
+  eq('建议挂到 100（110 的顶层）', p.parent, '100');
+  eq('建议带上簇内成员', p.members.length, 8);
+  eq('散兵游勇不算建议', plan.unmatched, ['lone']);
+
+  const after = applyExtend(base, plan.assign);
+  eq('归类后 100 多了一条', after.nodes.find((n) => n.code === '100').members.length, 2);
+  eq('没命中的节点不动', after.nodes.find((n) => n.code === '110').members.length, 1);
+  eq('结构没变（节点数相同）', after.nodes.length, base.nodes.length);
+  eq('原对象未被修改', base.nodes.find((n) => n.code === '110').members.length, 1);
+
+  const withProp = { ...after, proposals: plan.proposals };
+  const accepted = acceptProposals(withProp, [p.key]);
+  eq('接受后多一个节点', accepted.nodes.length, withProp.nodes.length + 1);
+  const added = accepted.nodes.find((n) => n.parent === '100' && n.code !== '110');
+  eq('新节点编码接在 110 之后', added.code, '120');
+  eq('新节点继承成员', added.members.length, 8);
+  eq('状态回到 draft（还要再审定）', accepted.status, 'draft');
+  eq('建议被消费掉', accepted.proposals.length, 0);
+}
+
+console.log('增量扩展：父类满了不硬塞');
+{
+  const kids = Array.from({ length: 9 }, (_, i) => ({ code: '1' + String((i + 1) * 10).padStart(2, '0'), name: '子' + i, parent: '100', members: [] }));
+  const full = createTaxonomy({ id: 'full', nodes: [{ code: '100', name: '编程', hint: 'java', members: [] }, ...kids] });
+  const items = Array.from({ length: 8 }, (_, i) => ({ id: 'j' + i, title: 'zzz', host: 'java.example.com', url: 'https://java.example.com/' + i }));
+  const plan = planExtend(full, items, { minCluster: 8 });
+  eq('出一條建议', plan.proposals.length, 1);
+  const accepted = acceptProposals({ ...full, proposals: plan.proposals }, [plan.proposals[0].key]);
+  eq('父类满了就跳过', accepted.nodes.length, full.nodes.length);
 }
 
 if (failed) {

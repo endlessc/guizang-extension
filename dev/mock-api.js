@@ -14,7 +14,10 @@ import { PROTO } from '../lib/version.js';
 import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS } from '../lib/llm.js';
 import { runAccept } from '../lib/pending.js';
 import { DEWEY_HINTS } from '../lib/schemes.js';
-import { createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme } from '../lib/taxonomy.js';
+import {
+  createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme,
+  planExtend, applyExtend, acceptProposals,
+} from '../lib/taxonomy.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
 import {
@@ -572,6 +575,30 @@ async function handle(msg) {
     return { started: true };
   }
   if (type === 'taxonomy:load') return { draft: taxoDraft, running: false };
+
+  if (type === 'taxonomy:extend') {
+    if (!taxoDraft) throw new Error('还没有分类法草稿');
+    const st = stateLoad();
+    const plan = planExtend(taxoDraft, st.items, { minCluster: msg.minCluster || 8 });
+    const assigned = Object.values(plan.assign).reduce((n, ids) => n + ids.length, 0);
+    const next = applyExtend(taxoDraft, plan.assign);
+    taxoDraft = {
+      ...next,
+      proposals: [...(taxoDraft.proposals || []), ...plan.proposals],
+      lastExtend: { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length },
+    };
+    emit({ type: 'taxonomy:done', draft: taxoDraft });
+    return { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length };
+  }
+
+  if (type === 'taxonomy:acceptProposals') {
+    if (!taxoDraft) throw new Error('还没有分类法草稿');
+    const next = acceptProposals(taxoDraft, msg.keys || []);
+    if (next === taxoDraft) throw new Error('没有可接受的建议，或父类目已满');
+    taxoDraft = next;
+    emit({ type: 'taxonomy:done', draft: taxoDraft });
+    return next;
+  }
 
   if (type === 'taxonomy:approve') {
     if (!taxoDraft) throw new Error('还没有分类法草稿');
