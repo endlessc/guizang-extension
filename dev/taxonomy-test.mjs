@@ -439,6 +439,23 @@ console.log('增量扩展：父类满了不硬塞');
   eq('父类满了就跳过', accepted.nodes.length, full.nodes.length);
 }
 
+console.log('审定自动接线受控词表同义归并');
+{
+  const withVocab = createTaxonomy({
+    id: 'tv',
+    vocab: { frontend: '前端开发', fe: '前端开发' },
+    nodes: [
+      { code: '100', name: 'Frontend', members: ['a1'] },
+      { code: '200', name: 'FE', members: ['a2'] },
+      { code: '210', name: 'CSS', parent: '200', members: ['a3'] },
+    ],
+  });
+  const approvedVocab = approveTaxonomy(withVocab);
+  eq('审定自动套用受控词表合并同名节点', approvedVocab.nodes.map((n) => [n.code, n.name]), [['100', '前端开发'], ['210', 'CSS']]);
+  eq('被合并节点的子类改挂到保留节点', approvedVocab.nodes.find((n) => n.code === '210').parent, '100');
+  eq('合并后成员汇总完整', approvedVocab.nodes.find((n) => n.code === '100').total, 3);
+}
+
 if (failed) {
   console.error(`\n❌ ${failed} 项断言失败`);
   process.exit(1);

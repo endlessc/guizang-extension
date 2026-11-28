@@ -5,6 +5,7 @@
  */
 import {
   createWal, appendSteps, walSummary, rollbackSteps, walToJournal,
+  classifyMoveStep, shouldRollbackStep,
 } from '../lib/wal.js';
 
 let failed = 0;
@@ -41,6 +42,26 @@ console.log('WAL：意图先落盘，回滚用反序');
     ['code', 'fromFolderId', 'fromIndex', 'id', 'toFolderId'],
   ]);
   eq('转 journal：计数与来源', [entry.id, entry.applied, entry.failed, entry.planId], ['j9', 2, 1, 'p1']);
+}
+
+console.log('幂等提交（CAS）与幂等回滚判定');
+{
+  const op = { id: 'a', from: { folderId: 'f1' } };
+  eq('正常移动', classifyMoveStep(op, { id: 'a', parentId: 'f1' }, 't1'), 'move');
+  eq('已在目标目录 → 幂等跳过', classifyMoveStep(op, { id: 'a', parentId: 't1' }, 't1'), 'already');
+  eq('审阅期间被外部移走 → 并发冲突跳过', classifyMoveStep(op, { id: 'a', parentId: 'f9' }, 't1'), 'conflict');
+  eq('节点或目标缺失 → missing', [
+    classifyMoveStep(op, null, 't1'),
+    classifyMoveStep(op, { id: 'a', parentId: 'f1' }, ''),
+  ], ['missing', 'missing']);
+
+  const step = { id: 'a', fromFolderId: 'f1', toFolderId: 't1' };
+  eq('仍在目标目录 → 需要回滚', shouldRollbackStep(step, { id: 'a', parentId: 't1' }), true);
+  eq('崩溃前未动过（仍在原目录） → 不回滚', shouldRollbackStep(step, { id: 'a', parentId: 'f1' }), false);
+  eq('已移到别处或不存在 → 不回滚', [
+    shouldRollbackStep(step, { id: 'a', parentId: 'f9' }),
+    shouldRollbackStep(step, null),
+  ], [false, false]);
 }
 
 if (failed) {

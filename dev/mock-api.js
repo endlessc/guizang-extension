@@ -18,11 +18,11 @@ import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme,
   planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme,
 } from '../lib/taxonomy.js';
-import { buildPlan, dropOp, overrideOp, readyOps, foldersForCodes, applySubs } from '../lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, foldersForCodes, applySubs, extendTargets, recount } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
 import {
-  normalizeMeta, emptyLearned, recordOverride, removeLearnedDomain,
-  pickSerendipity, analyzeUsage,
+  normalizeMeta, remapRecordById, emptyLearned, recordOverride, removeLearnedDomain,
+  migrateLearned, pickSerendipity, analyzeUsage,
 } from '../lib/meta.js';
 
 const FOLDERS = [
@@ -137,12 +137,32 @@ let pending = {};
  * 换方案：和 background 一样按类名迁移，再谈作废。
  * 预览里的 toast 计数必须和真机一致，否则演示会撒谎。
  */
-function migrateFor(newId, customs = settings.customSchemes || []) {
-  if ((settings.schemeId || '') === (newId || '')) return { mapped: 0, dropped: 0 };
+function migrateFor(newId, customs = settings.customSchemes || [], { fromFolders = null, force = false } = {}) {
+  if (!force && (settings.schemeId || '') === (newId || '')) {
+    return { mapped: 0, dropped: 0, learnedMapped: 0, learnedDropped: 0, planCleared: false };
+  }
   const foldersOf = (id) => (getScheme(id || '', customs) || {}).folders || [];
-  const res = migratePending(pending, { from: foldersOf(settings.schemeId), to: foldersOf(newId) });
+  let from = Array.isArray(fromFolders) ? fromFolders : foldersOf(settings.schemeId);
+  if (!from.length) {
+    from = parseTree([JSON.parse(JSON.stringify(root))], parseOptsOf(settings.schemeId, customs)).folderScheme;
+  }
+  const to = foldersOf(newId);
+  const res = migratePending(pending, { from, to });
   pending = res.pending;
-  return { mapped: res.mapped, dropped: res.dropped };
+  const lres = migrateLearned(learned, { from, to });
+  learned = lres.learned;
+  const planCleared = Boolean(plan);
+  if (planCleared) {
+    plan = null;
+    emit({ type: 'organize:done', plan: null });
+  }
+  return {
+    mapped: res.mapped,
+    dropped: res.dropped,
+    learnedMapped: lres.mapped,
+    learnedDropped: lres.dropped,
+    planCleared,
+  };
 }
 let meta = {
   b06: { tags: ['rust', '语言'], note: '官方圣经，常翻常新', star: true, readState: 'read', updatedAt: Date.now() },
@@ -784,9 +804,14 @@ async function handle(msg) {
     }
     const st = stateLoad();
     const scope = msg.scope || 'inbox';
-    const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
+    const isFresh = scope === 'scheme' && msg.tree === 'fresh';
+    const full = getScheme(settings.schemeId, settings.customSchemes || []);
     if (scope === 'scheme' && !full) throw new Error('先在设置里选一套方案，再按方案建档');
-    const targets = full ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null })) : st.folderScheme;
+    const targets = full
+      ? (isFresh
+        ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null }))
+        : extendTargets(full.folders, st.folderScheme, st.parentOf))
+      : st.folderScheme;
     const allScope = scope === 'all' || scope === 'scheme';
     const picked = allScope ? st.items : st.items.filter((it) => !it.code);
     emit({ type: 'organize:start' });
@@ -795,11 +820,14 @@ async function handle(msg) {
     plan = buildPlan({
       items: st.items,
       scheme: targets,
+      schemeId: settings.schemeId || '',
       scope,
       folderCode: msg.folderCode || '',
       suggestions,
       existing: new Set(st.folderScheme.map((f) => f.code)),
-      limit: msg.limit === 'all' ? 'all' : (Number(msg.limit) || 200),
+      folderNames: new Map(st.folderScheme.map((f) => [f.code, f.name])),
+      ignoreCurrent: isFresh,
+      limit: isFresh || msg.limit === 'all' ? 'all' : (Number(msg.limit) || 200),
     });
     emit({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
     emit({ type: 'organize:done', plan });
@@ -883,35 +911,36 @@ async function handle(msg) {
       code: code[0] + String((i + 1) * 10).padStart(2, '0'),
       name: h.split('.').slice(-2)[0].slice(0, 8), hint: h,
     }));
-    let created = 0;
-    for (const sub of subs) {
-      if (findFolder(sub.code)) continue;
-      folder.children.push({ id: 'f' + sub.code, title: `${sub.code} ${sub.name}`, parentId: folder.id, children: [] });
-      created += 1;
-    }
-    let moved = 0;
-    const ops = [];
-    for (const it of items) {
-      const node = findNode(it.id);
+    const folderName = String(folder.title || '').replace(/^\S+\s+/, '') || code;
+    const ops = items.map((it) => {
       const sub = subs[Math.max(0, hosts.indexOf(hostOf(it.url)))];
-      const target = findFolder(sub.code);
-      if (!node || !target) continue;
-      const fromFolderId = node.parentId;
-      const fromIndex = node.index || 0;
-      detach(node);
-      node.parentId = target.id;
-      target.children.push(node);
-      moved += 1;
-      ops.push({ id: it.id, fromFolderId, fromIndex, toFolderId: target.id, code: sub.code });
-    }
-    const entry = { id: 'j' + Date.now().toString(36), at: Date.now(), planId: '', scope: 'folder', applied: moved, failed: 0, ops };
-    journal = [entry, ...journal].slice(0, 3);
-    plan = null;
+      return {
+        id: it.id,
+        title: it.title || '',
+        url: it.url || '',
+        from: { code, folderId: it.folderId || '' },
+        to: { code, name: folderName, sub: { code: sub.code, name: sub.name }, missing: true },
+        conf: 1,
+        source: 'model',
+        model: settings.model || 'mock',
+        promptVersion: PROMPT_VERSION,
+        reason: '拆分目录',
+        status: 'ready',
+      };
+    });
+    plan = recount({
+      id: 'p' + Date.now().toString(36),
+      at: Date.now(),
+      schemeId: settings.schemeId || '',
+      scope: 'folder',
+      scheme: [{ code, name: folderName, parent: null }],
+      subs: { [code]: subs },
+      existing: st.folderScheme.map((f) => f.code),
+      ops,
+    });
     emit({ type: 'organize:split-progress', done: 1, total: 1 });
-    emit({ type: 'organize:done', plan: null });
-    emit({ type: 'organize:applied', entry: { ...entry, ops: undefined, count: moved }, failed: 0, total: moved, stopped: false });
-    emit({ type: 'state:changed' });
-    return { started: true, subs: subs.length, created, moved, failed: items.length - moved };
+    emit({ type: 'organize:done', plan });
+    return { planned: true, subs: subs.length, ops: ops.length, plan };
   }
 
   if (type === 'organize:split') {
@@ -1023,13 +1052,17 @@ async function handle(msg) {
       for (const b of bars) { removed += b.children.length; b.children = []; }
       let folders = 0;
       let bookmarks = 0;
+      const idMap = new Map();
       const addInto = (nodes, p) => {
         for (const node of nodes || []) {
           if (node.url) {
-            p.children.push({ id: 'rn' + (++bookmarks), title: node.title, url: node.url, parentId: p.id, dateAdded: Date.now() });
+            const newId = 'rn' + (++bookmarks);
+            if (node.id) idMap.set(node.id, newId);
+            p.children.push({ id: newId, title: node.title, url: node.url, parentId: p.id, dateAdded: Date.now() });
             continue;
           }
           const sub = { id: 'rf' + Math.random().toString(36).slice(2, 6), title: node.title || '恢复目录', parentId: p.id, children: [] };
+          if (node.id) idMap.set(node.id, sub.id);
           p.children.push(sub);
           folders += 1;
           addInto(node.children, sub);
@@ -1039,8 +1072,11 @@ async function handle(msg) {
         const target = bars.find((b) => b.title === r.title) || bars[0];
         addInto(r.children, target);
       }
+      const nextMeta = remapRecordById(meta, idMap);
+      meta = nextMeta.record;
+      health = remapRecordById(health, idMap).record;
       emit({ type: 'state:changed' });
-      return { mode: 'replace', label: '替换恢复', removed, stuck: 0, folders, bookmarks };
+      return { mode: 'replace', label: '替换恢复', removed, stuck: 0, folders, bookmarks, remappedMeta: nextMeta.remapped };
     }
     const folder = { id: 'rest' + Date.now().toString(36), title: '归藏恢复快照', parentId: bar.id, children: [] };
     bar.children.push(folder);
@@ -1089,9 +1125,10 @@ async function handle(msg) {
     const scheme = getScheme(msg.schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
     const plan = planInstall([JSON.parse(JSON.stringify(root))], scheme);
-    const st = stateLoad();
-    const used = new Set(st.items.map((it) => it.code || ''));
-    return { ...plan, empty: scheme.folders.filter((f) => !used.has(f.code)).map((f) => f.code) };
+    const { items } = parseTree([JSON.parse(JSON.stringify(root))], parseOptsOf(msg.schemeId, settings.customSchemes || []));
+    const used = new Set(items.map((it) => it.code || ''));
+    const empty = scheme.folders.filter((f) => !used.has(f.code)).map((f) => f.code);
+    return { ...plan, empty, summary: { ...plan.summary, empty: empty.length } };
   }
 
   if (type === 'scheme:select') {
@@ -1100,7 +1137,7 @@ async function handle(msg) {
     const sw = migrateFor(msg.schemeId);
     settings = { ...settings, schemeId: msg.schemeId };
     emit({ type: 'state:changed' });
-    return { selected: true, schemeId: msg.schemeId, mapped: sw.mapped, dropped: sw.dropped };
+    return { selected: true, schemeId: msg.schemeId, ...sw };
   }
 
   if (type === 'scheme:install') {
@@ -1176,7 +1213,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.26.1-mock' }),
+      getManifest: () => ({ version: '0.27.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

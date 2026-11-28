@@ -17,21 +17,21 @@ import { checkMany } from './lib/check.js';
 import {
   classify, classifyHeuristic, classifyWithModel, designSkeleton, cleanTitles,
   callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
-  hasModel, testConnection, DEFAULT_SETTINGS,
+  hasModel, testConnection, DEFAULT_SETTINGS, PROMPT_VERSION, SELECTIVE_THRESHOLD,
 } from './lib/llm.js';
 import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, deriveSubs, schemeCreated, extendTargets, leftoverFolders, estimateLeftovers, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
-import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal } from './lib/wal.js';
-import { migratePending, prunePending, runAccept } from './lib/pending.js';
+import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal, classifyMoveStep, shouldRollbackStep } from './lib/wal.js';
+import { migratePending, prunePending } from './lib/pending.js';
 import {
-  createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
+  createTaxonomy, pruneTaxonomy, normalizeNames, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
   approveTaxonomy, toScheme, planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme,
 } from './lib/taxonomy.js';
 import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
 import { buildOmniboxSuggestions } from './lib/search.js';
 import {
-  normalizeMeta, pruneMeta, emptyLearned, recordOverride,
-  removeLearnedDomain, analyzeUsage, pickSerendipity,
+  normalizeMeta, pruneMeta, remapRecordById, emptyLearned, recordOverride,
+  removeLearnedDomain, migrateLearned, analyzeUsage, pickSerendipity,
 } from './lib/meta.js';
 import { fetchPageHead, isWeakTitle, lookupWayback } from './lib/head.js';
 
@@ -60,6 +60,20 @@ async function readSettings() {
 
 function parseOptsFor(settings) {
   return parseOptsOf(settings.schemeId, settings.customSchemes || []);
+}
+
+/**
+ * 统一的受控分类词表解析：「分类法（scheme）是源，目录（folderScheme）是投影」。
+ * 只要选用了方案，所有分类入口统一以方案类目（含挂在其下的现存二级）为词表；
+ * 仅在没选方案时退回现存目录。fresh 模式只看新方案本身，不混入旧二级。
+ */
+function resolveClassifyTargets(settings, folderScheme = [], parentOf = {}, { fresh = false } = {}) {
+  const full = getScheme(settings && settings.schemeId, (settings && settings.customSchemes) || []);
+  if (!full) return folderScheme;
+  if (fresh) {
+    return full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null }));
+  }
+  return extendTargets(full.folders, folderScheme, parentOf);
 }
 
 async function readLearned() {
@@ -104,8 +118,12 @@ async function loadState() {
   for (const id of Object.keys(pending)) {
     if (!alive.has(id)) { delete pending[id]; dirty = true; }
   }
-  // 目标编码已经不存在（换了方案，或文件夹被改名/删掉）→ 建议作废，别让它一直挂着
-  const codes = new Set(folderScheme.map((f) => f.code));
+  // 目标编码既不在现存目录也不在当前启用方案里 → 建议作废，别让它一直挂着
+  const activeTargets = resolveClassifyTargets(settings, folderScheme, parentOf);
+  const codes = new Set([
+    ...folderScheme.map((f) => f.code),
+    ...activeTargets.map((f) => f.code),
+  ]);
   const stale = prunePending(pending, codes);
   if (stale.dropped) {
     for (const id of Object.keys(pending)) {
@@ -132,6 +150,7 @@ async function loadState() {
     usageCache,
     settings,
     aiReady: hasModel(settings),
+    wal: walSummary(await readWal()),
     scan,
   };
 }
@@ -242,20 +261,24 @@ async function splitByModel(parent, items, settings, { chunk = 40, sampleSize = 
     subs: splitSubs(parent && parent.code, names),
     assign,
     badChunks,
+    model: String(settings.model || ''),
+    promptVersion: PROMPT_VERSION,
   };
 }
 
 /**
- * 统一的提交入口：prepare（备份 / 冲突校验）→ commit（建目录 / 搬条目）→ 记录。
+ * 统一的提交入口：prepare（备份 / 冲突校验）→ commit（建目录 / 幂等搬条目）→ 记录。
  *
- * 三条业务路径都走这里：
+ * 四条业务路径都走这里：
  *   organize:apply        ops=计划里可执行的条目，folders=这些条目要用的目录
+ *   ai:accept             ops=已确认的待归类建议，folders=按需投影的目录
  *   taxonomy:install      ops=[]（只建目录），folders=方案里的全部类目
- *   organize:splitFolder  先造计划再按 apply 走
+ *   organize:splitFolder  先出计划经人确认，再按 apply 走
  */
 async function commitOps({
   planId = '', planAt = Date.now(), folders = [], ops = [],
   backup = true, journal = true, scope = 'inbox', progress = false,
+  stageConflicts = false,
 } = {}) {
   if (backup) await ensureBackupFor({ id: planId || 'adhoc' + planAt.toString(36), at: planAt });
 
@@ -264,36 +287,61 @@ async function commitOps({
   let { folderScheme } = parseTree(tree, parseOptsFor(settings));
   let folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
 
-  // prepare：缺的目录按「父在前」建；同码异名一律拦下，一个都不建
-  const wanted = folders.filter((f) => f && f.code && !folderOf.has(f.code));
+  // prepare：缺的目录按「父在前」建；同码异名默认一律拦下（仅 fresh 重建允许暂移旧目录名，撤销时还原）
+  const dedupFolders = [];
+  const seenFolderCodes = new Set();
+  for (const f of folders || []) {
+    if (!f || !f.code || seenFolderCodes.has(f.code)) continue;
+    seenFolderCodes.add(f.code);
+    dedupFolders.push(f);
+  }
   let created = 0;
   let createdFolders = [];          // 本次真建出来的目录：撤销时把空的一并拆掉
+  const stagedFolders = [];         // fresh 跨方案重建时暂改名的同码冲突旧目录
   let reused = folderScheme.length;
-  if (wanted.length) {
-    const kind = wanted.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
-    // 必须交整份 folders：wanted 只剩「要新建的」，父目录不在 exists 里，
-    // createFolders 找不到 parentId 会把子目录全部跳过（拆二级当年就是这么建不出东西的）
-    const inst = planInstall(tree, { id: 'adhoc', kind, folders });
+  if (dedupFolders.length) {
+    const kind = dedupFolders.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
+    // 必须交整份 folders：父目录不在 exists 里时，createFolders 找不到 parentId 会跳过子目录
+    let inst = planInstall(tree, { id: 'adhoc', kind, folders: dedupFolders });
+    if (inst.conflict.length && stageConflicts) {
+      // 全新生成跨方案同码异名（如杜威 100 编程 → PARA 100 项目）：先暂改旧目录名腾出编码，搬空后清理
+      for (const c of inst.conflict) {
+        try {
+          const [node] = await chrome.bookmarks.get(c.folderId);
+          const tempTitle = `旧·${node.title}`;
+          await chrome.bookmarks.update(c.folderId, { title: tempTitle });
+          stagedFolders.push({ id: c.folderId, code: c.code, oldTitle: node.title, tempTitle });
+        } catch {}
+      }
+      tree = await chrome.bookmarks.getTree();
+      inst = planInstall(tree, { id: 'adhoc', kind, folders: dedupFolders });
+    }
     if (inst.conflict.length) {
       return {
         conflict: inst.conflict,
-        created: 0, reused, moved: 0, failed: 0, stopped: false, journalId: '',
+        created: 0, reused, moved: 0, skippedAlready: 0, skippedConflict: 0,
+        failed: 0, stopped: false, journalId: '', movedIds: [], alreadyIds: [], stagedFolders,
       };
     }
-    const made = await createFolders(inst);
-    created = made.made;
-    createdFolders = [...made.created.entries()].map(([code, id]) => ({ code, id }));
-    tree = await chrome.bookmarks.getTree();
-    ({ folderScheme } = parseTree(tree, parseOptsFor(settings)));
-    folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
+    if (inst.missing.length) {
+      const made = await createFolders(inst);
+      created = made.made;
+      createdFolders = [...made.created.entries()].map(([code, id]) => ({ code, id }));
+      tree = await chrome.bookmarks.getTree();
+      ({ folderScheme } = parseTree(tree, parseOptsFor(settings)));
+      folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
+    }
   }
 
-  // commit：搬条目（没有 ops 时只建目录，如 taxonomy:install）
+  // commit：幂等搬条目（没有 ops 时只建目录，如 taxonomy:install）
   // 真 WAL：每批 25 条，先把「从哪到哪」的意图落盘，再动手；崩在中间可以按意图回滚
   let moved = 0;
+  let skippedAlready = 0;
+  let skippedConflict = 0;
   let failed = 0;
   let stopped = false;
   const done = [];
+  const alreadyIds = [];
   let wal = null;
   if (ops.length) {
     applyCtl = { running: true, stop: false };
@@ -309,14 +357,24 @@ async function commitOps({
         const code = op.to && op.to.sub ? op.to.sub.code : op.to && op.to.code;
         const target = folderOf.get(code);
         if (!target) { failed += 1; continue; }
+        let node = null;
         try {
-          const [node] = await chrome.bookmarks.get(op.id);
-          steps.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code });
+          [node] = await chrome.bookmarks.get(op.id);
         } catch {
-          failed += 1;
+          node = null;
         }
+        const verdict = classifyMoveStep(op, node, target);
+        if (verdict === 'already') { skippedAlready += 1; alreadyIds.push(op.id); continue; }
+        if (verdict === 'conflict') { skippedConflict += 1; failed += 1; continue; }
+        if (verdict !== 'move') { failed += 1; continue; }
+        steps.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code });
       }
-      if (!steps.length) continue;
+      if (!steps.length) {
+        if (progress) {
+          broadcast({ type: 'organize:apply-progress', done: moved + skippedAlready + failed, total: ops.length });
+        }
+        continue;
+      }
 
       wal = await writeWal(appendSteps(wal, steps));   // ← 动手之前先落盘
       for (const step of steps) {
@@ -329,20 +387,21 @@ async function commitOps({
         }
       }
       if (progress) {
-        broadcast({ type: 'organize:apply-progress', done: moved + failed, total: ops.length });
+        broadcast({ type: 'organize:apply-progress', done: moved + skippedAlready + failed, total: ops.length });
         await new Promise((r) => setTimeout(r, 0));
       }
     }
     applyCtl = { running: false, stop: false };
   }
 
-  // 记录：只有真的动过条目才写撤销日志；写完才算 committed，WAL 清理掉
+  // 记录：只有真的动过条目（或建了/改了目录）才写撤销日志；写完才算 committed，WAL 清理掉
   let journalId = '';
-  if (journal && done.length) {
-    const entry = walToJournal({ ...wal, steps: done }, {
+  if (journal && (done.length || createdFolders.length || stagedFolders.length)) {
+    const entry = walToJournal({ ...(wal || createWal({ planId, scope, total: ops.length })), steps: done }, {
       id: 'j' + Date.now().toString(36), at: Date.now(), failed, stopped,
     });
     entry.createdFolders = createdFolders;   // 撤销时据此清掉本次新建的空目录
+    if (stagedFolders.length) entry.renamedFolders = stagedFolders;
     const list = pushEntry(await readJournal(), entry);
     await chrome.storage.local.set({ [JOURNAL_KEY]: list });
     journalId = entry.id;
@@ -356,29 +415,73 @@ async function commitOps({
   }
   if (wal) await writeWal(null);
 
-  return { conflict: [], created, reused, moved, failed, stopped, journalId, total: ops.length };
+  return {
+    conflict: [],
+    created,
+    reused,
+    moved,
+    skippedAlready,
+    skippedConflict,
+    failed,
+    stopped,
+    journalId,
+    movedIds: done.map((s) => s.id),
+    alreadyIds,
+    stagedFolders,
+    total: ops.length,
+  };
 }
 
 /**
- * 换方案时把已有建议显式迁移过去（同一套方案重复启用则不动）。
- *
- * 迁移与作废都写进库，并把两个计数返回给 UI —— 不能静默清空：
- * 用户看到「作废 12 条」才知道哪些建议需要重新判。
- *
- * @param {string} fromId 旧方案 id（'' 表示没有）
- * @param {string} toId 新方案 id
- * @param {Array} customs 当前的全部自定义方案（新旧都要能查到定义）
- * @returns {Promise<{changed: boolean, mapped: number, dropped: number}>}
+ * 换方案 / 修改当前方案时的统一模式迁移：
+ *   1. pending 建议：按旧类名 → 新方案同名类目显式映射，其余显式作废并计数
+ *   2. learned 域名记忆：同理按类名迁移或作废，杜绝杜威 100 串台到 PARA 100
+ *   3. 未执行的整理计划 plan：旧方案计划立即显式作废清空并广播，防止按旧码执行
  */
-async function migrateSuggestions(fromId, toId, customs = []) {
-  if ((fromId || '') === (toId || '')) return { changed: false, mapped: 0, dropped: 0 };
-  const { pending = {} } = await chrome.storage.local.get('pending');
-  if (!Object.keys(pending).length) return { changed: true, mapped: 0, dropped: 0 };
+async function migrateSchemeState(fromId, toId, customs = [], { fromFolders = null, force = false } = {}) {
+  if (!force && (fromId || '') === (toId || '')) {
+    return { changed: false, mapped: 0, dropped: 0, learnedMapped: 0, learnedDropped: 0, planCleared: false };
+  }
+  const store = await chrome.storage.local.get(['pending', 'learned', PLAN_KEY]);
+  const pending = store.pending || {};
+  const learned = store.learned && store.learned.domains ? store.learned : emptyLearned();
+  const hasPlan = Boolean(store[PLAN_KEY]);
 
-  const foldersOf = (id) => (getScheme(id || '', customs) || {}).folders || [];
-  const res = migratePending(pending, { from: foldersOf(fromId), to: foldersOf(toId) });
-  await chrome.storage.local.set({ pending: res.pending });
-  return { changed: true, mapped: res.mapped, dropped: res.dropped };
+  let from = Array.isArray(fromFolders) ? fromFolders : (getScheme(fromId || '', customs) || {}).folders || null;
+  if (!from || !from.length) {
+    // 首次从「未选方案（现存目录）」切到正式方案时，拿当前书签树识别出的目录类名做桥接
+    try {
+      const tree = await chrome.bookmarks.getTree();
+      from = parseTree(tree, parseOptsOf(fromId || '', customs)).folderScheme;
+    } catch {
+      from = [];
+    }
+  }
+  const to = (getScheme(toId || '', customs) || {}).folders || [];
+
+  const pendRes = Object.keys(pending).length
+    ? migratePending(pending, { from, to })
+    : { pending, mapped: 0, dropped: 0 };
+  const learnRes = Object.keys(learned.domains).length
+    ? migrateLearned(learned, { from, to })
+    : { learned, mapped: 0, dropped: 0 };
+
+  const patch = {};
+  if (Object.keys(pending).length) patch.pending = pendRes.pending;
+  if (Object.keys(learned.domains).length) patch.learned = learnRes.learned;
+  if (Object.keys(patch).length) await chrome.storage.local.set(patch);
+  if (hasPlan) {
+    await chrome.storage.local.remove(PLAN_KEY);
+    broadcast({ type: 'organize:done', plan: null });
+  }
+  return {
+    changed: true,
+    mapped: pendRes.mapped,
+    dropped: pendRes.dropped,
+    learnedMapped: learnRes.mapped,
+    learnedDropped: learnRes.dropped,
+    planCleared: hasPlan,
+  };
 }
 
 /** 整理计划提交：薄封装，负责挑可执行条目、清计划与广播 */
@@ -400,6 +503,7 @@ async function runApply({ includeUnsure = false } = {}) {
     journal: true,
     scope: plan.scope || 'inbox',
     progress: true,
+    stageConflicts: plan.tree === 'fresh',
   });
 
   // 同码异名：prepare 阶段一个目录都不建、一条都不搬。别当成「成功执行 0 条」悄悄收场
@@ -408,26 +512,48 @@ async function runApply({ includeUnsure = false } = {}) {
     throw new Error(`目标目录对不上：${codes}。多半是计划生成后目录被改名了，重新生成计划再执行`);
   }
 
-  // 全新生成：搬完之后清掉搬空的旧类目目录。只删空的，删一个记一个，撤销时按记录重建
+  // 全新生成：搬完之后清掉搬空的旧类目目录（含因同码冲突暂改名的旧目录）。只删空的，删一个记一个，撤销时按原名重建
   let removed = [];
+  const stillRenamed = [];
   if (plan.tree === 'fresh' && res.journalId) {
     const settings = await readSettings();
     const parsed = parseTree(await chrome.bookmarks.getTree(), parseOptsFor(settings));
-    for (const f of leftoverFolders(parsed.folderScheme, parsed.items, planCodes(plan))) {
+    const stagedById = new Map((res.stagedFolders || []).map((s) => [s.id, s]));
+    const candidates = [
+      ...leftoverFolders(parsed.folderScheme, parsed.items, planCodes(plan)),
+      ...(res.stagedFolders || []).map((s) => ({ id: s.id, code: s.code, name: s.oldTitle, depth: 0 })),
+    ];
+    const seenRm = new Set();
+    for (const f of candidates) {
+      if (!f || !f.id || seenRm.has(f.id)) continue;
+      seenRm.add(f.id);
       try {
         const [node] = await chrome.bookmarks.get(f.id);
+        const kids = await chrome.bookmarks.getChildren(f.id);
+        if (kids && kids.length) {
+          if (stagedById.has(f.id)) stillRenamed.push(stagedById.get(f.id));
+          continue;
+        }
         await chrome.bookmarks.remove(f.id);
+        const origTitle = stagedById.has(f.id) ? stagedById.get(f.id).oldTitle : node.title;
         removed.push({
-          id: f.id, title: node.title, parentId: node.parentId, index: node.index || 0, depth: f.depth || 0,
+          id: f.id, title: origTitle, parentId: node.parentId, index: node.index || 0, depth: f.depth || 0,
         });
-      } catch {}   // 不空 / 已被删掉 / 受管：跳过，绝不为了「干净」硬删
+      } catch {
+        if (stagedById.has(f.id)) stillRenamed.push(stagedById.get(f.id));
+      }   // 不空 / 已被删掉 / 受管：跳过，绝不为了「干净」硬删
     }
-    if (removed.length) {
+    if (removed.length || (res.stagedFolders && res.stagedFolders.length)) {
       const list = await readJournal();
       const hit = findEntry(list, res.journalId);
       if (hit) {
         const next = list.map((e) => (e.id === res.journalId
-          ? { ...e, folders: [...removed].sort((a, b) => (a.depth || 0) - (b.depth || 0)), removedFolders: removed.length }
+          ? {
+            ...e,
+            folders: [...removed].sort((a, b) => (a.depth || 0) - (b.depth || 0)),
+            removedFolders: removed.length,
+            renamedFolders: stillRenamed,
+          }
           : e));
         await chrome.storage.local.set({ [JOURNAL_KEY]: next });
       }
@@ -437,7 +563,15 @@ async function runApply({ includeUnsure = false } = {}) {
   await chrome.storage.local.remove(PLAN_KEY);
   broadcast({ type: 'organize:done', plan: null });
   broadcast({ type: 'state:changed' });
-  return { applied: res.moved, failed: res.failed, journalId: res.journalId, created: res.created, removed: removed.length };
+  return {
+    applied: res.moved,
+    skippedAlready: res.skippedAlready || 0,
+    skippedConflict: res.skippedConflict || 0,
+    failed: res.failed,
+    journalId: res.journalId,
+    created: res.created,
+    removed: removed.length,
+  };
 }
 
 /** 新结构里的全部编码：一级 + 派生出来的二级。清理旧目录时这些一律保留 */
@@ -496,6 +630,14 @@ async function runUndo(journalId) {
     }
   }
 
+  // 若全新生成曾因同码异名暂改旧目录名且该旧目录未删掉，撤销时把原名改回去
+  for (const rf of entry.renamedFolders || []) {
+    if (!rf || !rf.id || !rf.oldTitle) continue;
+    try {
+      await chrome.bookmarks.update(rf.id, { title: rf.oldTitle });
+    } catch {}
+  }
+
   const next = markUndone(list, entry.id);
   await chrome.storage.local.set({ [JOURNAL_KEY]: next });
   broadcast({ type: 'state:changed' });
@@ -526,13 +668,19 @@ async function runDesign({ parentSchemeId = '', sampleSize = 200 }) {
     const { map, unmatched } = assignByRules(items, built.nodes);
     const nodes = built.nodes.map((n) => ({ ...n, members: map[n.code] || [] }));
 
-    const draft = createTaxonomy({
+    const draft = normalizeNames(createTaxonomy({
       name: parentSchemeId ? `基于 ${parentSchemeId} 的归纳` : '语料归纳',
       parentSchemeId,
       nodes,
       params: built.params,
-      source: { items: items.length, sampled: sample.length, unmatched: unmatched.length },
-    });
+      source: {
+        items: items.length,
+        sampled: sample.length,
+        unmatched: unmatched.length,
+        model: String(settings.model || ''),
+        promptVersion: PROMPT_VERSION,
+      },
+    }));
 
     // 用全量成员数剪枝：样本里 5 条 ≈ 全量 80 条，拿样本数当阈值会剪错
     const pruned = pruneTaxonomy(draft, {
@@ -606,30 +754,26 @@ async function writePlan(plan) {
  * 生成整理计划：预筛 → 历史偏好/本地规则 → 低置信度送模型（附带弱标题 <head> 摘要）→ 冲突消解。
  * 全程只读书签，不动任何数据。
  */
-async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES, { autoSubs = true, tree = 'collection' } = {}) {
+async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES, { autoSubs = false, tree = 'collection' } = {}) {
   orgCtl = { stop: false };
   organize = { running: true, stage: 'preselect', done: 0, total: 0 };
   broadcast({ type: 'organize:start' });
   try {
     const state = await loadState();
     const { items, folderScheme, parentOf, settings, learned } = state;
-    // 按方案建档：判定用方案定义的完整类目（不只书签栏里已建的那几个）
-    const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
-    if (scope === 'scheme' && !full) throw new Error('还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成');
-    if (!folderScheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
-    // 结构来源：collection = 方案 + 现存二级；fresh = 只认方案定义（旧结构全部重判）
-    const targets = full
-      ? (tree === 'fresh'
-        ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null }))
-        : extendTargets(full.folders, folderScheme, parentOf))
-      : folderScheme;   // 没选方案时，退回"现存目录"当判定依据
+    const isFresh = scope === 'scheme' && tree === 'fresh';
+    const full = getScheme(settings.schemeId, settings.customSchemes || []);
+    if (scope === 'scheme' && !full) throw new Error('还没选用方案：去设置页点一张方案卡，选「选用这套方案」，再回来生成');
+    // 方案是源、目录是投影：只要选用了方案，inbox / all / scheme 统一以方案类目（含挂在下头的现存二级）为判定词表
+    const targets = resolveClassifyTargets(settings, folderScheme, parentOf, { fresh: isFresh });
+    if (!targets.length) throw new Error('还没有可用的分类方案或目录，先到设置页选用一套方案');
 
     const { candidates: picked } = preselect(items, {
       scope,
       folderCode,
       codes: new Set(targets.map((f) => f.code)),
       // 全新生成按定义就是「当前所有收藏重新分类」，不按每轮条数截断
-      limit: tree === 'fresh' ? 'all' : limit,
+      limit: isFresh ? 'all' : limit,
     });
 
     organize.total = picked.length;
@@ -645,10 +789,9 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
       suggestions[s.id] = { ...s };
     }
 
-    // 只把「本地没把握」的送去模型
-    // 候选已经被 limit 截过（200 / 500 / 1000 / 全部），这里不再二次截断，
-    // 否则「全部」实际只有前 200 条进模型，其余只走本地规则。
-    const lowConf = picked.filter((it) => (suggestions[it.id].conf || 0) < 0.55);
+    // 只把「本地没把握」（低于统一选择性阈值）的送去模型
+    // 候选已经被 limit 截过（200 / 500 / 1000 / 全部），这里不再二次截断
+    const lowConf = picked.filter((it) => (suggestions[it.id].conf || 0) < SELECTIVE_THRESHOLD);
     if (hasModel(settings) && lowConf.length) {
       organize.stage = 'model';
       organize.total = lowConf.length;
@@ -674,6 +817,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
           {
             learned,
             pageMeta,
+            ignoreCurrent: isFresh,
             stats,
             shouldStop: () => orgCtl.stop,
             onBatchStart: (batch, batches, size) => broadcast({
@@ -706,39 +850,45 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
     let plan = buildPlan({
       items,
       scheme: targets,
+      schemeId: settings.schemeId || '',
       scope,
       folderCode,
       suggestions,
       blocked: collectManagedIds(bookmarkTree),
       existing: new Set(folderScheme.map((f) => f.code)),
-      limit,
+      folderNames: new Map(folderScheme.map((f) => [f.code, f.name])),
+      ignoreCurrent: isFresh,
+      limit: isFresh ? 'all' : limit,
     });
 
     // 全新生成：先把当前整树备份下来，再谈重建——备份不成功就不往下走
-    if (scope === 'scheme' && tree === 'fresh') {
+    if (isFresh) {
       const meta = await saveBackup(bookmarkTree, { planId: plan.id, schemeId: settings.schemeId || '' });
       plan.tree = 'fresh';
       plan.backupId = meta.id;
       plan.backupAt = meta.at;
     }
 
-    // 结构来源：照用方案的默认分类（建全，含空目录）、按收藏生成（只建用到的 + 派生二级），
-    // 或全新生成（同按收藏生成，但旧目录会被重判并在搬空后清理）
+    // 结构来源：照用方案的默认分类（建全，含空目录）、按收藏生成（只建用到的 + 可选派生二级），
+    // 或全新生成（旧目录重判并在搬空后清理）
     if (scope === 'scheme' && tree === 'scheme') {
       plan.tree = 'scheme';
       plan.created = schemeCreated(targets, new Set(folderScheme.map((f) => f.code)));
-    } else if (autoSubs) {
+    } else if (autoSubs && scope === 'scheme') {
       if (!hasModel(settings)) {
         broadcast({ type: 'organize:warn', message: '还没配模型：这一轮只生成一级目录' });
       } else {
         organize.stage = 'subs';
         broadcast({ type: 'organize:progress', stage: 'subs', done: 0, total: 0, at: Date.now() });
+        // 非 fresh 模式：已有二级子目录的父类不再重新派生，防止同码 110/120 撞车
+        const existingParents = isFresh ? null : new Set(Object.values(parentOf || {}));
         const derived = await deriveSubs(
           plan,
           items,
           ({ code, name, items: part }) => splitByModel({ code, name }, part, settings),
           {
             minPerTop: 6,
+            existingParents,
             shouldStop: () => orgCtl.stop,
             onStep: (done, total) => broadcast({
               type: 'organize:progress', stage: 'subs', done, total, at: Date.now(),
@@ -747,7 +897,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
         );
         plan = derived.plan;
         if (!derived.groups) {
-          broadcast({ type: 'organize:warn', message: '这轮没有 ≥6 条的类目，暂不派生二级' });
+          broadcast({ type: 'organize:warn', message: '这轮没有符合派生条件的一级类目（≥6 条且尚无二级），暂不派生二级' });
         }
       }
     }
@@ -904,17 +1054,19 @@ async function stashWindowTabs({ folderId = '', closeTabs = false } = {}) {
 }
 
 /** 把任意快照安全恢复到一个带时间戳的新目录，绝不覆盖现有书签 */
-/** 把快照节点写成真实的书签树；counters 逐层累加 */
-async function writeSnapshot(nodes, parentId, counters = { folders: 0, bookmarks: 0 }) {
+/** 把快照节点写成真实的书签树；counters 逐层累加，idMap 记录旧 id → 新 id 以便迁移旁挂元数据 */
+async function writeSnapshot(nodes, parentId, counters = { folders: 0, bookmarks: 0 }, idMap = null) {
   for (const node of nodes || []) {
     if (node.url) {
-      await chrome.bookmarks.create({ parentId, title: node.title || node.url, url: node.url });
+      const created = await chrome.bookmarks.create({ parentId, title: node.title || node.url, url: node.url });
+      if (idMap && node.id) idMap.set(node.id, created.id);
       counters.bookmarks += 1;
       continue;
     }
     const folder = await chrome.bookmarks.create({ parentId, title: node.title || '未命名文件夹' });
+    if (idMap && node.id) idMap.set(node.id, folder.id);
     counters.folders += 1;
-    await writeSnapshot(node.children || [], folder.id, counters);
+    await writeSnapshot(node.children || [], folder.id, counters, idMap);
   }
   return counters;
 }
@@ -974,13 +1126,32 @@ async function restoreSnapshotReplace(snapshot) {
       || root;
   };
   const counters = { folders: 0, bookmarks: 0 };
+  const idMap = new Map();
   for (const r of roots) {
     const target = pickRoot(r.title);
-    for (const c of r.children || []) await writeSnapshot([c], target.id, counters);
+    for (const c of r.children || []) await writeSnapshot([c], target.id, counters, idMap);
+  }
+
+  // 替换恢复会生成全新节点 ID：同步迁移 meta（标签分面/批注/星标）与 health，避免被 pruneMeta 误清空
+  let remappedMeta = 0;
+  if (idMap.size) {
+    const { meta = {}, health = {} } = await chrome.storage.local.get(['meta', 'health']);
+    const nextMeta = remapRecordById(meta, idMap);
+    const nextHealth = remapRecordById(health, idMap);
+    remappedMeta = nextMeta.remapped;
+    await chrome.storage.local.set({ meta: nextMeta.record, health: nextHealth.record });
   }
 
   broadcast({ type: 'state:changed' });
-  return { mode: 'replace', label: '替换恢复', removed, stuck, folders: counters.folders, bookmarks: counters.bookmarks };
+  return {
+    mode: 'replace',
+    label: '替换恢复',
+    removed,
+    stuck,
+    folders: counters.folders,
+    bookmarks: counters.bookmarks,
+    remappedMeta,
+  };
 }
 
 async function openManagerTab({ view, drawer, id, hash, q } = {}) {
@@ -1018,16 +1189,17 @@ async function runAi(ids) {
   broadcast({ type: 'ai:start', total: (ids || []).length });
   try {
     const state = await loadState();
-    const { items, folderScheme, settings, learned } = state;
+    const { items, folderScheme, parentOf, settings, learned } = state;
     const wanted = new Set(ids);
     const targets = items.filter((it) => wanted.has(it.id));
-    if (!folderScheme.length) throw new Error('没找到可用分类。先在书签栏建几个类目文件夹（例如「500 人工智能」）。');
+    const vocab = resolveClassifyTargets(settings, folderScheme, parentOf);
+    if (!vocab.length) throw new Error('没找到可用分类。先在设置页选用一套方案，或在书签栏建类目文件夹。');
     if (!targets.length) { broadcast({ type: 'ai:done', total: 0, count: 0 }); return; }
 
     // 1) 本地关键词 + 历史偏好：零成本，先定一批
-    const base = classifyHeuristic(targets, scheme, { schemeId: settings.schemeId, learned });
+    const base = classifyHeuristic(targets, vocab, { schemeId: settings.schemeId, learned });
     const merged = new Map(base.map((s) => [s.id, s]));
-    const lowConf = targets.filter((it) => ((merged.get(it.id) || {}).conf || 0) < 0.55);
+    const lowConf = targets.filter((it) => ((merged.get(it.id) || {}).conf || 0) < SELECTIVE_THRESHOLD);
 
     // 2) 只把没把握的送模型（没有模型就纯本地）
     const stats = {};
@@ -1036,7 +1208,7 @@ async function runAi(ids) {
       const pageMeta = await enrichWeakHeads(lowConf, settings);
       const refined = await classify(
         lowConf,
-        folderScheme,
+        vocab,
         settings,
         (done, total) => broadcast({ type: 'ai:progress', done, total }),
         { learned, pageMeta, stats, shouldStop: () => aiCtl.stop },
@@ -1046,7 +1218,7 @@ async function runAi(ids) {
     }
 
     const byId = new Map(targets.map((it) => [it.id, it]));
-    list = list.filter((s) => (byId.get(s.id) || {}).code !== s.code);
+    list = list.filter((s) => s.code && (byId.get(s.id) || {}).code !== s.code);
     const failed = stats.failed || [];
 
     if (list.length) {
@@ -1342,33 +1514,55 @@ const handlers = {
   },
 
   'ai:accept': async ({ ids }) => {
-    const { pending } = await chrome.storage.local.get('pending');
-    const p = pending || {};
-    // 按编码分组逐组执行：某一组的目标类目找不到，只记失败，其它组照常移动
-    const r = await runAccept({
-      pending: p,
-      ids: ids.filter((id) => p[id]),
-      move: (code, group) => moveToCode(group, code),
-    });
-    const { moved, failed, missing, ops: allOps } = r;
-    await chrome.storage.local.set({ pending: r.pending });
-    let journalId = null;
-    if (allOps.length) {
-      const entry = {
-        id: 'j' + Date.now().toString(36),
-        at: Date.now(),
-        planId: 'ai-accept',
-        scope: 'ai',
-        applied: allOps.length,
-        failed,
-        ops: allOps,
+    const state = await loadState();
+    const p = { ...(state.pending || {}) };
+    const byId = new Map(state.items.map((x) => [x.id, x]));
+    const vocab = resolveClassifyTargets(state.settings, state.folderScheme, state.parentOf);
+    const wantedIds = (ids || []).filter((id) => p[id] && p[id].code && byId.has(id));
+    if (!wantedIds.length) return { moved: 0, movedIds: [], failed: 0, missing: [], journalId: '' };
+
+    const ops = wantedIds.map((id) => {
+      const it = byId.get(id);
+      const s = p[id];
+      const hit = vocab.find((f) => f.code === s.code);
+      return {
+        id,
+        title: it.title || '',
+        url: it.url || '',
+        from: { code: it.code || '', folderId: it.folderId || '' },
+        to: { code: s.code, name: (hit && hit.name) || s.code },
+        status: 'ready',
       };
-      const journal = pushEntry(await readJournal(), entry);
-      await chrome.storage.local.set({ [JOURNAL_KEY]: journal });
-      journalId = entry.id;
+    });
+    const folders = planFolders({ scheme: vocab }, ops);
+    const earliestAt = wantedIds.reduce((m, id) => Math.min(m, p[id].at || Date.now()), Date.now());
+    const res = await commitOps({
+      planId: 'ai-accept',
+      planAt: earliestAt,
+      folders,
+      ops,
+      backup: true,
+      journal: true,
+      scope: 'ai',
+      progress: false,
+    });
+    if (res.conflict.length) {
+      const codes = res.conflict.map((c) => `${c.code}（现名「${c.got}」，方案叫「${c.want}」）`).join('、');
+      throw new Error(`目标目录冲突：${codes}，未执行移动`);
     }
+    const doneIds = [...(res.movedIds || []), ...(res.alreadyIds || [])];
+    doneIds.forEach((id) => delete p[id]);
+    await chrome.storage.local.set({ pending: p });
     broadcast({ type: 'state:changed' });
-    return { moved, movedIds: allOps.map((o) => o.id), failed, missing, journalId };
+    return {
+      moved: res.moved,
+      skippedAlready: res.skippedAlready || 0,
+      movedIds: doneIds,
+      failed: res.failed,
+      created: res.created,
+      missing: [],
+      journalId: res.journalId || null,
+    };
   },
 
   'ai:ignore': async ({ ids }) => {
@@ -1386,32 +1580,40 @@ const handlers = {
     return { ok: true };
   },
 
-  /** 修复：按 settings.schemeId 与自定义方案解析书签树，并纳入改判偏好 */
+  /** 按当前启用方案（或现存目录）给出单条建议，带完整数据血缘 */
   'ai:suggestOne': async ({ url, title, fast }) => {
     const settings = await readSettings();
     const learned = await readLearned();
     const tree = await chrome.bookmarks.getTree();
-    const { folderScheme } = parseTree(tree, parseOptsFor(settings));
+    const { folderScheme, parentOf } = parseTree(tree, parseOptsFor(settings));
+    const vocab = resolveClassifyTargets(settings, folderScheme, parentOf);
     const fake = [{ id: 'tmp', title: title || url, url, host: hostOf(url), code: '' }];
     const folderFor = (code) => (folderScheme.find((f) => f.code === code) || {}).id || null;
+    const pack = (s, extra = {}) => ({
+      code: (s && s.code) || '',
+      conf: (s && s.conf) || 0,
+      reason: (s && s.reason) || '',
+      source: (s && s.source) || 'heuristic',
+      model: (s && s.model) || '',
+      promptVersion: (s && s.promptVersion) || '',
+      folderId: s && s.code ? folderFor(s.code) : null,
+      ...extra,
+    });
 
-    if (!fast && hasModel(settings)) {
+    if (!fast && hasModel(settings) && vocab.length) {
       try {
         const pageMeta = settings.fetchHeadOnAi && isWeakTitle(title, url)
           ? { tmp: await fetchPageHead(url, { timeout: 4000 }) }
           : {};
-        const [s] = await classify(fake, folderScheme, settings, undefined, { learned, pageMeta });
-        if (s) return { code: s.code, conf: s.conf, reason: s.reason, source: s.source || 'model', folderId: folderFor(s.code) };
+        const [s] = await classify(fake, vocab, settings, undefined, { learned, pageMeta });
+        if (s) return pack(s, { source: s.source || 'model' });
       } catch (e) {
-        const [s] = classifyHeuristic(fake, scheme, { schemeId: settings.schemeId, learned });
-        return {
-          code: s.code, conf: s.conf, reason: '模型不可用，用了本地规则', source: s.source || 'heuristic',
-          folderId: folderFor(s.code), error: String(e.message || e),
-        };
+        const [s] = classifyHeuristic(fake, vocab, { schemeId: settings.schemeId, learned });
+        return pack(s, { reason: '模型不可用，用了本地规则', error: String(e.message || e) });
       }
     }
-    const [s] = classifyHeuristic(fake, scheme, { schemeId: settings.schemeId, learned });
-    return { code: s.code, conf: s.conf, reason: s.reason, source: s.source || 'heuristic', folderId: folderFor(s.code) };
+    const [s] = classifyHeuristic(fake, vocab, { schemeId: settings.schemeId, learned });
+    return pack(s);
   },
 
   'settings:save': async ({ settings }) => {
@@ -1439,23 +1641,29 @@ const handlers = {
   'scheme:saveCustom': async ({ scheme }) => {
     const clean = sanitizeCustomScheme(scheme);
     const settings = await readSettings();
+    const prev = (settings.customSchemes || []).find((s) => s.id === clean.id);
     const list = [...(settings.customSchemes || [])].filter((s) => s.id !== clean.id);
     list.push(clean);
     const next = { ...settings, customSchemes: list };
     await chrome.storage.local.set({ settings: next });
+    // 若编辑的是当前激活方案，同步对 pending / learned / plan 跑一次模式迁移
+    let sw = { mapped: 0, dropped: 0, learnedMapped: 0, learnedDropped: 0, planCleared: false };
+    if (prev && settings.schemeId === clean.id) {
+      sw = await migrateSchemeState(clean.id, clean.id, list, { fromFolders: prev.folders, force: true });
+    }
     broadcast({ type: 'state:changed' });
-    return { scheme: clean, schemes: listSchemes(list) };
+    return { scheme: clean, schemes: listSchemes(list), ...sw };
   },
 
   'scheme:deleteCustom': async ({ schemeId }) => {
     const settings = await readSettings();
     const list = (settings.customSchemes || []).filter((s) => s.id !== schemeId);
     const next = { ...settings, customSchemes: list, schemeId: settings.schemeId === schemeId ? '' : settings.schemeId };
-    // 删掉当前方案就等于换成空方案：没有可迁移的目标，全部作废
-    const sw = await migrateSuggestions(settings.schemeId, next.schemeId, settings.customSchemes || []);
+    // 删掉当前方案就等于换成空方案：没有可迁移的目标，全部显式作废
+    const sw = await migrateSchemeState(settings.schemeId, next.schemeId, settings.customSchemes || []);
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
-    return { schemes: listSchemes(list), mapped: sw.mapped, dropped: sw.dropped };
+    return { schemes: listSchemes(list), ...sw };
   },
 
   'scheme:preview': async ({ schemeId }) => {
@@ -1464,11 +1672,11 @@ const handlers = {
     if (!scheme) throw new Error('没有这个方案');
     const tree = await chrome.bookmarks.getTree();
     const plan = planInstall(tree, scheme);
-    // 哪些类目现在一条书签都没有：预建只会留下空目录，先说清楚
-    const { items } = parseTree(tree, parseOptsFor(settings));
+    // 用「预览目标方案」自身的解析选项（而不是旧方案）统计哪些类目现在已有书签
+    const { items } = parseTree(tree, parseOptsOf(schemeId, settings.customSchemes || []));
     const used = new Set(items.map((it) => it.code || ''));
     const empty = scheme.folders.filter((f) => !used.has(f.code)).map((f) => f.code);
-    return { ...plan, empty };
+    return { ...plan, empty, summary: { ...plan.summary, empty: empty.length } };
   },
 
   /** 分类法设计：抽样 → 归纳骨架 → 规则铺全量 → 剪枝，只产出 draft */
@@ -1515,7 +1723,7 @@ const handlers = {
     const settings = await readSettings();
     const customs = (settings.customSchemes || []).filter((s) => s.id !== scheme.id);
     customs.push(sanitizeCustomScheme({ ...scheme, custom: true }));
-    const sw = await migrateSuggestions(settings.schemeId, scheme.id, customs);
+    const sw = await migrateSchemeState(settings.schemeId, scheme.id, customs);
     await chrome.storage.local.set({ settings: { ...settings, customSchemes: customs, schemeId: scheme.id } });
 
     const installed = {
@@ -1528,7 +1736,11 @@ const handlers = {
     await chrome.storage.local.set({ [TAXONOMY_KEY]: installed });
     broadcast({ type: 'taxonomy:done', draft: installed });
     broadcast({ type: 'state:changed' });
-    return { installed: true, created: made, reused: res.reused, schemeId: scheme.id, mapped: sw.mapped, dropped: sw.dropped };
+    return {
+      installed: true, created: made, reused: res.reused, schemeId: scheme.id,
+      mapped: sw.mapped, dropped: sw.dropped,
+      learnedMapped: sw.learnedMapped, learnedDropped: sw.learnedDropped, planCleared: sw.planCleared,
+    };
   },
 
   /**
@@ -1604,7 +1816,7 @@ const handlers = {
     return { ok: true };
   },
 
-  'organize:plan': async ({ scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES, autoSubs = true, tree = 'collection' } = {}) => {
+  'organize:plan': async ({ scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES, autoSubs = false, tree = 'collection' } = {}) => {
     if (organize.running) throw new Error('上一次整理计划还在生成');
     runOrganize(scope, folderCode, limit, { autoSubs, tree }).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
     return { started: true };
@@ -1666,6 +1878,8 @@ const handlers = {
           to: { code: codeKey, name: folder.name, sub: { code: sub.code, name: sub.name }, missing: true },
           conf: 1,
           source: 'model',
+          model: got.model || '',
+          promptVersion: got.promptVersion || PROMPT_VERSION,
           reason: '拆分目录',
           status: 'ready',
         };
@@ -1675,22 +1889,20 @@ const handlers = {
     const plan = recount({
       id: 'p' + Date.now().toString(36),
       at: Date.now(),
+      schemeId: settings.schemeId || '',
       scope: 'folder',
       scheme: [{ code: codeKey, name: folder.name, parent: null }],
       subs: { [codeKey]: subs.map((x) => ({ code: x.code, name: x.name, hint: x.hint })) },
       existing: parsed.folderScheme.map((f) => f.code),
       ops,
     });
+    // 遵守人在回路：只产出拆分计划交给用户审阅确认，不绕过审定直接动树
     await writePlan(plan);
-    // 立即执行：建子目录 → 搬条目；备份与撤销都在 runApply 里
-    const done = await runApply();
-    // 如实报账：建了几个目录、真搬了几条、几条没搬成——以前只报「打算搬几条」，会撒谎
     return {
-      started: true,
+      planned: true,
       subs: subs.length,
-      created: done.created || 0,
-      moved: done.applied || 0,
-      failed: done.failed || 0,
+      ops: ops.length,
+      plan,
     };
   },
 
@@ -1720,9 +1932,9 @@ const handlers = {
         continue;
       }
       try {
-        const { subs: names, assign, badChunks } = await splitByModel({ code, name }, ops, settings);
+        const { subs: names, assign, badChunks, model, promptVersion } = await splitByModel({ code, name }, ops, settings);
         if (names.length < 2) throw new Error('模型给出的子类少于 2 个');
-        if (Object.keys(assign).length) mapping[code] = { subs: names, assign };
+        if (Object.keys(assign).length) mapping[code] = { subs: names, assign, model, promptVersion };
         if (badChunks) {
           broadcast({
             type: 'organize:warn',
@@ -1758,13 +1970,24 @@ const handlers = {
     };
   },
 
-  /** 上次提交中断了：按预写日志把记录过的步骤反序搬回去 */
+  /** 上次提交中断了：按预写日志幂等反序搬回（只搬仍在目标目录的条目，不搅乱未动条目的顺序） */
   'organize:walRollback': async () => {
     const wal = await readWal();
-    if (!wal) return { restored: 0, none: true };
+    if (!wal) return { restored: 0, skipped: 0, none: true };
     if (applyCtl.running) throw new Error('还有提交在进行，先等它结束');
     let restored = 0;
+    let skipped = 0;
     for (const step of rollbackSteps(wal)) {
+      let node = null;
+      try {
+        [node] = await chrome.bookmarks.get(step.id);
+      } catch {
+        node = null;
+      }
+      if (!shouldRollbackStep(step, node)) {
+        skipped += 1;
+        continue;
+      }
       try {
         await chrome.bookmarks.move(step.id, { parentId: step.fromFolderId, index: step.fromIndex });
         restored += 1;
@@ -1777,7 +2000,7 @@ const handlers = {
     }
     await writeWal(null);
     broadcast({ type: 'state:changed' });
-    return { restored, total: walSummary(wal).count };
+    return { restored, skipped, total: walSummary(wal).count };
   },
 
   /** 用户确认「就这样吧」：只清掉意图，不回滚 */
@@ -1838,15 +2061,15 @@ const handlers = {
 
   'backup:check': async ({ planId = '', planAt = 0 }) => checkBackupReady(await listBackups(), { id: planId, at: planAt }),
 
-  /** 只把某套方案设为「当前方案」，不建任何目录：给「按方案建档」这类只看类目定义的场景用 */
+  /** 只把某套方案设为「当前方案」，不建任何目录：给所有分类入口与按方案建档用 */
   'scheme:select': async ({ schemeId }) => {
-    const scheme = getScheme(schemeId, (await readSettings()).customSchemes || []);
-    if (!scheme) throw new Error('没有这个方案');
     const settings = await readSettings();
-    const sw = await migrateSuggestions(settings.schemeId, schemeId, settings.customSchemes || []);
+    const scheme = getScheme(schemeId, settings.customSchemes || []);
+    if (!scheme) throw new Error('没有这个方案');
+    const sw = await migrateSchemeState(settings.schemeId, schemeId, settings.customSchemes || []);
     await chrome.storage.local.set({ settings: { ...settings, schemeId } });
     broadcast({ type: 'state:changed' });
-    return { selected: true, schemeId, mapped: sw.mapped, dropped: sw.dropped };
+    return { selected: true, schemeId, ...sw };
   },
 
   'scheme:install': async ({ schemeId }) => {
@@ -1862,13 +2085,13 @@ const handlers = {
     });
     if (res.conflict.length) return { installed: false, conflict: res.conflict };
 
-    // 换方案 → 已有建议显式迁移：同名的换编码留下，没处去的作废并计数
-    const sw = await migrateSuggestions(settings.schemeId, schemeId, settings.customSchemes || []);
+    // 换方案 → 已有建议/域名记忆/旧计划显式迁移或作废并计数
+    const sw = await migrateSchemeState(settings.schemeId, schemeId, settings.customSchemes || []);
 
     const next = { ...settings, schemeId };
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
-    return { installed: true, created: res.created, reused: res.reused, schemeId, mapped: sw.mapped, dropped: sw.dropped };
+    return { installed: true, created: res.created, reused: res.reused, schemeId, ...sw };
   },
 
   'bookmarks:update': async ({ id, title, url }) => {

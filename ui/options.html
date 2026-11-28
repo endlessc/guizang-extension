@@ -4,23 +4,30 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>归藏 · 设置</title>
-<link rel="stylesheet" href="app.css?v=113" />
-<link rel="stylesheet" href="options.css?v=113" />
+<script src="theme-boot.js"></script>
+<link rel="stylesheet" href="app.css?v=115" />
+<link rel="stylesheet" href="options.css?v=115" />
 </head>
 <body class="opt-page">
   <div class="opt-wrap">
     <header class="opt-head" id="head"></header>
+    <nav class="opt-nav" id="optNav" aria-label="设置分节导航"></nav>
 
     <form id="form">
-      <section class="card">
+      <section class="card" id="sec-model">
         <div class="card-kicker">辨目析义模型</div>
         <h2>模型配置</h2>
-        <p class="hint">任何兼容 OpenAI 规范的 <code>/chat/completions</code> 均可使用：DeepSeek、通义千问、Kimi 或本地 Ollama（<code>http://localhost:11434/v1</code>）。不配置 Key 亦可离线使用，系统将自动退回按当前方案适配的本地关键词规则。</p>
+        <p class="hint">兼容所有 OpenAI 规范的 <code>/chat/completions</code> 接口；不填 Key 亦可离线使用本地关键词规则。</p>
+        <div class="preset-bar" id="providerPresets"></div>
         <div class="grid">
           <label class="field wide"><span>接口地址 (Base URL)</span>
-            <input name="baseUrl" spellcheck="false" placeholder="https://api.deepseek.com/v1（多数服务需要 /v1 结尾，只填域名会自动补）" /></label>
+            <input name="baseUrl" spellcheck="false" placeholder="https://api.deepseek.com/v1（只填域名会自动补 /v1）" /></label>
           <label class="field wide"><span>鉴权秘钥 (API Key)</span>
-            <input name="apiKey" type="password" spellcheck="false" placeholder="sk-…" autocomplete="off" /></label>
+            <div class="field-input-wrap">
+              <input name="apiKey" id="apiKeyInput" type="password" spellcheck="false" placeholder="sk-…" autocomplete="off" />
+              <button type="button" class="field-eye-btn" id="toggleApiKey" title="显示 / 隐藏秘钥" aria-label="显示或隐藏秘钥"></button>
+            </div>
+          </label>
           <label class="field"><span>模型标识 (Model)</span>
             <input name="model" spellcheck="false" placeholder="deepseek-chat" /></label>
           <label class="field"><span>最大输出 (max_tokens)</span>
@@ -29,14 +36,16 @@
             <input name="modelBatch" type="number" min="4" max="200" step="4" /></label>
           <label class="field"><span>单批超时（秒）</span>
             <input name="modelTimeout" type="number" min="20" step="10" /></label>
-          <div class="hint" style="grid-column:1/-1">每批条数受「最大输出」限制：每条约 40–60 个输出 token，
-            3000 的分配上限大约 40 条/批；想让一批过百条，先把 max_tokens 提到 8000 以上。</div>
+          <div class="hint" style="grid-column:1/-1;margin-bottom:0">每条约占 40–60 输出 token（3000 token ≈ 40 条/批）；批量过百建议将 <code>max_tokens</code> 调至 8000+。</div>
         </div>
-        <label class="opt-toggle">
-          <input type="checkbox" name="fetchHeadOnAi" />
-          <span>
-            <span class="opt-toggle-title">弱标题自动流式读取页面 <code>&lt;head&gt;</code> 摘要</span>
-            <span class="opt-toggle-desc">遇到裸网址或「首页 / 文档」等短标题时，仅读取前 20KB 获取 meta description 后立即断开连接，提升归类准确度。</span>
+        <label class="gz-switch-row" style="margin-top:14px">
+          <span class="gz-switch-copy">
+            <span class="gz-switch-title">弱标题自动流式读取页面 <code>&lt;head&gt;</code> 摘要</span>
+            <span class="gz-switch-desc">遇到裸网址或短标题时仅读取前 20KB 提取 meta description 后即刻断开，提升归类准确度。</span>
+          </span>
+          <span class="gz-switch">
+            <input type="checkbox" name="fetchHeadOnAi" />
+            <span class="gz-switch-track"></span>
           </span>
         </label>
         <div class="opt-row">
@@ -45,10 +54,10 @@
         </div>
       </section>
 
-      <section class="card">
+      <section class="card" id="sec-check">
         <div class="card-kicker">逐卷网络考订</div>
         <h2>检测参数</h2>
-        <p class="hint">检测在扩展后台发出真实轻量请求，获取实际状态码与网络连通耗时。一次探测过多容易触发源站防护，建议保持默认并发与超时。</p>
+        <p class="hint">后台发出真实轻量请求核验状态码与耗时；并发过高易触发源站限流，建议保留默认值。</p>
         <div class="grid grid-3">
           <label class="field"><span>并发探测数</span>
             <input name="concurrency" type="number" min="1" max="12" /></label>
@@ -66,21 +75,26 @@
       </div>
     </form>
 
-    <section class="card">
+    <section class="card" id="sec-native">
       <div class="card-kicker">CHROME 原生能力</div>
       <h2>地址栏秒搜、快捷键与按需增强</h2>
-      <p class="hint">充分发挥扩展原生能力：在 Chrome 地址栏直接输入关键词 <code>gz</code> 后按空格或 Tab，即可秒搜全部藏卷（支持中文拼音首字母、<code>#标签</code>、<code>domain:</code> 与状态语法）。</p>
-      <div class="omnibox-demo">
+      <p class="hint">在 Chrome 地址栏输入 <code>gz</code> + 空格即可全局瞬搜藏卷（支持拼音首字母、<code>#标签</code>、<code>domain:</code> 与状态语法）。点击下方示例可预览并直达书库试搜。</p>
+      <div class="omnibox-bar">
+        <span class="omnibox-bar-dots"><i></i><i></i><i></i></span>
         <span class="omnibox-pill">gz</span>
-        <span>+ 空格 → 实时展示前 6 条匹配藏卷，回车直达目标网页或全屏书库</span>
+        <span class="omnibox-bar-input">
+          <span class="omnibox-bar-text" id="omniPreviewText">rgzn</span>
+          <span class="omnibox-cursor"></span>
+        </span>
+        <button type="button" class="btn btn-line btn-sm" id="omniTryBtn">去书库试搜</button>
       </div>
       <div class="omnibox-samples">
-        <span class="omnibox-sample">gz rgzn</span>
-        <span class="omnibox-sample">gz #rust</span>
-        <span class="omnibox-sample">gz domain:github.com</span>
-        <span class="omnibox-sample">gz status:dead</span>
+        <button type="button" class="omnibox-sample" data-omni-q="rgzn">gz rgzn</button>
+        <button type="button" class="omnibox-sample" data-omni-q="#rust">gz #rust</button>
+        <button type="button" class="omnibox-sample" data-omni-q="domain:github.com">gz domain:github.com</button>
+        <button type="button" class="omnibox-sample" data-omni-q="status:dead">gz status:dead</button>
       </div>
-      <div class="opt-row" style="margin-top:6px">
+      <div class="opt-row" style="margin-top:8px">
         <button type="button" class="btn btn-line btn-sm" id="openShortcuts">配置全局快捷键（打开书库 / 一键快收）</button>
         <button type="button" class="btn btn-line btn-sm" id="exportMd">导出 Obsidian Markdown 书目</button>
         <button type="button" class="btn btn-ghost btn-sm" id="exportHtml">导出标准 HTML 书签</button>
@@ -88,18 +102,18 @@
       <div class="perm-list" id="permList"></div>
     </section>
 
-    <section class="card">
+    <section class="card" id="sec-theme">
       <div class="card-kicker">文人色彩系统</div>
       <h2>典籍配色方案</h2>
-      <p class="hint">以宣纸、徽墨、汝窑、蜜蜡与漆器等传统器物文脉为灵感，精心调校 6 套古典雅致色系，兼顾高对比度易读性与沉浸审美，即刻全景同步至管理台、侧边栏与弹窗。</p>
+      <p class="hint">以宣纸、徽墨、汝窑、蜜蜡与黑漆琉璃为灵感，精心调校 8 套典籍与现代色系（5 浅 + 3 深 + 跟随系统），即刻全景同步至管理台、侧边栏与弹窗。</p>
       <div id="themeSystemHost"></div>
       <div class="theme-grid" id="themeGrid"></div>
     </section>
 
-    <section class="card">
+    <section class="card" id="sec-scheme">
       <div class="card-kicker">四库存目源流</div>
       <h2>分类体系映射与自定义方案</h2>
-      <p class="hint">可装一套预置方案（杜威十进、中图法等），也可新建或导入自定义分类体系。数字编码始终识别，字母编码在对应方案启用后生效。</p>
+      <p class="hint">预置杜威十进、中图法等标准方案，也可自建或导入 JSON 方案。目录只是方案的投影：先选定方案，再到整理工作台按需生成目录。</p>
       <div class="scheme-pick" id="schemePicker"></div>
       <div class="opt-row">
         <button type="button" class="btn btn-line btn-sm" id="btnNewCustom">新建自定义方案</button>
@@ -126,10 +140,10 @@
       <div class="scheme" id="scheme"></div>
     </section>
 
-    <section class="card">
+    <section class="card" id="sec-taxonomy">
       <div class="card-kicker">因书立目</div>
       <h2>从收藏里归纳分类法</h2>
-      <p class="hint">按域名分层抽 200 条交给模型归纳两级骨架，再用规则铺到全部收藏，装不下的类目自动剪掉。产出只是草稿：改名、勾掉不要的类目之后，点「落成目录」才会真的建文件夹。</p>
+      <p class="hint">按域名分层抽样归纳两级骨架，铺到全量收藏并自动剪除空枝；改名与裁剪草稿并审定后，点「落成目录」才创建文件夹。</p>
       <div class="tx-status" id="txStatus"></div>
       <div class="opt-row">
         <button type="button" class="btn btn-primary btn-sm" id="btnTxDesign">开始归纳</button>
@@ -138,15 +152,15 @@
       <div id="txBody"></div>
       <div class="opt-row tx-extend-row">
         <button type="button" class="btn btn-line btn-sm" id="btnTxExtend">增量扩展</button>
-        <span class="hint" id="txExtendMsg">只处理还没归入任何类目的条目，不建目录、不改结构。</span>
+        <span class="hint" style="margin-bottom:0" id="txExtendMsg">只处理还没归入任何类目的条目，不建目录、不改结构。</span>
       </div>
       <div id="txProposals"></div>
     </section>
 
-    <section class="card">
+    <section class="card" id="sec-memory">
       <div class="card-kicker">个人习惯沉淀</div>
       <h2>改判记忆规则</h2>
-      <p class="hint">当你在 AI 归类或整理计划中手动「改判」特定域名时，归藏会自动记住你的偏好，后续本地规则优先命中，并作为示例提示给大模型（公共平台如 GitHub / 知乎不会绑定整站）。</p>
+      <p class="hint">手动「改判」特定域名后自动沉淀至此，后续本地规则优先命中并作为大模型示例（公共平台如 GitHub / 知乎不绑定整站）。</p>
       <div id="learnedList"></div>
       <div class="opt-row">
         <button type="button" class="btn btn-ghost btn-sm" id="clearLearned">清空改判记忆</button>
@@ -154,7 +168,7 @@
       </div>
     </section>
 
-    <section class="card danger">
+    <section class="card danger" id="sec-backup">
       <div class="card-kicker tone-dead">数据与隐私安全</div>
       <h2>本地存储管控与备份恢复</h2>
       <p class="hint">所有检测记录、标签批注、改判记忆与 API Key 均严格保存在本地 <code>chrome.storage.local</code>，绝不上传至任何第三方云端。</p>

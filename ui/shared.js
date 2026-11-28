@@ -60,6 +60,14 @@ const PATHS = {
   triage: 'M3 3.5h10v7.5H3zM5.2 13h5.6M6 6.5l1.6 1.6L10.4 5.3',
   zap: 'M9 1.8L3.6 8.8H8L7 14.2l5.4-7H8L9 1.8z',
   link: 'M6.5 9.5l3-3M5 7.5L3.6 8.9a2.5 2.5 0 003.5 3.5L8.5 11M11 8.5l1.4-1.4a2.5 2.5 0 00-3.5-3.5L7.5 5',
+  eye: 'M1.8 8s2.3-4.2 6.2-4.2S14.2 8 14.2 8s-2.3 4.2-6.2 4.2S1.8 8 1.8 8zM8 6.2a1.8 1.8 0 100 3.6 1.8 1.8 0 000-3.6z',
+  eyeOff: 'M2.2 2.2l11.6 11.6M6.5 6.6a1.8 1.8 0 002.9 2.2M4.3 4.8C2.8 5.9 1.8 8 1.8 8s2.3 4.2 6.2 4.2c1.2 0 2.3-.4 3.2-1M7 3.9c.3-.1.7-.1 1-.1 3.9 0 6.2 4.2 6.2 4.2s-.8 1.4-2 2.5',
+  shield: 'M8 1.8l5.2 2.1v3.8c0 3.3-2.2 5.7-5.2 6.7-3-1-5.2-3.4-5.2-6.7V3.9L8 1.8zM5.8 8l1.6 1.6L10.6 6.4',
+  cpu: 'M5 5h6v6H5zM6.5 2v3M9.5 2v3M6.5 11v3M9.5 11v3M2 6.5h3M2 9.5h3M11 6.5h3M11 9.5h3',
+  branch: 'M4.5 3.5v9M4.5 5.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM11.5 6.5a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM4.5 14a1.5 1.5 0 100-3 1.5 1.5 0 000 3zM11.5 6.5c0 2.6-2 3.5-7 3.5',
+  key: 'M10.2 3a2.8 2.8 0 100 5.6 2.8 2.8 0 000-5.6zM8 7.5L2.4 13.1M4.4 11.1l1.5 1.5',
+  info: 'M8 2.2a5.8 5.8 0 100 11.6A5.8 5.8 0 008 2.2zM8 7.2v3.6M8 5v.2',
+  checkCircle: 'M8 2.2a5.8 5.8 0 100 11.6A5.8 5.8 0 008 2.2zM5.6 8.2l1.7 1.7 3.2-3.5',
 };
 
 export function icon(name, size = 16, sw = 1.4) {
@@ -124,13 +132,18 @@ export function triggerUndo() {
  * 应用内确认 / 多动作弹窗，替代 window.confirm（原生弹窗和界面风格完全不搭）。
  * actions: [{ id, label, primary?, danger? }]；取消或点遮罩返回 ''。
  */
-export function choiceDialog({ title = '请确认', message = '', actions = [], cancelText = '取消' } = {}) {
+export function choiceDialog({ title = '请确认', message = '', actions = [], cancelText = '取消', iconName = '' } = {}) {
   return new Promise((resolve) => {
     const mask = document.createElement('div');
     mask.className = 'gt-dialog-mask';
+    const hasDanger = actions.some((a) => a.danger);
+    const badgeIcon = iconName || (hasDanger ? 'alert' : 'shield');
     const body = esc(String(message || '')).replace(/\n/g, '<br>');
-    mask.innerHTML = `<div class="gt-dialog" role="dialog" aria-modal="true">
-      <div class="gt-dialog-title">${esc(title)}</div>
+    mask.innerHTML = `<div class="gt-dialog${hasDanger ? ' is-danger' : ''}" role="dialog" aria-modal="true">
+      <div class="gt-dialog-head">
+        <span class="gt-dialog-ico${hasDanger ? ' is-danger' : ''}">${icon(badgeIcon, 16)}</span>
+        <div class="gt-dialog-title">${esc(title)}</div>
+      </div>
       <div class="gt-dialog-body">${body}</div>
       <div class="gt-dialog-actions">
         <button type="button" class="btn btn-ghost btn-sm" data-act="">${esc(cancelText)}</button>

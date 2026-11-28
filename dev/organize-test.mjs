@@ -87,6 +87,36 @@ console.log('状态判定');
   eq('目标类目带名字', plan.ops.find((o) => o.id === '1').to, { code: '100', name: '编程与后端', missing: false });
   eq('来源保留', plan.ops.find((o) => o.id === '1').source, 'model');
   eq('scheme 快照保留 code/name/parent', Object.keys(plan.scheme[0]).sort(), ['code', 'name', 'parent']);
+
+  // 数据血缘透传（model / promptVersion / schemeId）
+  const lineagePlan = buildPlan({
+    items: [item('1', '')],
+    scheme,
+    schemeId: 'dewey',
+    suggestions: { 1: { code: '100', conf: 0.9, source: 'model', model: 'deepseek-chat', promptVersion: 'p2', reason: 'ok' } },
+    now: 1001,
+  });
+  const lOp = lineagePlan.ops[0];
+  eq('计划记录 schemeId', lineagePlan.schemeId, 'dewey');
+  eq('计划 op 保留模型与提示词血缘', [lOp.model, lOp.promptVersion], ['deepseek-chat', 'p2']);
+  const ov = overrideOp(lineagePlan, '1', '500').ops[0];
+  eq('人工改判清空模型血缘', [ov.source, ov.model, ov.promptVersion], ['user', '', '']);
+
+  // fresh 跨方案同码异名（杜威 100 编程与后端 → PARA 100 项目）不得被跳过，且标 missing
+  const para = [{ code: '100', name: '项目' }, { code: '300', name: '资源' }];
+  const freshCross = buildPlan({
+    items: [item('x', '100')],
+    scheme: para,
+    schemeId: 'para',
+    scope: 'scheme',
+    suggestions: { x: { code: '100', conf: 0.9, source: 'model' } },
+    existing: new Set(['100']),
+    folderNames: new Map([['100', '编程与后端']]),
+    ignoreCurrent: true,
+    now: 1002,
+  });
+  eq('fresh 同码异名不被当成原地不动跳过', freshCross.ops.length, 1);
+  eq('fresh 同码异名标为 missing 需新建', freshCross.ops[0].to.missing, true);
 }
 
 console.log('按方案建档：缺的目录标出来，执行时再建');
@@ -297,6 +327,15 @@ console.log('按收藏派生二级（生成计划时自动跑）');
 
   const bad = await deriveSubs(plan, items, async () => { throw new Error('模型挂了'); }, { minPerTop: 6 });
   eq('某一个类目分不动，不影响整张计划', [bad.split, bad.plan.ops.filter((o) => o.to.sub).length], [0, 0]);
+
+  const skippedCalls = [];
+  const skipped = await deriveSubs(
+    plan,
+    items,
+    async ({ code }) => { skippedCalls.push(code); return { subs: [{ name: 'A' }, { name: 'B' }], assign: {} }; },
+    { minPerTop: 6, existingParents: new Set(['100']) },
+  );
+  eq('已有二级目录的父类不再重新派生，防止同码撞车', [skippedCalls.length, skipped.groups], [0, 0]);
 }
 
 console.log('目录结构的两种来源');

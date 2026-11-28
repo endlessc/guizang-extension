@@ -6,7 +6,7 @@ import {
   THEMES, getTheme, setThemeAnimated, confirmDialog,
 } from './shared.js';
 import { groupByCode, treeOrder, familyOf } from '../lib/tree.js';
-import { groupOps } from '../lib/organize.js';
+import { groupOps, UNSURE_THRESHOLD } from '../lib/organize.js';
 import { findDuplicates, duplicateIdSet, removableCount } from '../lib/dedup.js';
 import { filterAndScore, parseQuery } from '../lib/search.js';
 import { toMarkdown, toSelectionMarkdown, toNetscapeHtml } from '../lib/export.js';
@@ -69,8 +69,9 @@ const S = {
   orgTab: 'plan',          // 'plan' | 'clean'
   orgLimit: '200',
   orgIncludeUnsure: false,
-  orgAutoSubs: true,        // 生成计划时按收藏自动派生二级
+  orgAutoSubs: false,       // 仅按方案建档/全新生成时可选派生二级，日常归类严格走受控词表
   orgTree: 'collection',    // 'collection' 按收藏生成 | 'scheme' 用方案的默认分类
+  planFilter: 'all',        // 'all' | 'ready' | 'unsure' | 'skip' | 'blocked'
   splitBusy: false,
   splitProgress: null,         // 每轮条数：'200' | '500' | '1000' | 'all'
   cleanList: null,         // AI 标题洗白建议列表
@@ -81,6 +82,9 @@ const S = {
   dragIds: [],
   recentCodes: (() => {
     try { return JSON.parse(readLocal('guizang_recent_codes', '[]')) || []; } catch { return []; }
+  })(),
+  collapsedCodes: (() => {
+    try { return new Set(JSON.parse(readLocal('guizang_collapsed_codes', '[]')) || []); } catch { return new Set(); }
   })(),
   done: [],                // 刚归入的，做朱砂落印即时反馈
 };
@@ -550,7 +554,21 @@ function renderFilterBar() {
 
 /* ── 书架 + 拖拽归类落点 ───────────────────────── */
 
-function railItem({ code, name, count, own = 0, bad, active, view, iconName, tone, dropKind = '', level = 0, subCount = 0 }) {
+function saveCollapsedCodes() {
+  try { localStorage.setItem('guizang_collapsed_codes', JSON.stringify([...S.collapsedCodes])); } catch {}
+}
+
+function ensureAncestorsExpanded(code) {
+  let cur = S.parentOf[code];
+  let changed = false;
+  for (let guard = 0; cur && guard < 8; guard += 1) {
+    if (S.collapsedCodes.delete(cur)) changed = true;
+    cur = S.parentOf[cur];
+  }
+  if (changed) saveCollapsedCodes();
+}
+
+function railItem({ code, name, count, own = 0, bad, active, view, iconName, tone, dropKind = '', level = 0, subCount = 0, collapsed = false, hasActiveChild = false }) {
   const lead = code
     ? `<span class="rail-num">${esc(code)}</span>`
     : `<span class="rail-icon tone-${tone || 'ink'}">${icon(iconName, 13)}</span>`;
@@ -562,26 +580,50 @@ function railItem({ code, name, count, own = 0, bad, active, view, iconName, ton
   if (bad) bits.push(`${bad} 条失效`);
   const tip = code ? `${code} ${name}（${bits.join('，')}，可拖入归类）` : `${name}（${count} 条）`;
   const dropAttr = dropKind ? ` data-drop-kind="${dropKind}"` : (code ? ` data-drop-code="${esc(code)}"` : '');
+  const foldPill = subCount
+    ? `<span class="rail-fold-pill${hasActiveChild ? ' has-active-child' : ''}" data-fold-code="${esc(code)}" role="button" tabindex="0" aria-expanded="${!collapsed}" title="${collapsed ? '展开' : '折叠'} ${subCount} 个子类">${icon('chevron', 10, 1.8)}<span>${subCount}</span></span>`
+    : '';
   return `<button class="rail-item${active ? ' is-active' : ''}${level > 0 ? ' is-sub' : ''}" data-view="${view}"${dropAttr} title="${esc(tip)}">
     ${lead}
     <span class="rail-name">${esc(name)}</span>
-    ${subCount ? `<span class="rail-sub-mark" title="下含 ${subCount} 个子类">${icon('folder', 10)}${subCount}</span>` : ''}
+    ${foldPill}
     ${bad ? `<span class="rail-bad" title="${bad} 条失效">${bad}</span>` : ''}
     <span class="rail-count${countTone}">${count}</span>
   </button>`;
 }
 
 function wireRailDropTargets() {
+  let springTimer = null;
+  let springCode = '';
+  const cancelSpring = () => {
+    if (springTimer) { clearTimeout(springTimer); springTimer = null; }
+    springCode = '';
+  };
   $('#rail').querySelectorAll('[data-drop-code],[data-drop-kind]').forEach((btn) => {
     btn.addEventListener('dragover', (e) => {
       if (!S.dragIds.length) return;
       e.preventDefault();
       e.dataTransfer.dropEffect = 'move';
       btn.classList.add('is-drop-over');
+      // 拖拽悬停在已折叠父目录上 420ms 自动展开子类（类似 macOS 弹簧文件夹）
+      const code = btn.dataset.dropCode;
+      if (code && S.collapsedCodes.has(code) && springCode !== code) {
+        cancelSpring();
+        springCode = code;
+        springTimer = setTimeout(() => {
+          setBranchCollapsed(code, false);
+          springCode = '';
+          springTimer = null;
+        }, 420);
+      }
     });
-    btn.addEventListener('dragleave', () => btn.classList.remove('is-drop-over'));
+    btn.addEventListener('dragleave', () => {
+      btn.classList.remove('is-drop-over');
+      if (btn.dataset.dropCode === springCode) cancelSpring();
+    });
     btn.addEventListener('drop', async (e) => {
       e.preventDefault();
+      cancelSpring();
       btn.classList.remove('is-drop-over');
       const ids = S.dragIds.slice();
       S.dragIds = [];
@@ -666,7 +708,9 @@ function subChipsHtml(code) {
 function wireSubChips(root) {
   root.querySelectorAll('[data-goto-code]').forEach((btn) => {
     btn.addEventListener('click', () => {
-      S.view = { kind: 'folder', code: btn.dataset.gotoCode };
+      const code = btn.dataset.gotoCode;
+      ensureAncestorsExpanded(code);
+      S.view = { kind: 'folder', code };
       S.selected = null;
       S.drawer = null;
       renderAll();
@@ -681,17 +725,22 @@ function wireSubChips(root) {
  */
 function schemeLine() {
   const cur = (S.schemes || []).find((x) => x.id === S.schemeId) || null;
+  const subFolderCount = Object.keys(S.parentOf).length;
+  let schemePill;
   if (!cur) {
-    return S.folderScheme.length
-      ? `<div class="plan-empty-line">判定类目：现存目录（还没选用方案）</div>`
-      : `<div class="plan-empty-line">还没有可用的分类目录</div>`;
+    schemePill = S.folderScheme.length
+      ? `<button type="button" class="tech-pill is-warn is-link" data-open-opt title="去设置页选用或自定义分类方案">${icon('layers', 11)}<span>现存目录 · 未绑定方案</span></button>`
+      : `<button type="button" class="tech-pill is-dead is-link" data-open-opt title="去设置页选用一套分类方案">${icon('alert', 11)}<span>未选方案 · 点此配置</span></button>`;
+  } else {
+    const defined = (cur.codes || []).length;
+    const extra = anchoredSubs(cur);
+    schemePill = `<button type="button" class="tech-pill is-brand is-link" data-open-opt title="切换或自定义分类方案">${icon('layers', 11)}<span>${esc(cur.name)} · ${defined} 类${extra ? ` + ${extra} 二级` : ''}</span></button>`;
   }
-  const defined = (cur.codes || []).length;
-  const subs = (cur.folders || []).filter((f) => f.parent).length;
-  const extra = anchoredSubs(cur);
-  return `<div class="plan-empty-line">判定类目：<b>${defined}</b> 个（${esc(cur.name)}${
-    subs ? `，含 ${subs} 个二级` : ''
-  }）${extra ? ` + <b>${extra}</b> 个现存二级` : ''}</div>`;
+  const folderPill = `<span class="tech-pill">${icon('folder', 11)}<span>已建目录 ${S.folderScheme.length}${subFolderCount ? `（含 ${subFolderCount} 二级）` : ''}</span></span>`;
+  const modelPill = S.aiReady
+    ? `<button type="button" class="tech-pill is-ok is-link" data-open-opt title="当前已配置模型，点击前往模型设置"><span class="led-dot is-ok"></span><span>模型就绪${S.settings && S.settings.model ? ' · ' + esc(S.settings.model) : ''}</span></button>`
+    : `<button type="button" class="tech-pill is-link" data-open-opt title="未配置模型，当前使用本地关键词规则；点击去设置"><span class="led-dot"></span><span>离线规则模式</span></button>`;
+  return `<div class="org-telemetry">${schemePill}${folderPill}<span class="org-telemetry-gap"></span>${modelPill}</div>`;
 }
 
 /** 现存目录里，祖先落在当前方案编码中的二级个数（判定池会把它算进去） */
@@ -708,6 +757,36 @@ function anchoredSubs(cur) {
     if (c && known.has(c)) n += 1;
   }
   return n;
+}
+
+function syncFoldAllBtn() {
+  const btn = $('#btnFoldAll');
+  if (!btn) return;
+  const branches = [...$('#rail').querySelectorAll('[data-branch]')];
+  if (!branches.length) return;
+  const allCollapsed = branches.every((el) => S.collapsedCodes.has(el.dataset.branch));
+  btn.classList.toggle('is-all-collapsed', allCollapsed);
+  btn.title = allCollapsed ? '展开全部分类子类' : '折叠全部分类子类';
+  btn.innerHTML = `${icon('chevronDown', 10, 1.8)}<span>${allCollapsed ? '全部展开' : '全部折叠'}</span>`;
+}
+
+function setBranchCollapsed(code, collapsed) {
+  if (collapsed) S.collapsedCodes.add(code);
+  else S.collapsedCodes.delete(code);
+  saveCollapsedCodes();
+  const branch = $(`#rail [data-branch="${CSS.escape(code)}"]`);
+  if (branch) {
+    branch.classList.toggle('is-collapsed', collapsed);
+    const children = branch.querySelector('.rail-children');
+    if (children) children.setAttribute('aria-hidden', String(collapsed));
+    const pill = branch.querySelector('[data-fold-code]');
+    if (pill) {
+      pill.setAttribute('aria-expanded', String(!collapsed));
+      const count = pill.querySelector('span')?.textContent || '';
+      pill.title = `${collapsed ? '展开' : '折叠'} ${count} 个子类`;
+    }
+  }
+  syncFoldAllBtn();
 }
 
 function renderRail() {
@@ -750,16 +829,54 @@ function renderRail() {
     active: S.view.kind === 'usage',
   }));
 
-  if (S.folderScheme.length) parts.push('<div class="section-label">分类<span class="section-aside">可拖入</span></div>');
-  // 拆出来的二级按父子关系缩进挂在下面，而不是按编码顺序散在列表末尾
+  // 拆出来的二级按父子关系折叠挂在父类下面，支持单独折叠与一键全部折叠
   const kids = childCounts();
-  for (const f of treeOrder(S.folderScheme, S.parentOf)) {
-    parts.push(railItem({
-      code: f.code, name: f.name, count: aggByCode[f.code] || 0, own: byCode[f.code] || 0,
-      bad: badByCode[f.code] || 0, view: f.code, level: f.level,
-      subCount: kids.get(f.code) || 0,
-      active: S.view.kind === 'folder' && S.view.code === f.code,
-    }));
+  const ordered = treeOrder(S.folderScheme, S.parentOf);
+  const parentCodesWithKids = ordered.filter((f) => f.level === 0 && (kids.get(f.code) || 0) > 0).map((f) => f.code);
+  const allCollapsed = parentCodesWithKids.length > 0 && parentCodesWithKids.every((code) => S.collapsedCodes.has(code));
+
+  if (S.folderScheme.length) {
+    parts.push(`<div class="section-label">分类${
+      parentCodesWithKids.length
+        ? `<button type="button" class="rail-fold-all${allCollapsed ? ' is-all-collapsed' : ''}" id="btnFoldAll" title="${allCollapsed ? '展开全部分类子类' : '折叠全部分类子类'}">${icon('chevronDown', 10, 1.8)}<span>${allCollapsed ? '全部展开' : '全部折叠'}</span></button>`
+        : '<span class="section-aside">可拖入</span>'
+    }</div>`);
+  }
+
+  for (let i = 0; i < ordered.length; i += 1) {
+    const f = ordered[i];
+    const subCount = kids.get(f.code) || 0;
+    if (f.level === 0 && subCount > 0) {
+      const descendants = [];
+      while (i + 1 < ordered.length && ordered[i + 1].level > 0) {
+        i += 1;
+        descendants.push(ordered[i]);
+      }
+      const collapsed = S.collapsedCodes.has(f.code);
+      const hasActiveChild = S.view.kind === 'folder' && descendants.some((d) => d.code === S.view.code);
+      const parentHtml = railItem({
+        code: f.code, name: f.name, count: aggByCode[f.code] || 0, own: byCode[f.code] || 0,
+        bad: badByCode[f.code] || 0, view: f.code, level: 0, subCount, collapsed, hasActiveChild,
+        active: S.view.kind === 'folder' && S.view.code === f.code,
+      });
+      const kidsHtml = descendants.map((d) => railItem({
+        code: d.code, name: d.name, count: aggByCode[d.code] || 0, own: byCode[d.code] || 0,
+        bad: badByCode[d.code] || 0, view: d.code, level: d.level, subCount: 0,
+        active: S.view.kind === 'folder' && S.view.code === d.code,
+      })).join('');
+      parts.push(`<div class="rail-branch${collapsed ? ' is-collapsed' : ''}" data-branch="${esc(f.code)}">
+        ${parentHtml}
+        <div class="rail-children" aria-hidden="${collapsed}">
+          <div class="rail-children-inner">${kidsHtml}</div>
+        </div>
+      </div>`);
+    } else {
+      parts.push(railItem({
+        code: f.code, name: f.name, count: aggByCode[f.code] || 0, own: byCode[f.code] || 0,
+        bad: badByCode[f.code] || 0, view: f.code, level: f.level, subCount: 0,
+        active: S.view.kind === 'folder' && S.view.code === f.code,
+      }));
+    }
   }
 
   const allTags = collectAllTags(S.meta);
@@ -772,8 +889,35 @@ function renderRail() {
   }
 
   $('#rail').innerHTML = parts.join('');
+
+  $('#btnFoldAll')?.addEventListener('click', () => {
+    const branches = [...$('#rail').querySelectorAll('[data-branch]')];
+    const nextCollapse = !branches.every((el) => S.collapsedCodes.has(el.dataset.branch));
+    branches.forEach((el) => setBranchCollapsed(el.dataset.branch, nextCollapse));
+  });
+
+  $('#rail').querySelectorAll('[data-fold-code]').forEach((pill) => {
+    const toggle = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const code = pill.dataset.foldCode;
+      setBranchCollapsed(code, !S.collapsedCodes.has(code));
+    };
+    pill.addEventListener('click', toggle);
+    pill.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') toggle(e);
+    });
+  });
+
   $('#rail').querySelectorAll('[data-view]').forEach((btn) => {
-    btn.addEventListener('click', () => {
+    btn.addEventListener('dblclick', () => {
+      const foldPill = btn.querySelector('[data-fold-code]');
+      if (!foldPill) return;
+      const code = foldPill.dataset.foldCode;
+      setBranchCollapsed(code, !S.collapsedCodes.has(code));
+    });
+    btn.addEventListener('click', (e) => {
+      if (e.target.closest('[data-fold-code]')) return;
       const v = btn.dataset.view;
       if (v === 'organize') {
         S.view = { kind: 'organize' };
@@ -785,6 +929,7 @@ function renderRail() {
         return;
       }
       S.view = BUILTIN_VIEWS.includes(v) ? { kind: v } : { kind: 'folder', code: v };
+      if (S.view.kind === 'folder') ensureAncestorsExpanded(S.view.code);
       S.selected = null;
       S.drawer = null;
       $('.rail')?.classList.remove('is-mobile-open');
@@ -829,15 +974,21 @@ function newestCheck() {
 function spectrumHtml() {
   if (S.view.kind !== 'all' || S.q.trim() || !S.items.length) return '';
   const total = S.items.length;
-  const byCode = new Map();
+  const aggByCode = new Map();
   let inboxN = 0;
   for (const it of S.items) {
-    if (!it.code) inboxN += 1;
-    else byCode.set(it.code, (byCode.get(it.code) || 0) + 1);
+    if (!it.code) { inboxN += 1; continue; }
+    let cur = it.code;
+    for (let guard = 0; cur && guard < 8; guard += 1) {
+      aggByCode.set(cur, (aggByCode.get(cur) || 0) + 1);
+      cur = S.parentOf[cur];
+    }
   }
+  // 按顶层整枝绘制光谱条，拆出二级后与左栏整枝计数保持一致，不碎成零散色块
   const segs = [];
-  for (const f of S.folderScheme) {
-    const n = byCode.get(f.code) || 0;
+  for (const f of treeOrder(S.folderScheme, S.parentOf)) {
+    if (f.level > 0) continue;
+    const n = aggByCode.get(f.code) || 0;
     if (!n) continue;
     segs.push({ code: f.code, name: `${f.code} ${f.name}`, count: n, color: colorOfCode(f.code), view: f.code });
   }
@@ -894,7 +1045,18 @@ function renderHead() {
   const movedReady = S.view.kind === 'moved' ? rows.filter((it) => S.health[it.id]?.finalUrl) : [];
   const canTriage = (S.view.kind === 'inbox' || S.view.kind === 'pending') && rows.length > 0;
 
-  $('#listHead').innerHTML = `
+  const walNotice = S.wal && S.wal.count
+    ? `<div class="alert-card is-dead" style="margin:10px 24px 0;width:auto">
+        <span class="alert-card-ico">${icon('alert', 14)}</span>
+        <div class="alert-card-body">
+          <div class="alert-card-title">上次提交意外中断</div>
+          <div>预写日志记录了 <b>${S.wal.count}</b> 条移动未完成收尾，可前往整理工作台按记录回滚或清理。</div>
+        </div>
+        <button type="button" class="btn btn-line btn-sm" id="btnGotoWal">${icon('undo', 12)}<span>前往处理</span></button>
+      </div>`
+    : '';
+
+  $('#listHead').innerHTML = walNotice + `
     <div class="list-head">
     <div class="crumbs">
       <span class="crumb-dim">书库</span>
@@ -959,22 +1121,21 @@ function renderHead() {
     btn.addEventListener('click', () => setViewMode(btn.dataset.viewMode));
   });
 
+  $('#btnGotoWal')?.addEventListener('click', () => openOrganize('plan'));
   $('#btnTriage')?.addEventListener('click', () => triage.open(rows));
   $('#btnSplitFolder')?.addEventListener('click', async (e) => {
     const btn = e.currentTarget;
     const code = S.view.kind === 'folder' ? S.view.code : '';
     btn.disabled = true;
-    btn.innerHTML = `${icon('folder', 13)}<span>正在拆分…</span>`;
+    btn.innerHTML = `${icon('folder', 13)}<span>正在生成拆分计划…</span>`;
     try {
       const r = await send('organize:splitFolder', { code });
-      // 只有「真建了目录或真搬了条目」才算成功；两者都 0 时别宣布完成
-      if (!r.created && !r.moved) {
-        throw new Error('没拆成：一个子目录都没建出来，条目也没动。先确认模型给出了子类名，再试一次');
+      if (!r || !r.ops) {
+        throw new Error('没生成拆分计划：模型未给出可用的子类分配，请重试');
       }
-      toast(`已拆成 ${r.created} 个二级目录，移动 ${r.moved} 条${
-        r.failed ? `，${r.failed} 条没搬成` : ''
-      }；可在「整理」里撤销`);
-      await load();
+      if (r.plan) S.plan = r.plan;
+      toast(`已生成 ${r.subs} 个二级目录的拆分计划（${r.ops} 条），请审阅确认后执行`);
+      openOrganize('plan');
     } catch (err) {
       toast(err.message);
       btn.disabled = false;
@@ -1092,6 +1253,9 @@ async function analyzeHistoryNow() {
 function syncSelectionInPlace() {
   const list = $('#list');
   if (!list) return;
+  const hasSel = S.sel.size > 0;
+  list.classList.toggle('has-sel', hasSel);
+  $('#colHeadHost')?.classList.toggle('has-sel', hasSel);
   list.querySelectorAll('[data-id]').forEach((el) => {
     const id = el.dataset.id;
     el.classList.toggle('row-active', S.selected === id);
@@ -1117,7 +1281,7 @@ function syncSelectionInPlace() {
 /* ── 列表行 & 藏书票卡片渲染 ───────────────────── */
 
 function rowHtml(it, opts = {}) {
-  const { showCat = false, dupRole = '' } = opts;
+  const { showCat = false, dupRole = '', rowIdx = 0 } = opts;
   const h = S.health[it.id];
   const m = S.meta[it.id] || {};
   const pend = S.pending[it.id];
@@ -1125,6 +1289,7 @@ function rowHtml(it, opts = {}) {
   const active = S.selected === it.id;
   const checked = S.sel.has(it.id);
   const moved = h && h.status === 'moved' && h.finalUrl;
+  const idxText = rowIdx > 0 ? String(rowIdx).padStart(2, '0') : '';
   const catBadge = showCat
     ? `<span class="row-cat tnum">${it.code ? `${esc(it.code)} ${esc(folderName(it.code))}` : '待归类'}</span>`
     : '';
@@ -1144,8 +1309,11 @@ function rowHtml(it, opts = {}) {
     : '';
 
   return `<div class="row${active ? ' row-active' : ''}" data-id="${esc(it.id)}" draggable="true" tabindex="0">
-    <span class="cb${checked ? ' cb-on' : ''}" data-check="${esc(it.id)}" role="checkbox" tabindex="0"
-      aria-checked="${checked}">${checked ? icon('check', 10, 2.2) : ''}</span>
+    <span class="row-lead">
+      <span class="row-idx tnum" aria-hidden="true">${idxText}</span>
+      <span class="cb${checked ? ' cb-on' : ''}" data-check="${esc(it.id)}" role="checkbox" tabindex="0"
+        aria-checked="${checked}">${checked ? icon('check', 10, 2.2) : ''}</span>
+    </span>
     ${faviconMark(it.host, dead, it.url)}
     <div class="row-main">
       <div class="row-title" data-title-host="${esc(it.id)}">${m.star ? '<span class="row-star" title="星标精选">★</span>' : ''}${highlightHtml(it.title)}</div>
@@ -1256,8 +1424,28 @@ function renderList() {
       list.innerHTML = `<div class="empty">
         <div class="empty-mark">${icon('search', 22)}</div>
         <div class="empty-title">未寻得与「${esc(S.q)}」相符之藏卷</div>
-        <div class="empty-hint">支持中文拼音首字母（如 <code>rgzn</code>）、<code>#标签</code>、<code>domain:github.com</code>、<code>status:dead</code>，按 <kbd>Esc</kbd> 清空检索。</div>
+        <div class="empty-hint">试试点击下方快捷检索语法，或按 <kbd>Esc</kbd> 清空。</div>
+        <div class="empty-chips">
+          <button type="button" class="empty-chip" data-try-q="is:star">${icon('star', 11)}<span>is:star</span></button>
+          <button type="button" class="empty-chip" data-try-q="is:unread">${icon('bookmark', 11)}<span>is:unread</span></button>
+          <button type="button" class="empty-chip" data-try-q="status:dead">${icon('alert', 11)}<span>status:dead</span></button>
+          <button type="button" class="empty-chip" data-try-q="">${icon('x', 11)}<span>清空检索</span></button>
+        </div>
       </div>`;
+      list.querySelectorAll('[data-try-q]').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          S.q = btn.dataset.tryQ;
+          const qInput = $('#q');
+          if (qInput) qInput.value = S.q;
+          const qClear = $('#qClear');
+          const qKbd = $('#qKbd');
+          if (qClear) qClear.hidden = !S.q;
+          if (qKbd) qKbd.hidden = Boolean(S.q);
+          renderFilterBar();
+          renderHead();
+          renderList();
+        });
+      });
     } else if (S.view.kind === 'dead') {
       list.innerHTML = `<div class="empty">
         <div class="empty-mark tone-ok">${icon('check', 22)}</div>
@@ -1318,10 +1506,10 @@ function renderList() {
         <span class="group-name">${esc(g.host || g.key)}</span>
         <span class="group-count">${g.items.length} 条重复</span>
         <span class="group-rule"></span>
-      </div>` + wrapItems(g.items.map((it) => itemRenderer(it, { showCat: true, dupRole: it.id === g.keepId ? 'keep' : 'dup' })).join(''))
+      </div>` + wrapItems(g.items.map((it, i) => itemRenderer(it, { showCat: true, dupRole: it.id === g.keepId ? 'keep' : 'dup', rowIdx: i + 1 })).join(''))
     ).join('');
   } else if (flat) {
-    body = wrapItems(shown.map((it) => itemRenderer(it, { showCat })).join(''));
+    body = wrapItems(shown.map((it, i) => itemRenderer(it, { showCat, rowIdx: i + 1 })).join(''));
   } else {
     const groups = groupByCode(shown, hasSubs ? treeOrder(S.folderScheme, S.parentOf) : S.folderScheme);
     body = groups.map((g) => {
@@ -1332,16 +1520,22 @@ function renderList() {
         <span class="group-count">${g.rows.length} 条</span>
         <span class="group-rule"></span>
         ${bad ? `<span class="group-bad">${bad} 条失效</span>` : ''}
-      </div>` + wrapItems(g.rows.map((it) => itemRenderer(it, { showCat: false })).join(''));
+      </div>` + wrapItems(g.rows.map((it, i) => itemRenderer(it, { showCat: false, rowIdx: i + 1 })).join(''));
     }).join('');
   }
 
   const allChecked = shown.length > 0 && shown.every((it) => S.sel.has(it.id));
+  const hasSel = S.sel.size > 0;
+  list.classList.toggle('has-sel', hasSel);
   if (colHost) {
+    colHost.classList.toggle('has-sel', hasSel);
     colHost.innerHTML = isCards
       ? ''
       : `<div class="col-head">
-          <span><span class="cb${allChecked ? ' cb-on' : ''}" id="cbAll" role="checkbox" tabindex="0" aria-checked="${allChecked}">${allChecked ? icon('check', 10, 2.2) : ''}</span></span>
+          <span class="row-lead" title="悬停或点击全选当前列表">
+            <span class="row-idx" aria-hidden="true">#</span>
+            <span class="cb${allChecked ? ' cb-on' : ''}" id="cbAll" role="checkbox" tabindex="0" aria-checked="${allChecked}">${allChecked ? icon('check', 10, 2.2) : ''}</span>
+          </span>
           <span></span><span>书签</span><span class="col-c1">建议</span><span class="col-c2">状态</span><span class="col-c3">添加</span>
         </div>`;
   }
@@ -1844,18 +2038,26 @@ function journalHistoryHtml() {
   const list = S.journals || [];
   if (!list.length) return '';
   return `<div class="journal-list">
-    <div class="journal-head">最近整理与归类日志（可撤销）</div>
-    ${list.map((j) => `<div class="journal-item">
-      <div class="journal-item-meta">
-        <span>移动 <b>${j.applied || j.count || 0}</b> 条${
-          j.removedFolders ? `，清理 <b>${j.removedFolders}</b> 个空目录` : ''
-        }${j.scope === 'all' ? '（全库）' : j.scope === 'ai' ? '（AI 建议）' : j.scope === 'folder' ? '（按目录拆分）' : '（待归类）'}</span>
-        <span class="journal-item-when">${relTime(j.at)}</span>
-      </div>
-      ${j.undoneAt
-        ? '<span class="journal-done">已撤销</span>'
-        : `<button type="button" class="btn btn-line btn-sm" data-undo-id="${esc(j.id)}">撤销</button>`}
-    </div>`).join('')}
+    <div class="journal-head">${icon('history', 13)}<span>最近操作日志（支持一键撤销）</span></div>
+    ${list.map((j) => {
+      const scopeLabel = j.scope === 'all' ? '全库巡检'
+        : j.scope === 'ai' ? 'AI 建议'
+        : j.scope === 'folder' ? '目录拆分'
+        : j.scope === 'scheme' ? '按方案建档' : '待归类';
+      const ico = j.scope === 'ai' ? 'sparkle' : j.scope === 'folder' ? 'branch' : 'folder';
+      return `<div class="journal-item${j.undoneAt ? ' is-undone' : ''}">
+        <span class="journal-ico">${icon(ico, 14)}</span>
+        <div class="journal-item-meta">
+          <span>移动 <b class="tnum">${j.applied || j.count || 0}</b> 条${
+            j.removedFolders ? ` · 清理 <b class="tnum">${j.removedFolders}</b> 个空目录` : ''
+          }<span class="journal-scope-pill">${scopeLabel}</span></span>
+          <span class="journal-item-when">${relTime(j.at)}</span>
+        </div>
+        ${j.undoneAt
+          ? '<span class="tech-pill">已撤销</span>'
+          : `<button type="button" class="btn btn-line btn-sm" data-undo-id="${esc(j.id)}">${icon('undo', 12)}<span>撤销</span></button>`}
+      </div>`;
+    }).join('')}
   </div>`;
 }
 
@@ -1867,7 +2069,7 @@ function startPlanTick() {
   if (planTick) return;
   planTick = setInterval(async () => {
     if (!S.planBusy) { stopPlanTick(); return; }
-    renderInspector();
+    renderOrgArea();
     if (Date.now() - (S.planPollAt || 0) < 5000) return;
     S.planPollAt = Date.now();
     const r = await send('organize:load').catch(() => null);
@@ -1876,272 +2078,465 @@ function startPlanTick() {
       S.planBusy = false;
       stopPlanTick();
       toast('生成中断了：后台已经不在运行，也没有拿到计划，请重新点一次生成');
-      renderInspector();
+      renderOrgArea();
     }
   }, 1000);
+}
+
+function pipelineStepsHtml(steps, activeIdx) {
+  return `<div class="pipeline-steps" style="--steps:${steps.length}">
+    ${steps.map((st, idx) => {
+      const done = idx < activeIdx;
+      const active = idx === activeIdx;
+      return `<div class="pipeline-step${done ? ' is-done' : active ? ' is-active' : ''}">
+        <span class="pipeline-dot">${done ? icon('check', 11, 2.2) : (idx + 1)}</span>
+        <div>
+          <span class="pipeline-step-name">${esc(st.name)}</span>
+          <span class="pipeline-step-sub">${esc(st.sub)}</span>
+        </div>
+      </div>`;
+    }).join('')}
+  </div>`;
 }
 
 function organizePanel() {
   const plan = S.plan;
   const busy = S.planBusy;
   const isClean = S.orgTab === 'clean';
+  const c = counts();
+  const curScheme = (S.schemes || []).find((x) => x.id === S.schemeId) || null;
 
   const head = `<div class="insp-head">
-      <div class="insp-head-bar">
-        <div class="insp-kicker">${icon(isClean ? 'wand' : 'folder', 12)} ${isClean ? '标题洗白' : '整理计划'}</div>
-        <div class="insp-head-tools">
-          <button class="ibtn" data-close title="收起">${icon('x', 13)}</button>
+      <div class="org-masthead">
+        <div class="org-masthead-left">
+          <div class="insp-kicker" style="margin-bottom:0">${icon(isClean ? 'wand' : 'folder', 12)} ${isClean ? '标题洗白工作台' : '整理与归档工作台'}</div>
+          <h2 class="org-masthead-title">${isClean
+            ? (S.cleanBusy ? '正在扫描噪声标题' : S.cleanList ? `发现 ${S.cleanList.length} 条可优化标题` : '标题规范化')
+            : (S.applyBusy ? '正在提交整理计划' : busy ? '正在生成整理计划' : plan ? `审阅 ${plan.ops.length} 条归档计划` : '配置整理计划')
+          }</h2>
         </div>
-      </div>
-      <h2 class="insp-title">${isClean
-        ? (S.cleanBusy ? '正在扫描噪声标题' : S.cleanList ? `${S.cleanList.length} 条可洗白` : '标题规范化')
-        : (S.applyBusy ? '正在整理' : busy ? '正在生成' : plan ? plan.ops.length + ' 条待整理' : '还没有计划')
-      }</h2>
-      <div class="seg-tabs insp-seg">
-        <button type="button" class="seg-tab${!isClean ? ' is-active' : ''}" data-org-tab="plan">归位整理</button>
-        <button type="button" class="seg-tab${isClean ? ' is-active' : ''}" data-org-tab="clean">标题洗白</button>
+        <div class="org-masthead-right">
+          <div class="seg-tabs">
+            <button type="button" class="seg-tab${!isClean ? ' is-active' : ''}" data-org-tab="plan">归位整理</button>
+            <button type="button" class="seg-tab${isClean ? ' is-active' : ''}" data-org-tab="clean">标题洗白</button>
+          </div>
+          <button class="ibtn" data-close title="返回全部收藏">${icon('x', 14)}</button>
+        </div>
       </div>
     </div>`;
 
   if (isClean) {
     if (S.cleanBusy) {
-      return head + `<div class="insp-body"><div class="plan-busy">
-        <div class="plan-busy-line">正在识别未读角标、裸网址与冗余后缀…</div>
-        <div class="scan-track"><div class="scan-fill" style="width:45%"></div></div>
+      return head + `<div class="insp-body"><div class="pipeline-card" style="margin-top:14px">
+        ${pipelineStepsHtml([
+          { name: '采集标题', sub: '读取当前视图' },
+          { name: '模式识别', sub: '角标与冗余后缀' },
+          { name: '生成对照', sub: '待人工逐条确认' },
+        ], 1)}
+        <div class="scan-track"><div class="scan-fill" style="width:52%"></div></div>
       </div></div>`;
     }
     const list = S.cleanList;
     if (!list) {
       return head + `<div class="insp-body"><div class="plan-empty">
-        <div class="plan-empty-line">把杂乱标题洗成干净可读的书目名</div>
-        <div class="plan-empty-hint">自动剔除 <code>(3)</code> 未读角标、裸域名后缀或乱码标题；配了模型时还可结合页面摘要精修，逐条确认后才改。</div>
-        <button type="button" class="btn btn-primary btn-md" data-run-clean>${icon('wand', 13)}<span>扫描当前视图噪声标题</span></button>
+        <div class="org-card-grid">
+          <div class="org-card is-active" style="cursor:default">
+            <div class="org-card-top"><span class="org-card-ico">${icon('wand', 14)}</span><span class="org-card-badge">规则</span></div>
+            <div class="org-card-title">剔除未读角标</div>
+            <div class="org-card-desc">清理如 (3)、[12] 等动态消息计数前缀。</div>
+          </div>
+          <div class="org-card" style="cursor:default">
+            <div class="org-card-top"><span class="org-card-ico">${icon('link', 14)}</span><span class="org-card-badge">规范</span></div>
+            <div class="org-card-title">修剪冗余后缀</div>
+            <div class="org-card-desc">去除裸网址、重复站点名与乱码标题。</div>
+          </div>
+          <div class="org-card" style="cursor:default">
+            <div class="org-card-top"><span class="org-card-ico">${icon('shield', 14)}</span><span class="org-card-badge">可控</span></div>
+            <div class="org-card-title">逐条对照确认</div>
+            <div class="org-card-desc">展示原/新标题差异，点击应用并支持撤销。</div>
+          </div>
+        </div>
+        <div class="org-cta-bar">
+          <button type="button" class="btn btn-primary btn-md" data-run-clean>${icon('wand', 14)}<span>扫描噪声标题</span></button>
+          <span class="org-cta-note">${icon('info', 12)}<span>每次最多扫描 40 条书签，不会自动修改</span></span>
+        </div>
       </div></div>`;
     }
     if (!list.length) {
       return head + `<div class="insp-body"><div class="plan-empty">
-        <div class="plan-empty-line">当前视图标题都很干净</div>
-        <div class="plan-empty-hint">未发现需要清洗的未读角标或冗余后缀。</div>
-        <button type="button" class="btn btn-line btn-sm" data-run-clean>重新扫描</button>
+        <div class="empty" style="padding:28px 0">
+          <div class="empty-mark tone-ok">${icon('checkCircle', 24)}</div>
+          <div class="empty-title">当前视图标题都很规范</div>
+          <div class="empty-hint">未发现明显的未读角标、裸网址或冗余后缀。</div>
+        </div>
+        <button type="button" class="btn btn-line btn-sm" data-run-clean>${icon('refresh', 12)}<span>重新扫描</span></button>
       </div></div>`;
     }
     return head + `<div class="insp-body">
-      ${list.map((c) => `<div class="clean-row">
-        <div class="clean-old">${esc(c.from)}</div>
-        <div class="clean-new">${esc(c.to)}</div>
+      ${list.map((cItem) => `<div class="clean-row">
+        <div class="clean-diff-line"><span class="clean-diff-tag is-old">原</span><div class="clean-old">${esc(cItem.from)}</div></div>
+        <div class="clean-diff-line"><span class="clean-diff-tag is-new">新</span><div class="clean-new">${esc(cItem.to)}</div></div>
         <div class="clean-acts">
-          <button type="button" class="btn btn-primary btn-sm" data-apply-clean="${esc(c.id)}">应用</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-drop-clean="${esc(c.id)}">忽略</button>
+          <button type="button" class="btn btn-primary btn-sm" data-apply-clean="${esc(cItem.id)}">${icon('check', 11)}<span>应用</span></button>
+          <button type="button" class="btn btn-ghost btn-sm" data-drop-clean="${esc(cItem.id)}">${icon('x', 11)}<span>忽略</span></button>
         </div>
       </div>`).join('')}
     </div>
     <div class="insp-foot plan-foot">
       <div class="plan-foot-actions">
-        <button type="button" class="btn btn-primary btn-sm" data-apply-clean-all>应用全部 ${list.length} 条</button>
-        <button type="button" class="btn btn-ghost btn-sm" data-run-clean>重扫</button>
+        <button type="button" class="btn btn-primary btn-sm" data-apply-clean-all>${icon('check', 12)}<span>应用全部 ${list.length} 条</span></button>
+        <button type="button" class="btn btn-ghost btn-sm" data-run-clean>${icon('refresh', 12)}<span>重扫</span></button>
       </div>
     </div>`;
   }
 
   if (S.applyBusy) {
     const ap = S.applyProgress || { done: 0, total: 0 };
-    const pct = ap.total ? Math.round((ap.done / ap.total) * 100) : 6;
+    const pct = ap.total ? Math.round((ap.done / ap.total) * 100) : 8;
+    const stepIdx = ap.done >= ap.total && ap.total > 0 ? 2 : 1;
     return head + `<div class="insp-body">
-      <div class="plan-busy">
-        <div class="plan-busy-line">正在移动 ${ap.done}/${ap.total || '…'}</div>
+      <div class="pipeline-card" style="margin-top:14px">
+        ${pipelineStepsHtml([
+          { name: '备份与校验', sub: '整树快照 + 冲突检查' },
+          { name: '执行移动', sub: `${ap.done}/${ap.total || '…'} 条` },
+          { name: '落盘日志', sub: '写入撤销记录' },
+        ], stepIdx)}
         <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
-        <button class="btn btn-line btn-sm" data-stop style="margin-top:12px">停止</button>
+        <div class="pipeline-foot">
+          <div class="pipeline-telemetry">
+            <span class="tech-pill is-brand"><span class="led-dot is-brand"></span><span>已完成 ${ap.done} / ${ap.total || '…'}</span></span>
+            <span class="tech-pill tnum">${pct}%</span>
+          </div>
+          <button class="btn btn-line btn-sm" data-stop>${icon('x', 12)}<span>停止</span></button>
+        </div>
       </div>
     </div>`;
   }
 
   if (busy) {
     const pr = S.planProgress || { stage: 'preselect', done: 0, total: 0 };
-    const pct = pr.total ? Math.round((pr.done / pr.total) * 100) : 6;
+    const pct = pr.total ? Math.round((pr.done / pr.total) * 100) : 8;
     const waited = S.planStartedAt ? Math.max(0, Math.round((Date.now() - S.planStartedAt) / 1000)) : 0;
     const batchWaited = pr.batchAt ? Math.max(0, Math.round((Date.now() - pr.batchAt) / 1000)) : 0;
-    const perBatch = pr.batchSize || 0;
-    // 把「本轮总数」和「每批条数」分开写：193 是本轮要判的总条数，一批只有 24 条
-    const stageText = pr.stage === 'model' ? '模型正在判断'
-      : pr.stage === 'subs' ? '正在按收藏派生二级'
-        : '正在预筛';
-    const batchLine = pr.stage === 'subs'
-      ? `第 ${pr.done || 0}/${pr.total || '…'} 个一级类目（≥6 条的才派生）`
-      : pr.stage === 'model' && pr.batch && pr.batches
-        ? `第 ${pr.batch}/${pr.batches} 批（${perBatch ? `每批 ${perBatch} 条，` : ''}需模型判断 ${pr.total || '…'} 条）· 本批已等 ${batchWaited} 秒`
-        : '正在预筛书签';
-    const scopeLine = pr.candidates
-      ? `本轮候选 ${pr.candidates} 条，其中 ${pr.total || '…'} 条本地没把握、需要模型判断`
-      : '';
-    const slowHint = pr.stage === 'model' && batchWaited > 90
-      ? '（单批上限 120 秒，超时会自动重试一次）'
-      : '';
+    const activeIdx = pr.stage === 'subs' ? 3 : pr.stage === 'model' ? 2 : pr.candidates ? 1 : 0;
+    const steps = [
+      { name: '预筛范围', sub: pr.candidates ? `${pr.candidates} 条候选` : '拉取书签' },
+      { name: '本地规则', sub: '偏好 + 关键词' },
+      { name: '模型推理', sub: pr.batch && pr.batches ? `第 ${pr.batch}/${pr.batches} 批` : '低把握送审' },
+      { name: '派生二级', sub: S.orgAutoSubs ? '≥6 条聚类' : '按需跳过' },
+    ];
     return head + `<div class="insp-body">
-      <div class="plan-busy">
-        <div class="plan-busy-line">${stageText} ${pr.done}/${pr.total || '…'}</div>
+      <div class="pipeline-card" style="margin-top:14px">
+        ${pipelineStepsHtml(steps, activeIdx)}
         <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
-        <div class="plan-empty-hint" style="margin-top:10px">${scopeLine}</div>
-        <div class="plan-empty-hint">${batchLine}${slowHint}</div>
-        <div class="plan-empty-hint">已处理 ${pr.done}/${pr.total || '…'} 条，整轮已用 ${waited} 秒。中途停止会保留已拿到的建议。</div>
-        <button class="btn btn-line btn-sm" data-stop-plan style="margin-top:10px">停止生成</button>
+        <div class="pipeline-foot">
+          <div class="pipeline-telemetry">
+            <span class="tech-pill is-brand"><span class="led-dot is-brand"></span><span>进度 ${pr.done}/${pr.total || '…'}</span></span>
+            ${pr.batchSize ? `<span class="tech-pill">每批 ${pr.batchSize} 条</span>` : ''}
+            ${pr.stage === 'model' ? `<span class="tech-pill${batchWaited > 90 ? ' is-warn' : ''}">本批 ${batchWaited}s${batchWaited > 90 ? ' · 超时将重试' : ''}</span>` : ''}
+            <span class="tech-pill">${icon('clock', 11)}<span>总用时 ${waited}s</span></span>
+          </div>
+          <button class="btn btn-line btn-sm" data-stop-plan>${icon('x', 12)}<span>停止并保留已得建议</span></button>
+        </div>
       </div>
     </div>`;
   }
 
   if (!plan) {
-    // 按方案建档不需要先建目录（执行时才建），判定依据是「选没选方案」
-    const ready = S.orgScope === 'scheme' ? Boolean(S.schemeId) : S.folderScheme.length > 0;
+    // 方案是源、目录是投影：只要选用了方案或已有分类目录，所有范围均可生成计划，缺目录提交时按需建
+    const ready = Boolean(S.schemeId) || S.folderScheme.length > 0;
+    const isFreshMode = S.orgScope === 'scheme' && S.orgTree === 'fresh';
+    const schemeMissing = S.orgScope === 'scheme' && !(S.settings && S.settings.schemeId);
     return head + `<div class="insp-body">
       <div class="plan-empty">
-        ${S.wal && S.wal.count ? `<div class="scheme-warn">
-          上次提交中断了：意图里记录了 ${S.wal.count} 条移动，但没有写完撤销日志。<br>
-          <button type="button" class="btn btn-line btn-sm" data-wal-rollback style="margin-top:8px">按记录回滚</button>
-          <button type="button" class="btn btn-ghost btn-sm" data-wal-clear style="margin-top:8px">就这样，清掉记录</button>
+        ${S.wal && S.wal.count ? `<div class="alert-card is-dead">
+          <span class="alert-card-ico">${icon('alert', 14)}</span>
+          <div class="alert-card-body">
+            <div class="alert-card-title">检测到上次提交中断（${S.wal.count} 条移动）</div>
+            <div>意图记录未写完撤销日志，你可以按记录安全回滚到原位置，或清除这条中断状态。</div>
+            <div class="alert-card-acts">
+              <button type="button" class="btn btn-line btn-sm" data-wal-rollback>${icon('undo', 12)}<span>按记录回滚</span></button>
+              <button type="button" class="btn btn-ghost btn-sm" data-wal-clear>忽略并清除</button>
+            </div>
+          </div>
         </div>` : ''}
         ${schemeLine()}
-        <div class="plan-empty-line" style="margin-top:2px">已建目录：<b>${S.folderScheme.length}</b> 个${
-          Object.keys(S.parentOf).length ? `（其中 ${Object.keys(S.parentOf).length} 个二级）` : ''
-        }</div>
-        <div class="seg-tabs">
-          <button type="button" class="seg-tab${S.orgScope === 'inbox' ? ' is-active' : ''}" data-org-scope="inbox">仅待归类</button>
-          <button type="button" class="seg-tab${S.orgScope === 'all' ? ' is-active' : ''}" data-org-scope="all">全库巡检错放</button>
-          <button type="button" class="seg-tab${S.orgScope === 'scheme' ? ' is-active' : ''}" data-org-scope="scheme">按方案建档</button>
+
+        <div class="org-section-cap"><span>1 · 选择整理范围</span></div>
+        <div class="org-card-grid">
+          <button type="button" class="org-card${S.orgScope === 'inbox' ? ' is-active' : ''}" data-org-scope="inbox">
+            <div class="org-card-top">
+              <span class="org-card-ico">${icon('inbox', 15)}</span>
+              <span class="org-card-idx">01</span>
+              <span class="org-card-badge">${c.inbox} 卷</span>
+            </div>
+            <div class="org-card-title">仅待归类</div>
+            <div class="org-card-desc">只处理未归入任何类目的书签，逐条审阅后按需建目录。</div>
+            <div class="org-card-tags"><span class="org-card-tag">轻量日常</span><span class="org-card-tag">不动已有目录</span></div>
+          </button>
+
+          <button type="button" class="org-card${S.orgScope === 'all' ? ' is-active' : ''}" data-org-scope="all">
+            <div class="org-card-top">
+              <span class="org-card-ico">${icon('compass', 15)}</span>
+              <span class="org-card-idx">02</span>
+              <span class="org-card-badge">${S.items.length} 卷</span>
+            </div>
+            <div class="org-card-title">全库巡检错放</div>
+            <div class="org-card-desc">巡检错放与方案外书签，保留现存二级，不预建空目录。</div>
+            <div class="org-card-tags"><span class="org-card-tag">纠偏整理</span><span class="org-card-tag">按需创建</span></div>
+          </button>
+
+          <button type="button" class="org-card${S.orgScope === 'scheme' ? ' is-active' : ''}" data-org-scope="scheme">
+            <div class="org-card-top">
+              <span class="org-card-ico">${icon('layers', 15)}</span>
+              <span class="org-card-idx">03</span>
+              <span class="org-card-badge${curScheme ? '' : ' is-warn'}">${curScheme ? `${curScheme.codes.length} 类` : '需选方案'}</span>
+            </div>
+            <div class="org-card-title">按方案建档</div>
+            <div class="org-card-desc">将分类法投影为书签目录树，支持增量建档或全新重建。</div>
+            <div class="org-card-tags"><span class="org-card-tag">模式对齐</span><span class="org-card-tag">支持二级派生</span></div>
+          </button>
         </div>
-        ${S.orgScope === 'scheme' && !(S.settings && S.settings.schemeId)
-          ? '<div class="scheme-warn" style="margin:8px 0">还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成。</div>'
-          : ''}
-        <div class="plan-empty-hint">${ready
-          ? (S.orgScope === 'all'
-              ? '全库巡检：优先挑「还不在本方案类目里」的书签（每次最多 200 条），归位后它们就离开候选池，再点一次自动接着下一批；方案内错放也会一并列出。确认无误且自动备份后才动手。'
-              : S.orgScope === 'scheme'
-                ? (S.orgTree === 'fresh'
-                  ? '全新生成：所有书签按方案重新判一遍（旧分类不作数），生成前先整树备份；执行时搬完只清掉搬空的旧类目目录，书签一个不删，撤销会先重建目录再搬回。每批最多 200 条。'
-                  : '按方案建档：判定池 = 方案定义的类目 + 挂在这些类目下的现存二级（拆出来的 010/020 算方案内，不会被当「方案外」重判）。只增不删：建缺的目录、把判到别的类目的书签搬过去，判到同一个类目的不动。每批最多 200 条。')
-                : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
-          : '先到设置页装一套方案（杜威、中图法或自定义方案），再回来生成计划。'}</div>
-        <div class="plan-limit">
-          <span class="plan-limit-label">每轮条数</span>
-          ${['200', '500', '1000', 'all'].map((v) => `<button type="button" class="seg-tab${S.orgLimit === v ? ' is-active' : ''}" data-org-limit="${v}">${v === 'all' ? '全部' : v}</button>`).join('')}
-        </div>
-        <div class="plan-empty-hint">一次跑完 = 本轮不设上限；条数越多，模型请求越久，但进度和「停止」都可用。</div>
+
+        ${schemeMissing ? `<div class="alert-card">
+          <span class="alert-card-ico">${icon('info', 14)}</span>
+          <div class="alert-card-body">
+            <div class="alert-card-title">尚未选用分类方案</div>
+            <div>请先前往设置页选定一套分类法（如杜威十进、中图法或自定义方案）。</div>
+            <div class="alert-card-acts">
+              <button type="button" class="btn btn-primary btn-sm" data-open-opt>${icon('sliders', 12)}<span>去设置页选方案</span></button>
+            </div>
+          </div>
+        </div>` : ''}
+
         ${S.orgScope === 'scheme' ? `
-        <div class="plan-foot-line" style="margin-top:10px">
-          <span class="plan-limit-label">目录结构</span>
-          <button type="button" class="seg-tab${S.orgTree === 'collection' ? ' is-active' : ''}" data-org-tree="collection">按我的收藏生成</button>
-          <button type="button" class="seg-tab${S.orgTree === 'scheme' ? ' is-active' : ''}" data-org-tree="scheme">用方案的默认分类</button>
-          <button type="button" class="seg-tab${S.orgTree === 'fresh' ? ' is-active' : ''}" data-org-tree="fresh">全新生成</button>
-        </div>
-        <div class="plan-empty-hint">${
-          S.orgTree === 'scheme'
-            ? '照用方案的默认分类：方案里有几个类目就建几个（含空目录），书签按方案类目归位。'
-            : S.orgTree === 'fresh'
-              ? '全新生成：生成前先整树备份；所有书签按方案重新判一遍（旧分类不再作数），执行后把搬空的旧类目目录清掉。目录只增不删书签，可在日志里撤销。'
-              : '按收藏生成：只建真正用得到的目录，空类目一个都不建。'
-        }</div>` : ''}
-        ${S.orgScope === 'scheme' && S.orgTree === 'scheme' ? '' : `
-        <div class="plan-foot-line" style="margin-top:10px">
-          <label class="opt-toggle" style="display:inline-flex;gap:6px;align-items:center">
+        <div class="org-section-cap"><span>2 · 目录树投影策略</span></div>
+        <div class="org-card-grid">
+          <button type="button" class="org-card${S.orgTree === 'collection' ? ' is-active' : ''}" data-org-tree="collection">
+            <div class="org-card-top">
+              <span class="org-card-ico">${icon('branch', 15)}</span>
+              <span class="org-card-badge">推荐</span>
+            </div>
+            <div class="org-card-title">按收藏生长</div>
+            <div class="org-card-desc">只创建真正命中书签的类目，零空文件夹。</div>
+          </button>
+
+          <button type="button" class="org-card${S.orgTree === 'scheme' ? ' is-active' : ''}" data-org-tree="scheme">
+            <div class="org-card-top">
+              <span class="org-card-ico">${icon('grid', 15)}</span>
+              <span class="org-card-badge">完整骨架</span>
+            </div>
+            <div class="org-card-title">照方案建全</div>
+            <div class="org-card-desc">方案定义几个类目就建几个，包含空目录占位。</div>
+          </button>
+
+          <button type="button" class="org-card${S.orgTree === 'fresh' ? ' is-active' : ''}" data-org-tree="fresh">
+            <div class="org-card-top">
+              <span class="org-card-ico">${icon('refresh', 15)}</span>
+              <span class="org-card-badge is-warn">整树备份</span>
+            </div>
+            <div class="org-card-title">全新重建</div>
+            <div class="org-card-desc">忽略旧分类全量重判，执行后自动清理搬空的旧目录。</div>
+          </button>
+        </div>` : ''}
+
+        ${isFreshMode ? '' : `
+        <div class="org-bar-card">
+          <div class="org-bar-label">
+            ${icon('sliders', 14)}
+            <span>每轮处理上限</span>
+            <span class="org-bar-sub">条数越大耗时越长，随时可停止</span>
+          </div>
+          <div class="seg-tabs">
+            ${['200', '500', '1000', 'all'].map((v) => `<button type="button" class="seg-tab${S.orgLimit === v ? ' is-active' : ''}" data-org-limit="${v}">${v === 'all' ? '全部' : v}</button>`).join('')}
+          </div>
+        </div>`}
+
+        ${S.orgScope === 'scheme' && S.orgTree !== 'scheme' ? `
+        <label class="gz-switch-row${S.aiReady ? '' : ' is-disabled'}" style="width:100%">
+          <span class="gz-switch-copy">
+            <span class="gz-switch-title">
+              ${icon('branch', 13)}
+              <span>按收藏派生二级目录</span>
+              ${S.aiReady ? '<span class="tech-pill is-brand" style="padding:1px 6px;font-size:10px">需模型</span>' : '<span class="tech-pill is-warn" style="padding:1px 6px;font-size:10px">未配模型</span>'}
+            </span>
+            <span class="gz-switch-desc">仅对尚无二级且命中 ≥ 6 条的一级类目聚类生成子目录。</span>
+          </span>
+          <span class="gz-switch">
             <input type="checkbox" data-auto-subs ${S.orgAutoSubs ? 'checked' : ''} ${S.aiReady ? '' : 'disabled'} />
-            <span>按收藏派生二级目录（每个一级 ≥6 条时，需模型）</span>
-          </label>
+            <span class="gz-switch-track"></span>
+          </span>
+        </label>` : ''}
+
+        <div class="org-cta-bar">
+          <button class="btn btn-primary btn-md" data-gen ${ready && !schemeMissing ? '' : 'disabled'}>
+            ${icon('sparkle', 14)}<span>生成整理计划</span>
+          </button>
+          <span class="org-cta-note">${icon('shield', 13)}<span>人在回路审阅 · 提交前自动整树备份 · 支持一键撤销</span></span>
         </div>
-        ${S.orgAutoSubs && !S.aiReady
-          ? '<div class="plan-empty-hint">没配模型：这一轮只生成一级目录。</div>'
-          : ''}`}
-        <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
         ${journalHistoryHtml()}
       </div>
     </div>`;
   }
 
-  const walBanner = S.wal && S.wal.count ? `<div class="scheme-warn" style="margin:8px 0">
-    上次提交中断了：意图里记录了 ${S.wal.count} 条移动，但没有写完撤销日志。<br>
-    <button type="button" class="btn btn-line btn-sm" data-wal-rollback style="margin-top:8px">按记录回滚</button>
-    <button type="button" class="btn btn-ghost btn-sm" data-wal-clear style="margin-top:8px">就这样，清掉记录</button>
+  const walBanner = S.wal && S.wal.count ? `<div class="alert-card is-dead" style="margin:10px 0">
+    <span class="alert-card-ico">${icon('alert', 14)}</span>
+    <div class="alert-card-body">
+      <div class="alert-card-title">上次提交中断（${S.wal.count} 条移动未收尾）</div>
+      <div class="alert-card-acts">
+        <button type="button" class="btn btn-line btn-sm" data-wal-rollback>${icon('undo', 12)}<span>按记录回滚</span></button>
+        <button type="button" class="btn btn-ghost btn-sm" data-wal-clear>清掉记录</button>
+      </div>
+    </div>
   </div>` : '';
 
-  const groups = groupOps(plan).map((g) => {
-    // 有二级就按二级分组渲染小标题，没有就平铺
+  const s = plan.stats;
+  const activeFilter = S.planFilter || 'all';
+  const filteredPlan = activeFilter === 'all'
+    ? plan
+    : { ...plan, ops: plan.ops.filter((op) => op.status === activeFilter) };
+
+  const groups = groupOps(filteredPlan).map((g) => {
     const sorted = [...g.ops].sort((a, b) => String((a.to && a.to.sub) ? a.to.sub.code : '')
       .localeCompare(String((b.to && b.to.sub) ? b.to.sub.code : '')));
     let last = null;
     const rows = sorted.map((op) => {
       const sub = op.to && op.to.sub ? op.to.sub : null;
-      const head = sub && (!last || last.code !== sub.code)
+      const headHtml = sub && (!last || last.code !== sub.code)
         ? `<div class="plan-sub-head"><span>${esc(sub.code)}</span> ${esc(sub.name)}</div>`
         : '';
       if (sub) last = sub;
-      return head + planRow(op, plan);
+      return headHtml + planRow(op, plan);
     }).join('');
     return `
     <div class="plan-group">
       <div class="plan-group-head">
         <span class="plan-group-code">${esc(g.code)}</span>
         <span class="plan-group-name">${esc(g.name)}</span>
-        <span class="plan-group-n">${g.ops.length}</span>
+        <span class="plan-group-n">${g.ops.length} 条</span>
       </div>
       ${rows}
     </div>`;
   }).join('');
 
-  const s = plan.stats;
+  const execCount = S.orgIncludeUnsure ? s.ready + s.unsure : s.ready;
+
   return head + `
     <div class="insp-body">
       ${walBanner}
-      <div class="plan-stats">
-        <span>范围 <b>${plan.scope === 'scheme' ? '按方案建档' : plan.scope === 'all' ? '全库' : '待归类'}</b></span>
-        ${(plan.scope === 'all' || plan.scope === 'scheme') && plan.outside ? `<span>方案外 <b>${plan.outside}</b></span>` : ''}
-        ${plan.created && plan.created.length ? `<span>新建目录 <b>${plan.created.length}</b></span>` : ''}
-        <span>可移 <b>${s.ready}</b></span>
-        <span>拿不准 <b>${s.unsure}</b></span>
-        <span>跳过 <b>${s.skip}</b></span>
-        ${s.blocked ? `<span class="tone-dead">动不了 <b>${s.blocked}</b></span>` : ''}
+      <div class="plan-kpi-grid">
+        <button type="button" class="plan-kpi${activeFilter === 'all' ? ' is-active' : ''}" data-plan-filter="all">
+          <span class="plan-kpi-label">${icon('stack', 11)}<span>全部计划</span></span>
+          <span class="plan-kpi-val">${plan.ops.length}</span>
+        </button>
+        <button type="button" class="plan-kpi tone-ok${activeFilter === 'ready' ? ' is-active' : ''}" data-plan-filter="ready">
+          <span class="plan-kpi-label"><span class="led-dot is-ok"></span><span>可移</span></span>
+          <span class="plan-kpi-val">${s.ready}</span>
+        </button>
+        <button type="button" class="plan-kpi tone-warn${activeFilter === 'unsure' ? ' is-active' : ''}" data-plan-filter="unsure">
+          <span class="plan-kpi-label"><span class="led-dot is-warn"></span><span>拿不准</span></span>
+          <span class="plan-kpi-val">${s.unsure}</span>
+        </button>
+        <button type="button" class="plan-kpi${activeFilter === 'skip' ? ' is-active' : ''}" data-plan-filter="skip">
+          <span class="plan-kpi-label"><span class="led-dot"></span><span>跳过</span></span>
+          <span class="plan-kpi-val">${s.skip}</span>
+        </button>
+        ${s.blocked ? `<button type="button" class="plan-kpi tone-dead${activeFilter === 'blocked' ? ' is-active' : ''}" data-plan-filter="blocked">
+          <span class="plan-kpi-label"><span class="led-dot is-dead"></span><span>受管跳过</span></span>
+          <span class="plan-kpi-val">${s.blocked}</span>
+        </button>` : ''}
+        ${plan.created && plan.created.length ? `<div class="plan-kpi tone-brand is-static">
+          <span class="plan-kpi-label">${icon('folder', 11)}<span>将新建目录</span></span>
+          <span class="plan-kpi-val">+${plan.created.length}</span>
+        </div>` : ''}
       </div>
-      ${plan.tree === 'scheme' ? '<div class="plan-empty-hint" style="margin-top:8px">目录结构：用方案的默认分类（方案里有几个建几个，含空目录）</div>' : ''}
-      ${plan.tree === 'fresh' ? `<div class="scheme-warn" style="margin:8px 0">全新生成：已备份整树${plan.backupAt ? `（${relTime(plan.backupAt)}）` : ''}。
-        执行后会把搬空的旧类目目录清掉${plan.removeEstimate && plan.removeEstimate.length ? `，预计 <b>${plan.removeEstimate.length}</b> 个（${esc(plan.removeEstimate.slice(0, 6).map((f) => f.code).join('、'))}${plan.removeEstimate.length > 6 ? '…' : ''}）` : '（本轮预估没有要清的空目录）'}。
-        撤销会先重建目录再把书签搬回。</div>` : ''}
-      ${groups || '<div class="plan-empty"><div class="plan-empty-hint">计划是空的：没有需要移动的书签。</div></div>'}
+
+      ${plan.tree === 'fresh' ? `<div class="alert-card" style="margin-top:10px">
+        <span class="alert-card-ico">${icon('shield', 14)}</span>
+        <div class="alert-card-body">
+          <div class="alert-card-title">全新重建模式 · 整树已安全备份${plan.backupAt ? `（${relTime(plan.backupAt)}）` : ''}</div>
+          <div>执行后将清理搬空的旧类目目录${plan.removeEstimate && plan.removeEstimate.length ? `（预计 <b>${plan.removeEstimate.length}</b> 个：${esc(plan.removeEstimate.slice(0, 6).map((f) => f.code).join('、'))}${plan.removeEstimate.length > 6 ? '…' : ''}）` : '（本轮预计无空目录需清理）'}，撤销时自动按原名重建并归还。</div>
+        </div>
+      </div>` : ''}
+
+      ${groups || `<div class="empty" style="padding:36px 8px">
+        <div class="empty-title">${activeFilter === 'all' ? '当前计划没有需要移动的书签' : '此筛选状态下没有条目'}</div>
+        <div class="empty-hint">${activeFilter === 'all' ? '全部候选书签已在合适目录中，或已被剔除。' : '点击上方「全部计划」可查看完整列表。'}</div>
+      </div>`}
     </div>
     <div class="insp-foot plan-foot">
-      <div class="plan-foot-line">生成于 ${relTime(plan.at)}${plan.overflow ? ` · 还有 ${plan.overflow} 条没纳入` : ''
-      }${plan.scope === 'all' && plan.outside
-        ? `<br>方案外共 ${plan.outside} 条，本轮计划列入 ${plan.ops.length} 条；执行完再点「重新生成」接着下一批，这个数字会越来越小直到清空`
-        : ''}</div>
-      <div class="plan-foot-line">
-        <label class="opt-toggle" style="display:inline-flex;gap:6px;align-items:center">
-          <input type="checkbox" data-include-unsure ${S.orgIncludeUnsure ? 'checked' : ''} />
-          <span>连「拿不准」一起执行（多 ${s.unsure} 条，可撤销）</span>
-        </label>
+      <div class="pipeline-telemetry">
+        <span class="tech-pill">${icon('clock', 11)}<span>生成于 ${relTime(plan.at)}</span></span>
+        <span class="tech-pill">${plan.scope === 'scheme' ? '按方案建档' : plan.scope === 'all' ? '全库巡检' : '待归类'}</span>
+        ${plan.overflow ? `<span class="tech-pill is-warn">另有 ${plan.overflow} 条待下轮</span>` : ''}
+        ${plan.scope === 'all' && plan.outside ? `<span class="tech-pill">方案外 ${plan.outside} 条</span>` : ''}
       </div>
+      ${s.unsure ? `
+      <label class="gz-switch-row is-compact">
+        <span class="gz-switch-copy">
+          <span class="gz-switch-title">连「拿不准」一起执行<span class="tech-pill is-warn" style="padding:1px 6px;font-size:10px">+${s.unsure} 条</span></span>
+        </span>
+        <span class="gz-switch">
+          <input type="checkbox" data-include-unsure ${S.orgIncludeUnsure ? 'checked' : ''} />
+          <span class="gz-switch-track"></span>
+        </span>
+      </label>` : ''}
       <div class="plan-foot-actions">
-        <button class="btn btn-primary btn-sm" data-apply ${(s.ready || (S.orgIncludeUnsure && s.unsure)) ? '' : 'disabled'}>执行 ${S.orgIncludeUnsure ? s.ready + s.unsure : s.ready} 条</button>
-        <button class="btn btn-line btn-sm" data-split ${S.splitBusy ? 'disabled' : ''}>${
+        <button class="btn btn-primary btn-sm" data-apply ${execCount ? '' : 'disabled'}>${icon('check', 12)}<span>确认提交 ${execCount} 条</span></button>
+        <button class="btn btn-line btn-sm" data-split ${S.splitBusy ? 'disabled' : ''}>${icon('branch', 12)}<span>${
           S.splitBusy ? `拆分中 ${S.splitProgress ? `${S.splitProgress.done}/${S.splitProgress.total}` : '…'}` : '再拆一层二级'
-        }</button>
-        <button class="btn btn-line btn-sm" data-gen>重新生成</button>
-        <button class="btn btn-ghost btn-sm" data-clear>清空</button>
+        }</span></button>
+        <button class="btn btn-line btn-sm" data-gen>${icon('refresh', 12)}<span>重新生成</span></button>
+        <button class="btn btn-ghost btn-sm" data-clear>${icon('trash', 12)}<span>清空计划</span></button>
       </div>
     </div>`;
 }
 
 function planRow(op, plan) {
   const pickList = (plan && plan.scheme && plan.scheme.length) ? plan.scheme : S.folderScheme;
-  const tone = op.status === 'ready' ? '' : op.status === 'unsure' ? ' tone-warn' : op.status === 'blocked' ? ' tone-dead' : ' tone-ink';
-  const fromPrefix = op.from && op.from.code ? `${esc(op.from.code)} ` : '';
-  const tag = op.status === 'ready' ? `${fromPrefix}→ ${esc(op.to.code)} ${esc(op.to.name)}${op.to.missing ? '（新建目录）' : ''}`
-    : op.status === 'unsure' ? '拿不准'
-    : op.status === 'blocked' ? '动不了'
-    : '跳过';
+  const fromCode = op.from && op.from.code ? op.from.code : '待归类';
   const pickable = op.status === 'ready' || op.status === 'unsure';
+  const lineage = lineageOf(op);
+  const conf = Number.isFinite(op.conf) ? op.conf : null;
+  const unsure = op.status === 'unsure' || (conf !== null && conf < UNSURE_THRESHOLD);
+
+  const routeHtml = op.status === 'ready'
+    ? `<span class="plan-route">
+        <span class="chip chip-from tnum">${esc(fromCode)}</span>
+        <span class="sg-arrow">${icon('arrowRight', 11)}</span>
+        <span class="chip chip-to"><b>${esc(op.to.code)}</b>${esc(op.to.name)}</span>
+        ${op.to.missing ? '<span class="plan-new-badge">+新建</span>' : ''}
+      </span>`
+    : op.status === 'unsure'
+      ? `<span class="plan-route">
+          <span class="source-pill is-unsure">拿不准</span>
+          ${op.to && op.to.code ? `<span class="chip chip-from tnum">${esc(op.to.code)} ${esc(op.to.name || '')}</span>` : ''}
+        </span>`
+      : op.status === 'blocked'
+        ? '<span class="source-pill" style="background:var(--dead-wash);color:var(--dead)">受管书签</span>'
+        : '<span class="source-pill">已在位跳过</span>';
+
+  const sourceBadge = op.source === 'learned'
+    ? '<span class="source-pill is-learned">历史偏好</span>'
+    : op.source === 'heuristic'
+      ? '<span class="source-pill">本地规则</span>'
+      : op.source === 'manual'
+        ? '<span class="source-pill is-model">手动改判</span>'
+        : '';
+
   return `<div class="plan-row">
     <div class="plan-row-top">
       <div class="plan-title" title="${esc(op.title)}">${esc(op.title)}</div>
+      ${conf !== null ? `<span class="sg-conf${unsure ? ' is-unsure' : ''}" title="置信度 ${conf.toFixed(2)}">
+        <span class="sg-conf-bar"><span style="width:${Math.round(conf * 100)}%"></span></span>${conf.toFixed(2)}
+      </span>` : ''}
       <button class="ibtn plan-drop" data-drop="${esc(op.id)}" title="从计划里剔除" aria-label="从计划里剔除">${icon('x', 11)}</button>
     </div>
     <div class="plan-row-bot">
-      <div class="plan-sub">
-        <span class="plan-tag${tone}">${tag}</span>
+      <div class="plan-sub" style="flex-wrap:wrap;align-items:center">
+        ${routeHtml}
+        ${sourceBadge}
+        ${lineage ? `<span class="lineage-pill" title="数据血缘：${esc(lineage)}">${icon('cpu', 10)}<span>${esc(lineage)}</span></span>` : ''}
         ${op.reason ? `<span class="plan-why" title="${esc(op.reason)}">${esc(op.reason)}</span>` : ''}
       </div>
       ${pickable ? `<select class="plan-pick" data-pick="${esc(op.id)}" title="改判到哪个类目" aria-label="改判目标类目">
@@ -2157,6 +2552,15 @@ function wireOrganize(root) {
     S.drawer = null;
     S.view = { kind: 'all' };
     renderAll();
+  });
+  box.querySelectorAll('[data-open-opt]').forEach((btn) => {
+    btn.addEventListener('click', () => chrome.runtime.openOptionsPage());
+  });
+  box.querySelectorAll('[data-plan-filter]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      S.planFilter = btn.dataset.planFilter || 'all';
+      renderOrgArea();
+    });
   });
   box.querySelectorAll('[data-org-tab]').forEach((btn) => {
     btn.addEventListener('click', () => { S.orgTab = btn.dataset.orgTab; renderOrgArea(); });
@@ -2228,6 +2632,7 @@ function wireOrganize(root) {
     });
   });
   box.querySelector('[data-gen]')?.addEventListener('click', async () => {
+    S.planFilter = 'all';
     S.planBusy = true;
     S.planStartedAt = Date.now();
     S.planPollAt = 0;
@@ -2292,6 +2697,7 @@ function wireOrganize(root) {
   box.querySelector('[data-clear]')?.addEventListener('click', async () => {
     await send('organize:cancel');
     S.plan = null;
+    S.planFilter = 'all';
     renderOrgArea();
     renderRail();
   });
@@ -2364,40 +2770,56 @@ function aiPanel() {
           <button class="ibtn" data-close title="收起">${icon('x', 13)}</button>
         </div>
       </div>
-      <h2 class="insp-title">${pend.length ? `${pend.length} 条待确认` : (S.aiBusy ? '正在判断' : '没有待确认的建议')}</h2>
-      <p class="insp-sub">优先复用你的历史改判偏好，模型结合标题、域名与页面摘要判断；确认之后才会真的移动。</p>
+      <h2 class="insp-title">${pend.length ? `${pend.length} 条待确认` : (S.aiBusy ? '正在判断' : '归类队列已清')}</h2>
+      <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">
+        <span class="tech-pill${S.aiReady ? ' is-ok' : ''}"><span class="led-dot${S.aiReady ? ' is-ok' : ''}"></span><span>${S.aiReady ? (S.settings?.model || '模型就绪') : '离线关键词规则'}</span></span>
+        <span class="tech-pill">${icon('shield', 11)}<span>人在回路确认</span></span>
+      </div>
     </div>
     <div class="insp-body">
-      ${body || `<div class="empty" style="padding:22px 14px">
+      ${body || `<div class="empty" style="padding:26px 16px">
+        <div class="empty-mark tone-brand">${icon('sparkle', 22)}</div>
+        <div class="empty-title" style="font-size:16px">暂无待确认建议</div>
         <div class="empty-hint">${S.aiReady
-          ? `给当前视图的 ${visible().length} 条生成建议，先看看它怎么判。`
-          : '还没配置模型。可以在设置里填 API Key，或者先用本地关键词规则试跑。'}</div>
+          ? `可为当前视图的 ${visible().length} 条书签生成智能归类建议，确认后才会移动。`
+          : '未配置大模型时将使用本地关键词与改判偏好进行规则归类。'}</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:14px">
+          <button type="button" class="btn btn-primary btn-md" data-run-ai-view>${icon('sparkle', 14)}<span>生成建议（${visible().length} 条）</span></button>
+          ${S.aiReady ? '' : `<button type="button" class="btn btn-line btn-md" data-open-opt-ai>${icon('sliders', 13)}<span>去配置模型</span></button>`}
+        </div>
       </div>`}
     </div>
-    ${pend.length ? `<div class="insp-foot">
-      <button class="btn btn-primary btn-md btn-block" data-acceptall>
-        ${icon('check', 14)}<span>接受全部 ${pend.length} 条</span></button>
-      <div class="insp-progress">${Object.keys(S.pending).length} 条建议在队列</div>
-    </div>` : ''}`;
+    ${pend.length ? (() => {
+      const confident = pend.filter((p) => (p.conf || 0) >= UNSURE_THRESHOLD);
+      const unsureCount = pend.length - confident.length;
+      return `<div class="insp-foot">
+        ${confident.length && unsureCount ? `<button class="btn btn-primary btn-md btn-block" data-acceptconfident>
+          ${icon('check', 14)}<span>接受有把握的 ${confident.length} 条</span></button>
+          <button class="btn btn-line btn-sm btn-block" data-acceptall style="margin-top:6px">
+          <span>连「拿不准」一起接受（共 ${pend.length} 条）</span></button>` : `<button class="btn btn-primary btn-md btn-block" data-acceptall>
+          ${icon('check', 14)}<span>接受全部 ${pend.length} 条${unsureCount ? `（含 ${unsureCount} 条拿不准）` : ''}</span></button>`}
+        <div class="insp-progress">${Object.keys(S.pending).length} 条建议在队列${unsureCount ? ` · ${unsureCount} 条拿不准` : ''}</div>
+      </div>`;
+    })() : ''}`;
 }
 
 /** 建议的血缘：哪个模型、哪版提示词判的；本地规则没有血缘，返回空串 */
 function lineageOf(p) {
   const bits = [];
   if (p.model) bits.push(p.model);
-  if (p.promptVersion) bits.push(`提示词 ${p.promptVersion}`);
+  if (p.promptVersion) bits.push(p.promptVersion);
   return bits.join(' · ');
 }
 
 function suggestionCard(p) {
   const it = p.item;
-  const unsure = p.conf < 0.75;
+  const unsure = (p.conf || 0) < UNSURE_THRESHOLD;
   const picking = S.picking === p.id;
   const lineage = lineageOf(p);
   return `<div class="sg" data-sg="${esc(p.id)}">
     <div class="sg-top">
       <button class="sg-title" data-locate="${esc(p.id)}">${esc(it.title)}</button>
-      <span class="sg-conf${unsure ? ' is-unsure' : ''}" title="${unsure ? '对这个判断不太确定' : '置信度'}">
+      <span class="sg-conf${unsure ? ' is-unsure' : ''}" title="${unsure ? '低于置信阈值，请人工核对' : '置信度'}">
         <span class="sg-conf-bar"><span style="width:${Math.round(p.conf * 100)}%"></span></span>
         ${p.conf.toFixed(2)}
       </span>
@@ -2406,18 +2828,18 @@ function suggestionCard(p) {
       <span class="chip chip-from tnum">${esc(it.code || '待归类')}</span>
       ${icon('arrowRight', 12)}
       <span class="chip chip-to"><b>${esc(p.code)}</b>${esc(folderName(p.code))}</span>
-      ${unsure ? '<span class="sg-unsure-tag">拿不准</span>' : ''}
-      ${p.source === 'heuristic' ? '<span class="sg-unsure-tag">本地规则</span>' : ''}
-      ${p.source === 'learned' ? '<span class="sg-unsure-tag" style="color:var(--ok);background:var(--ok-wash)">历史偏好</span>' : ''}
+      ${unsure ? '<span class="source-pill is-unsure">拿不准</span>' : ''}
+      ${p.source === 'heuristic' ? '<span class="source-pill">本地规则</span>' : ''}
+      ${p.source === 'learned' ? '<span class="source-pill is-learned">历史偏好</span>' : ''}
+      ${lineage ? `<span class="lineage-pill" title="数据血缘">${icon('cpu', 10)}<span>${esc(lineage)}</span></span>` : ''}
     </div>
     <p class="sg-why">${esc(p.reason || '模型没有给出理由')}</p>
-    ${lineage ? `<p class="sg-lineage">${esc(lineage)}</p>` : ''}
     ${picking ? `<div class="sg-picker">${S.folderScheme.map((f) => `
         <button class="sg-pick${f.code === p.code ? ' is-on' : ''}" data-override="${esc(p.id)}" data-code="${esc(f.code)}">
           <span class="sg-pick-num">${esc(f.code)}</span>${esc(f.name)}</button>`).join('')}</div>`
       : `<div class="sg-actions">
         <button class="btn btn-primary btn-sm" data-accept="${esc(p.id)}">${icon('check', 12)}<span>接受</span></button>
-        <button class="btn btn-line btn-sm" data-pick="${esc(p.id)}">改判</button>
+        <button class="btn btn-line btn-sm" data-pick="${esc(p.id)}">${icon('folder', 12)}<span>改判</span></button>
         <button class="btn btn-ghost btn-sm" data-ignore="${esc(p.id)}">忽略</button>
       </div>`}
   </div>`;
@@ -2432,30 +2854,39 @@ function wireAi() {
     S.pendingNote = 0;
     renderInspector();
   });
+  box.querySelector('[data-run-ai-view]')?.addEventListener('click', () => runAi(visible().map((x) => x.id)));
+  box.querySelector('[data-open-opt-ai]')?.addEventListener('click', () => chrome.runtime.openOptionsPage());
 
   box.querySelector('#btnAiTriage')?.addEventListener('click', () => {
     const items = Object.keys(S.pending).map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
     triage.open(items);
   });
 
-  const acceptAll = box.querySelector('[data-acceptall]');
-  if (acceptAll && !acceptAll.disabled) {
-    acceptAll.addEventListener('click', async () => {
-      const ids = Object.keys(S.pending).filter((id) => S.items.some((x) => x.id === id));
+  const acceptConfident = box.querySelector('[data-acceptconfident]');
+  if (acceptConfident && !acceptConfident.disabled) {
+    acceptConfident.addEventListener('click', async () => {
+      const ids = Object.keys(S.pending).filter(
+        (id) => S.items.some((x) => x.id === id) && (S.pending[id].conf || 0) >= UNSURE_THRESHOLD,
+      );
       await acceptIds(ids);
     });
   }
 
-  if (!S.pending || !Object.keys(S.pending).length) {
-    const empty = box.querySelector('.insp-body .empty-hint');
-    if (empty && !S.aiBusy) {
-      const btn = document.createElement('button');
-      btn.className = 'btn btn-primary btn-md';
-      btn.style.marginTop = '12px';
-      btn.innerHTML = `${icon('sparkle', 14)}<span>为当前视图生成建议</span>`;
-      btn.addEventListener('click', () => runAi(visible().map((x) => x.id)));
-      empty.after(btn);
-    }
+  const acceptAll = box.querySelector('[data-acceptall]');
+  if (acceptAll && !acceptAll.disabled) {
+    acceptAll.addEventListener('click', async () => {
+      const ids = Object.keys(S.pending).filter((id) => S.items.some((x) => x.id === id));
+      const unsureN = ids.filter((id) => (S.pending[id].conf || 0) < UNSURE_THRESHOLD).length;
+      if (unsureN > 0) {
+        const ok = await confirmDialog({
+          title: `包含 ${unsureN} 条「拿不准」的建议`,
+          message: `确定把这 ${ids.length} 条（含 ${unsureN} 条低于阈值 ${UNSURE_THRESHOLD} 的建议）全部归位吗？\n执行前会自动备份，且可在整理日志里一键撤销。`,
+          okText: `全部接受（${ids.length} 条）`,
+        });
+        if (!ok) return;
+      }
+      await acceptIds(ids);
+    });
   }
 
   box.querySelector('[data-ai-stop]')?.addEventListener('click', async () => {
@@ -2653,7 +3084,7 @@ function detailPanel(it) {
           <span class="status-pill${h ? '' : ' is-idle'}">
             <span class="status-dot"></span>${h ? esc(tone.label) : '未检测'}
           </span>
-          ${h ? `<span class="status-code">HTTP ${esc(h.code)}</span>` : ''}
+          ${h ? `<span class="status-code">${h.ms ? `<span class="lineage-pill" style="margin-right:4px">${h.ms}ms</span>` : ''}HTTP ${esc(h.code)}</span>` : ''}
         </div>
         <p class="status-note">${statusNote(h)}</p>
         ${h && h.finalUrl ? `
@@ -2871,9 +3302,17 @@ function wireDetail(it) {
     });
   }
 
-  box.querySelector('.url-box')?.addEventListener('click', async () => {
+  const urlBox = box.querySelector('.url-box');
+  urlBox?.addEventListener('click', async () => {
     try {
       await navigator.clipboard.writeText(it.url);
+      urlBox.classList.add('is-copied');
+      const icoEl = urlBox.querySelector('.url-box-icon');
+      if (icoEl) icoEl.innerHTML = icon('check', 13, 2);
+      setTimeout(() => {
+        urlBox.classList.remove('is-copied');
+        if (icoEl) icoEl.innerHTML = icon('copy', 13);
+      }, 1400);
       toast('已复制网址到剪贴板');
     } catch (e) {
       toast('复制失败: ' + e.message);
@@ -2925,6 +3364,7 @@ function buildCommands() {
       toast('已导出标准 HTML 书签');
     } },
     { id: 'shortcuts', name: '查看键盘快捷键速查', desc: '全键盘流导航与操作清单', ico: 'window', run: openShortcutsModal },
+    { id: 'manual', name: '打开操作手册', desc: '安装、整理、备份与故障排查（新标签页）', ico: 'window', run: () => chrome.tabs.create({ url: chrome.runtime.getURL('ui/manual.html') }) },
     { id: 'options', name: '打开设置页', desc: '配置模型、方案、改判记忆与备份恢复', ico: 'sliders', run: () => chrome.runtime.openOptionsPage() },
   ];
   for (const th of THEMES) {
@@ -3172,9 +3612,9 @@ function initResizers() {
   wireHandle($('#inspResizer'), 'right', '--insp-w', 'guizang_insp_w', 300, 520, 360);
 }
 
-// 暗色卡片鼠标追光（轻量事件委托，零额外 DOM）
+// 卡片与工作台 Bento 卡鼠标追光（轻量事件委托，零额外 DOM）
 $('#list')?.addEventListener('pointermove', (e) => {
-  const tile = e.target.closest('.card-tile');
+  const tile = e.target.closest('.card-tile, .org-card');
   if (!tile) return;
   const r = tile.getBoundingClientRect();
   tile.style.setProperty('--mx', (e.clientX - r.left) + 'px');
@@ -3256,7 +3696,9 @@ async function load() {
   if (jr) {
     S.journal = jr.latest;
     S.journals = jr.list || [];
-    S.wal = jr.wal || null;
+    S.wal = jr.wal || st.wal || null;
+  } else {
+    S.wal = st.wal || null;
   }
   S.loaded = true;
   renderAll();

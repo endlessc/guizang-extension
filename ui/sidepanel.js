@@ -152,11 +152,23 @@ function renderCurrent() {
       <button class="btn btn-primary btn-sm" id="saveBtn" ${S.chosen ? '' : 'disabled'}>
         ${icon(S.existing ? 'folder' : 'plus', 12)}<span>${S.existing ? '更新分类' : '收藏'}</span></button>
     </div>
-    ${s && s.code && (!S.chosen || S.chosen.code !== s.code) ? `<button class="pp-sug" id="useSug">
-        ${icon('sparkle', 11)}
-        <span>建议 <b class="tnum">${esc(s.code)}</b> ${esc((S.summary.folderScheme.find((x) => x.code === s.code) || {}).name || '')}</span>
-        <span class="pp-sug-go">采用</span></button>` : ''}
-    ${s && s.reason ? `<div class="pp-note">${esc(s.reason)}</div>` : ''}
+    ${s && (s.code || s.reason) ? (() => {
+      const targetName = s.code ? ((S.summary.folderScheme.find((x) => x.code === s.code) || {}).name || '') : '';
+      const needApply = Boolean(s.code && (!S.chosen || S.chosen.code !== s.code));
+      const srcTag = s.source === 'model' ? 'is-model' : s.source === 'learned' ? 'is-learned' : '';
+      const srcLabel = s.source === 'model' ? '模型' : s.source === 'learned' ? '历史偏好' : '本地规则';
+      return `<div class="pp-sug-card">
+        <div class="pp-sug-head">
+          ${s.code ? `<span class="pp-sug-target">${icon('sparkle', 11)}<b class="tnum">${esc(s.code)}</b> ${esc(targetName)}</span>` : '<span class="pp-sug-target">暂未命中规则</span>'}
+          <span class="source-pill ${srcTag}">${srcLabel}</span>
+          ${s.conf ? `<span class="sg-conf" style="margin-left:auto"><span class="sg-conf-bar"><span style="width:${Math.round(s.conf * 100)}%"></span></span>${s.conf.toFixed(2)}</span>` : ''}
+        </div>
+        ${s.reason ? `<div class="pp-sug-reason">${esc(s.reason)}</div>` : ''}
+        ${needApply ? `<div class="pp-sug-acts">
+          <button type="button" class="pp-sug-pill is-primary" id="useSug">${icon('check', 11)}<span>采用此分类</span></button>
+        </div>` : ''}
+      </div>`;
+    })() : ''}
     <div id="pickerHost"></div>
   </div>`;
 
@@ -232,7 +244,7 @@ function renderAlerts() {
     ${picks.length ? `<div class="sp-serendipity">
       <div class="sp-serendipity-head">
         ${icon('compass', 12)}<span>书海拾遗</span>
-        <button type="button" class="sp-serendipity-refresh" id="spRefreshPick">换一批</button>
+        <button type="button" class="sp-pill-btn" id="spRefreshPick">${icon('refresh', 10)}<span>换一批</span></button>
       </div>
       ${picks.map((it) => `<button type="button" class="sp-serendipity-item" data-pick-url="${esc(it.url)}" title="${esc(it.title)}">
         <span class="sp-serendipity-name">${esc(it.title)}</span>
@@ -296,7 +308,7 @@ function renderFoot() {
       <div class="sp-foot-line">
         <span class="scan-pulse"></span>
         <span>正在检测 <b class="mono">${S.scan.done}</b>/<span class="mono">${S.scan.total}</span></span>
-        <button class="sp-foot-action" id="stopBtn">停止</button>
+        <button class="sp-pill-btn" id="stopBtn">${icon('x', 10)}<span>停止</span></button>
       </div>
       <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>`;
     $('#stopBtn').addEventListener('click', async () => {
@@ -305,9 +317,9 @@ function renderFoot() {
     return;
   }
   foot.innerHTML = `<div class="sp-foot-line">
-    <span class="dot-idle"></span>
+    <span class="led-dot${last ? ' is-ok' : ''}"></span>
     <span>${last ? '上次检测 ' + relTime(last) : '还没有检测过'}</span>
-    <button class="sp-foot-action" id="scanBtn">检测未检测的</button>
+    <button class="sp-pill-btn" id="scanBtn">${icon('pulse', 10)}<span>检测未检</span></button>
   </div>`;
   $('#scanBtn').addEventListener('click', async () => {
     const r = await send('health:runUnchecked').catch((e) => ({ started: false, error: e.message }));

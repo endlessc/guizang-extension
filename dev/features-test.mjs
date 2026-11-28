@@ -8,11 +8,11 @@ import assert from 'node:assert/strict';
 import { normalizeUrl, findDuplicates, duplicateIdSet, removableCount } from '../lib/dedup.js';
 import { pinyinInitials, parseQuery, filterAndScore, buildOmniboxSuggestions } from '../lib/search.js';
 import { toMarkdown, toSelectionMarkdown, toNetscapeHtml } from '../lib/export.js';
-import { normalizeMeta, collectAllTags, recordOverride, matchLearned, pickSerendipity, analyzeUsage } from '../lib/meta.js';
+import { normalizeMeta, collectAllTags, remapRecordById, recordOverride, matchLearned, migrateLearned, pickSerendipity, analyzeUsage } from '../lib/meta.js';
 import { parseHeadHtml, isWeakTitle, cleanTitleLocal } from '../lib/head.js';
 import { sanitizeCustomScheme, getScheme, parseOptsOf, parseSchemeLines } from '../lib/schemes.js';
 import { normalizeBase } from '../lib/llm.js';
-import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages, PROMPT_VERSION } from '../lib/llm.js';
+import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages, PROMPT_VERSION, SELECTIVE_THRESHOLD } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { sampleOps } from '../lib/organize.js';
 import { parseTree, treeOrder, familyOf } from '../lib/tree.js';
@@ -114,13 +114,45 @@ test('旁挂元数据清洗与标签聚合', () => {
   assert.equal(all[0].tag, 'AI');
   assert.equal(all[0].count, 2);
 });
-test('改判记忆忽略公共大站、记住专属域名', () => {
+test('改判记忆忽略公共大站、记住专属域名，且换方案按类名显式迁移', () => {
   let l = recordOverride(null, { host: 'github.com' }, '100');
   assert.equal(Object.keys(l.domains).length, 0);
   l = recordOverride(l, { host: 'docs.rs' }, '100');
+  l = recordOverride(l, { host: 'tool.example' }, '000');
   const hit = matchLearned(l, { host: 'docs.rs' }, new Set(['100', '500']));
   assert.equal(hit.code, '100');
   assert.equal(hit.source, 'learned');
+  assert.equal(hit.model, '');
+  assert.equal(hit.promptVersion, '');
+
+  // 杜威 100(编程与后端) 切到 PARA 100(项目)：同码不同义必须作废，不能高置信度错判
+  const toPara = migrateLearned(l, {
+    from: [{ code: '000', name: '综合与工具' }, { code: '100', name: '编程与后端' }],
+    to: [{ code: '100', name: '项目' }, { code: '300', name: '资源' }],
+  });
+  assert.equal(toPara.mapped, 0);
+  assert.equal(toPara.dropped, 2);
+  assert.deepEqual(toPara.learned.domains, {});
+
+  // 切到同名类目不同编码的方案（如中图法 Z 综合与工具）：同名换码保留，不同名作废
+  const toClc = migrateLearned(l, {
+    from: [{ code: '000', name: '综合与工具' }, { code: '100', name: '编程与后端' }],
+    to: [{ code: 'Z', name: '综合与工具' }, { code: 'T', name: '工业技术' }],
+  });
+  assert.equal(toClc.mapped, 1);
+  assert.equal(toClc.dropped, 1);
+  assert.equal(toClc.learned.domains['tool.example'].code, 'Z');
+  assert.equal(toClc.learned.domains['docs.rs'], undefined);
+});
+test('替换恢复后按新旧节点 ID 映射保留旁挂元数据', () => {
+  const oldMeta = {
+    b1: { tags: ['rust'], note: '核心文档', star: true },
+    b2: { tags: ['ai'], note: '', star: false },
+  };
+  const { record, remapped } = remapRecordById(oldMeta, new Map([['b1', 'new_b1']]));
+  assert.equal(remapped, 1);
+  assert.deepEqual(record.new_b1.tags, ['rust']);
+  assert.equal(record.b2, undefined);
 });
 test('书海拾遗排除失效链接 & 吃灰分析区分常阅与尘封', () => {
   const now = Date.parse('2026-11-22T00:00:00Z');
@@ -397,7 +429,18 @@ console.log('9. 建议血缘：模型与提示词版本（lib/llm.js）');
   console.log('  ✓ 本地规则不带模型名');
   assert.equal(h.promptVersion, '', '本地规则没有提示词版本');
   console.log('  ✓ 本地规则不带提示词版本');
-  passed += 4;
+
+  // 零关键词命中显式拒判：不强塞 000 或首个类目
+  const [abstain] = classifyHeuristic(
+    [{ id: 'u', title: '一串毫无信号的字符串', host: 'unknown.invalid', url: 'https://unknown.invalid/xyz', code: '' }],
+    [{ code: '000', name: '综合与工具' }, { code: '100', name: '编程与后端' }],
+    { schemeId: 'dewey' },
+  );
+  assert.equal(abstain.code, '', '零命中应显式拒判而非硬塞 000');
+  assert.equal(abstain.conf, 0, '零命中置信度应为 0');
+  assert.equal(SELECTIVE_THRESHOLD, 0.65, '统一选择性分类阈值为 0.65');
+  console.log('  ✓ 本地规则零命中显式拒判（不强塞 000）');
+  passed += 5;
 }
 
 console.log('10. 拆二级后的父子关系与展示顺序（lib/tree.js）');

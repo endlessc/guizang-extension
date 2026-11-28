@@ -153,12 +153,25 @@ function renderNow() {
       <button type="button" class="pp-star-btn${S.star ? ' is-on' : ''}" id="starBtn" title="${S.star ? '取消星标' : '加星标'}">${icon('star', 13)}</button>
     </div>
     ${S.existing ? `<button class="btn btn-danger-ghost btn-sm btn-block pp-remove-btn" id="btnRemoveBookmark">${icon('trash', 12)}<span>移出书签</span></button>` : ''}
-    ${s && s.code && (!S.chosen || S.chosen.code !== s.code) ? `<button class="pp-sug" id="useSug">
-        ${icon('sparkle', 11)}
-        <span>建议 <b class="tnum">${esc(s.code)}</b> ${esc((S.summary.folderScheme.find((x) => x.code === s.code) || {}).name || '')}</span>
-        <span class="pp-sug-go">采用</span></button>` : ''}
-    ${s && s.reason ? `<div class="pp-note">${esc(s.reason)}${s.conf ? ` · 把握 ${s.conf.toFixed(2)}` : ''}</div>` : ''}
-    ${s && s.source !== 'model' && S.summary.aiReady ? `<div class="pp-note"><button class="pp-link" id="askModel">让模型再判一次</button></div>` : ''}`;
+    ${s && (s.code || s.reason) ? (() => {
+      const targetName = s.code ? ((S.summary.folderScheme.find((x) => x.code === s.code) || {}).name || '') : '';
+      const needApply = Boolean(s.code && (!S.chosen || S.chosen.code !== s.code));
+      const canAsk = Boolean(s.source !== 'model' && S.summary.aiReady);
+      const srcTag = s.source === 'model' ? 'is-model' : s.source === 'learned' ? 'is-learned' : '';
+      const srcLabel = s.source === 'model' ? '模型' : s.source === 'learned' ? '历史偏好' : '本地规则';
+      return `<div class="pp-sug-card">
+        <div class="pp-sug-head">
+          ${s.code ? `<span class="pp-sug-target">${icon('sparkle', 11)}<b class="tnum">${esc(s.code)}</b> ${esc(targetName)}</span>` : '<span class="pp-sug-target">暂未命中规则</span>'}
+          <span class="source-pill ${srcTag}">${srcLabel}</span>
+          ${s.conf ? `<span class="sg-conf" style="margin-left:auto"><span class="sg-conf-bar"><span style="width:${Math.round(s.conf * 100)}%"></span></span>${s.conf.toFixed(2)}</span>` : ''}
+        </div>
+        ${s.reason ? `<div class="pp-sug-reason">${esc(s.reason)}</div>` : ''}
+        ${needApply || canAsk ? `<div class="pp-sug-acts">
+          ${needApply ? `<button type="button" class="pp-sug-pill is-primary" id="useSug">${icon('check', 11)}<span>采用此分类</span></button>` : ''}
+          ${canAsk ? `<button type="button" class="pp-sug-pill is-ghost" id="askModel" ${S.thinking ? 'disabled' : ''}>${icon('sparkle', 11)}<span>${S.thinking ? '推理中…' : '让模型重判'}</span></button>` : ''}
+        </div>` : ''}
+      </div>`;
+    })() : ''}`;
 
   $('#pickBtn').addEventListener('click', () => {
     S.pickerOpen = !S.pickerOpen;
@@ -275,7 +288,7 @@ function renderRecent() {
 
 function renderFoot() {
   $('#foot').innerHTML = `
-    <button class="pp-open" id="openManager">打开书库 ${icon('arrowRight', 12)}</button>
+    <button class="pp-open" id="openManager">${icon('window', 12)}<span>打开书库</span>${icon('arrowRight', 11)}</button>
     <span class="pp-foot-sep"></span>
     <button class="pp-stash" id="stashWinBtn" title="把当前窗口全部网页收进待归类（自动去重）">${icon('layers', 12)}<span>收本窗标签页</span></button>
     <button class="pp-scan" id="scanBtn" title="检测失效链接（在书库里跑）">${icon('pulse', 13)}</button>`;
