@@ -1984,7 +1984,9 @@ function aiPanel() {
     </div>
     <div class="insp-body">
       ${body || `<div class="empty" style="padding:22px 14px">
-        <div class="empty-hint">${S.aiReady ? '给当前视图的 ' + visible().length + ' 条生成建议，先看看它怎么判。' : '还没配置模型。可以在设置里填 API Key，或者先用本地关键词规则试跑。'}</div>
+        <div class="empty-hint">${S.aiReady
+          ? `给当前视图的 ${Math.min(visible().length, 80)} 条生成建议${visible().length > 80 ? `（当前视图共 ${visible().length} 条，一次最多 80 条）` : ''}，先看看它怎么判。`
+          : '还没配置模型。可以在设置里填 API Key，或者先用本地关键词规则试跑。'}</div>
       </div>`}
     </div>
     ${pend.length ? `<div class="insp-foot">
