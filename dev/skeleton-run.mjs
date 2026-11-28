@@ -13,7 +13,7 @@
  * 注意：会把 200 条书签的标题/域名发给该接口，按你自己服务商的计费算。
  */
 
-import { readFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { designSkeleton } from '../lib/llm.js';
@@ -91,10 +91,18 @@ console.log(`  名字长度：最短 ${Math.min(...lens)}，最长 ${Math.max(..
 console.log(`  重复顶层名：${dupTop} 个；没有 hint 的顶层：${noHint} 个`);
 console.log(`  规则铺全量覆盖：${covered}/${items.length}（${((covered / items.length) * 100).toFixed(1)}%），未覆盖 ${unmatched.length}`);
 console.log('  每个顶层覆盖条数：');
-for (const c of skeleton) {
-  const total = [c, ...c.children].reduce((s, x) => s + ((map[x.code] || []).length), 0);
-  console.log(`    ${c.name}（子类 ${c.children.length}）：${map[c.code] ? map[c.code].length : 0} 条直属 / ${total} 条含子类`);
+// 编码是 buildTaxonomyFromSkeleton 分配的，不在模型返回的骨架里，按节点表聚合
+for (const t of built.nodes.filter((n) => !n.parent)) {
+  const kids = built.nodes.filter((n) => n.parent === t.code);
+  const direct = (map[t.code] || []).length;
+  const withKids = kids.reduce((s, k) => s + (map[k.code] || []).length, direct);
+  console.log(`    ${t.name}（子类 ${kids.length}）：${direct} 条直属 / ${withKids} 条含子类`);
 }
 
+const out = arg('json-out', '');
+if (out) {
+  writeFileSync(out, JSON.stringify(skeleton, null, 2));
+  console.log(`\n骨架已写入 ${out}`);
+}
 console.log('\n骨架 JSON（可直接贴回来）：');
 console.log(JSON.stringify(skeleton, null, 2));
