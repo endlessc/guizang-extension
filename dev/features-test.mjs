@@ -15,7 +15,7 @@ import { normalizeBase } from '../lib/llm.js';
 import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages, PROMPT_VERSION } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { sampleOps } from '../lib/organize.js';
-import { parseTree, treeOrder } from '../lib/tree.js';
+import { parseTree, treeOrder, familyOf } from '../lib/tree.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -430,7 +430,19 @@ console.log('10. 拆二级后的父子关系与展示顺序（lib/tree.js）');
   const cyc = treeOrder([{ code: 'A' }, { code: 'B' }], { A: 'B', B: 'A' });
   assert.equal(cyc.length, 2, '父子关系成环时也不能漏画');
   console.log('  ✓ 父子关系成环时也不漏画');
-  passed += 5;
+
+  // 一级目录的「整枝」：自己 + 全部后代，聚合视图按它筛选
+  assert.deepEqual([...familyOf('000', r.parentOf)].sort(), ['000', '010', '020'], '一级目录算上全部子类');
+  console.log('  ✓ 一级目录算上全部子类');
+  assert.deepEqual([...familyOf('010', r.parentOf)], ['010'], '叶子目录只有自己');
+  console.log('  ✓ 叶子目录只有自己');
+  assert.deepEqual([...familyOf('999', r.parentOf)], ['999'], '不存在的编码也返回自身');
+  console.log('  ✓ 没有子类的编码返回自身');
+  assert.deepEqual([...familyOf('', r.parentOf)], [], '空编码（待归类）不算任何类目');
+  console.log('  ✓ 空编码不算类目');
+  assert.equal(familyOf('A', { A: 'B', B: 'A' }).size, 2, '成环时不死循环');
+  console.log('  ✓ 成环时不死循环');
+  passed += 9;
 }
 
 console.log(`\n✅ 全部通过（${passed} 项断言）`);

@@ -5,7 +5,7 @@ import {
   TONE, PROBLEM, SUSPECT, statusMark, onBroadcast, debounce, checkProto,
   THEMES, getTheme, setThemeAnimated,
 } from './shared.js';
-import { groupByCode, treeOrder } from '../lib/tree.js';
+import { groupByCode, treeOrder, familyOf } from '../lib/tree.js';
 import { groupOps } from '../lib/organize.js';
 import { findDuplicates, duplicateIdSet, removableCount } from '../lib/dedup.js';
 import { filterAndScore, parseQuery } from '../lib/search.js';
@@ -229,7 +229,11 @@ function folderName(code) {
 function visible() {
   let rows = S.items;
   const v = S.view;
-  if (v.kind === 'folder') rows = rows.filter((it) => (it.code || 'none') === v.code);
+  if (v.kind === 'folder') {
+    // 一级目录是「子类的和」：拆过二级之后它自己没有直接条目，但下面的书签仍属于它
+    const fam = familyOf(v.code, S.parentOf);
+    rows = rows.filter((it) => fam.has(it.code || 'none'));
+  }
   else if (v.kind === 'starred') rows = rows.filter((it) => S.meta[it.id]?.star);
   else if (v.kind === 'unread') rows = rows.filter((it) => S.meta[it.id]?.readState === 'unread');
   else if (v.kind === 'dead') rows = rows.filter((it) => PROBLEM.has((S.health[it.id] || {}).status));
@@ -542,14 +546,17 @@ function renderFilterBar() {
 
 /* ── 书架 + 拖拽归类落点 ───────────────────────── */
 
-function railItem({ code, name, count, bad, active, view, iconName, tone, dropKind = '', level = 0, subCount = 0 }) {
+function railItem({ code, name, count, own = 0, bad, active, view, iconName, tone, dropKind = '', level = 0, subCount = 0 }) {
   const lead = code
     ? `<span class="rail-num">${esc(code)}</span>`
     : `<span class="rail-icon tone-${tone || 'ink'}">${icon(iconName, 13)}</span>`;
   const countTone = tone === 'dead' && count ? ' tone-dead' : tone === 'warn' && count ? ' tone-warn' : '';
-  // 有子类的一级目录：本目录「0 条」是真的，但别让人以为它是空的，把子类情况写进提示
-  const subNote = subCount ? `，下含 ${subCount} 个子类` : '';
-  const tip = code ? `${code} ${name}（本目录 ${count} 条${bad ? `，${bad} 条失效` : ''}${subNote}，可拖入归类）` : `${name}（${count} 条）`;
+  // 有子类的一级目录：条数是整枝合计，提示里说清「直挂几条 + 子类几条」
+  const bits = [];
+  if (subCount) bits.push(`本目录直挂 ${own} 条`, `下含 ${subCount} 个子类共 ${count} 条`);
+  else bits.push(`${count} 条`);
+  if (bad) bits.push(`${bad} 条失效`);
+  const tip = code ? `${code} ${name}（${bits.join('，')}，可拖入归类）` : `${name}（${count} 条）`;
   const dropAttr = dropKind ? ` data-drop-kind="${dropKind}"` : (code ? ` data-drop-code="${esc(code)}"` : '');
   return `<button class="rail-item${active ? ' is-active' : ''}${level > 0 ? ' is-sub' : ''}" data-view="${view}"${dropAttr} title="${esc(tip)}">
     ${lead}
@@ -666,11 +673,18 @@ function wireSubChips(root) {
 function renderRail() {
   const c = counts();
   const byCode = {};
+  const aggByCode = {};      // 连同后代一起算：一级目录显示的是「整枝」的条数
   const badByCode = {};
   for (const it of S.items) {
     const k = it.code || 'none';
     byCode[k] = (byCode[k] || 0) + 1;
-    if (PROBLEM.has((S.health[it.id] || {}).status)) badByCode[k] = (badByCode[k] || 0) + 1;
+    const bad = PROBLEM.has((S.health[it.id] || {}).status);
+    if (bad) badByCode[k] = (badByCode[k] || 0) + 1;
+    let cur = k;
+    for (let guard = 0; cur && guard < 8; guard += 1) {
+      aggByCode[cur] = (aggByCode[cur] || 0) + 1;
+      cur = S.parentOf[cur];
+    }
   }
 
   const parts = [];
@@ -701,7 +715,7 @@ function renderRail() {
   const kids = childCounts();
   for (const f of treeOrder(S.folderScheme, S.parentOf)) {
     parts.push(railItem({
-      code: f.code, name: f.name, count: byCode[f.code] || 0,
+      code: f.code, name: f.name, count: aggByCode[f.code] || 0, own: byCode[f.code] || 0,
       bad: badByCode[f.code] || 0, view: f.code, level: f.level,
       subCount: kids.get(f.code) || 0,
       active: S.view.kind === 'folder' && S.view.code === f.code,
@@ -849,7 +863,7 @@ function renderHead() {
       <span class="crumb-count tnum">${rows.length}</span>
     </div>
     <div class="list-tools">
-      ${S.view.kind === 'folder' && rows.length >= 6 && S.aiReady
+      ${S.view.kind === 'folder' && rows.length >= 6 && S.aiReady && !childCounts().get(S.view.code)
         ? `<button class="btn btn-line btn-sm" id="btnSplitFolder" title="让模型给这个目录分 2–5 个二级，建子目录并搬进去（可撤销）">${icon('folder', 13)}<span>拆分此目录</span></button>`
         : ''}
       ${canTriage ? `<button class="btn btn-line btn-sm" id="btnTriage" title="逐卷审定沉浸归档 (T)">${icon('triage', 13)}<span>逐卷审定</span></button>` : ''}
@@ -1235,9 +1249,11 @@ function renderList() {
   }
 
   let body = '';
-  const flat = Boolean(
-    ['folder', 'dead', 'susp', 'moved', 'starred', 'unread', 'tag', 'usage'].includes(S.view.kind) || S.q.trim()
-  );
+  const hasSubs = S.view.kind === 'folder' && childFolders(S.view.code).length > 0;
+  // 聚合视图按子类分组（组头就是索引），所以不设 flat；搜索时仍平铺
+  const flat = S.q.trim()
+    ? true
+    : (['folder', 'dead', 'susp', 'moved', 'starred', 'unread', 'tag', 'usage'].includes(S.view.kind) && !hasSubs);
   const showCat = flat && S.view.kind !== 'folder';
   const itemRenderer = (it, o) => (isCards ? cardTileHtml(it, o) : rowHtml(it, o));
   const wrapItems = (html) => (isCards ? `<div class="cards-grid">${html}</div>` : html);
@@ -1254,7 +1270,7 @@ function renderList() {
   } else if (flat) {
     body = wrapItems(shown.map((it) => itemRenderer(it, { showCat })).join(''));
   } else {
-    const groups = groupByCode(shown, S.folderScheme);
+    const groups = groupByCode(shown, hasSubs ? treeOrder(S.folderScheme, S.parentOf) : S.folderScheme);
     body = groups.map((g) => {
       const bad = g.rows.filter((it) => PROBLEM.has((S.health[it.id] || {}).status)).length;
       return `<div class="group-head">
@@ -1284,10 +1300,7 @@ function renderList() {
       </div>`
     : '<div class="list-tail"></div>';
 
-  // 一级目录下还有子类时，列表上方补一条入口（有直接条目时也不会看不到子类）
-  const subStrip = S.view.kind === 'folder' && !S.q.trim() ? subChipsHtml(S.view.code) : '';
-  list.innerHTML = subStrip + body + tail;
-  if (subStrip) wireSubChips(list);
+  list.innerHTML = body + tail;
 
   $('#btnLoadMore')?.addEventListener('click', () => { S.renderLimit += 200; renderList(); });
   $('#btnLoadAll')?.addEventListener('click', () => { S.renderLimit = rows.length; renderList(); });
