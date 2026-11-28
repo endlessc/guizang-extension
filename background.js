@@ -23,7 +23,7 @@ import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js'
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
-  approveTaxonomy, toScheme, planExtend, applyExtend, acceptProposals,
+  approveTaxonomy, toScheme, planExtend, applyExtend, acceptProposals, coverageOf,
 } from './lib/taxonomy.js';
 import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
 import { buildOmniboxSuggestions } from './lib/search.js';
@@ -315,6 +315,8 @@ async function runDesign({ parentSchemeId = '', sampleSize = 200 }) {
       maxDepth: draft.params.maxDepth,
     });
     const final = { ...pruned.taxonomy, removed: pruned.removed, dropped: pruned.dropped.length, status: 'draft' };
+    // 剪枝会带走一批成员，它们是「还没归」而不是「已归」——重算一次，别让覆盖数虚高
+    final.source = { ...final.source, unmatched: coverageOf(final, items).uncovered };
 
     await chrome.storage.local.set({ [TAXONOMY_KEY]: final });
     broadcast({ type: 'taxonomy:done', draft: final });
@@ -1113,14 +1115,15 @@ const handlers = {
     const next = applyExtend(draft, plan.assign);
     const saved = {
       ...next,
+      source: { ...draft.source, unmatched: plan.pending },
       proposals: [...(draft.proposals || []), ...plan.proposals],
       lastExtendAt: Date.now(),
-      lastExtend: { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length },
+      lastExtend: { assigned, proposals: plan.proposals.length, unmatched: plan.pending },
     };
     await chrome.storage.local.set({ [TAXONOMY_KEY]: saved });
     broadcast({ type: 'taxonomy:done', draft: saved });
     if (assigned) broadcast({ type: 'state:changed' });
-    return { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length };
+    return { assigned, proposals: plan.proposals.length, unmatched: plan.pending };
   },
 
   /** 接受建议：变成正式节点，状态回 draft（还要再审定才能落成目录） */

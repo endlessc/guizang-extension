@@ -202,18 +202,33 @@ async function renderTaxonomy() {
   if (!txDraft) {
     status.innerHTML = '还没有草稿。归纳只读你的收藏，不会改动任何书签。';
     body.innerHTML = '';
+    const props = $('#txProposals');
+    if (props) props.innerHTML = '';
+    const extend = $('#btnTxExtend');
+    if (extend) extend.disabled = true;
     cancel.hidden = true;
     return;
   }
+  const extendBtn = $('#btnTxExtend');
+  if (extendBtn) extendBtn.disabled = false;
 
   const s = txDraft.stats || {};
   const state = txDraft.status === 'approved' ? '已审定，等落成目录'
     : txDraft.status === 'installed' ? '已落成目录' : '草稿';
+  // 覆盖/未覆盖同源推导，保证相加等于总条数；stats.members 会重复计同一成员，不能拿来当覆盖数
+  const src = txDraft.source || {};
+  const uncovered = Number.isFinite(src.unmatched) ? src.unmatched : null;
+  const covered = uncovered !== null && Number.isFinite(src.items)
+    ? Math.max(0, src.items - uncovered)
+    : (s.members || 0);
   status.innerHTML = `<b>${state}</b> · ${esc(txDraft.name || '未命名')} · `
     + `<b>${s.categories || 0}</b> 个类目 · 最深 <b>${s.maxDepth || 0}</b> 层 · `
-    + `只有一条的类目 <b>${s.singles || 0}</b> 个 · 覆盖 <b>${s.members || 0}</b> 条`
-    + (txDraft.source && txDraft.source.unmatched ? ` · 未覆盖 <b>${txDraft.source.unmatched}</b> 条` : '')
-    + (txDraft.dropped ? ` · 剪掉 <b>${txDraft.dropped}</b> 条` : '');
+    + `只有一条的类目 <b>${s.singles || 0}</b> 个 · 覆盖 <b>${covered}</b> 条`
+    + (uncovered ? ` · 未覆盖 <b>${uncovered}</b> 条` : '')
+    + (txDraft.dropped ? ` · 剪枝弃置 <b>${txDraft.dropped}</b> 条（已算进未覆盖）` : '')
+    + (txDraft.lastExtend
+      ? ` · 上次扩展：归入 <b>${txDraft.lastExtend.assigned}</b> 条、新增 <b>${txDraft.lastExtend.proposals}</b> 条建议`
+      : '');
 
   cancel.hidden = false;
   const editable = txDraft.status === 'draft';
@@ -249,6 +264,50 @@ async function renderTaxonomy() {
 
   $('#btnTxApprove')?.addEventListener('click', approveTx);
   $('#btnTxInstall')?.addEventListener('click', installTx);
+
+  renderProposals(txDraft.proposals || []);
+}
+
+/** 扩展建议：勾选后一次性接受，变成节点再走审定 */
+function renderProposals(props) {
+  const box = $('#txProposals');
+  const msg = $('#txExtendMsg');
+  if (!box) return;
+  if (!props.length) {
+    box.innerHTML = '';
+    if (msg && !msg.dataset.keep) msg.textContent = '只处理还没归入任何类目的条目，不建目录、不改结构。';
+    return;
+  }
+  const byCode = new Map((txDraft.nodes || []).map((n) => [n.code, n]));
+  box.innerHTML = `
+    <div class="tx-props">
+      ${props.map((p) => {
+        const parent = byCode.get(p.parent);
+        const label = parent ? `${p.parent} ${parent.name}` : p.parent || '（无父类）';
+        return `<label class="tx-prop">
+          <input type="checkbox" class="tx-prop-pick" data-key="${esc(p.key)}" checked />
+          <span class="tx-prop-name">${esc(p.name)}</span>
+          <span class="tx-prop-meta">挂到 ${esc(label)} · ${p.members.length} 条 · ${esc(p.host || '')}</span>
+        </label>`;
+      }).join('')}
+      <div class="opt-row">
+        <button type="button" class="btn btn-primary btn-sm" id="btnTxAcceptProps">接受选中</button>
+        <span class="hint">接受后它们会变成正式节点，还要再审定并落成目录才会建文件夹。</span>
+      </div>
+    </div>`;
+  $('#btnTxAcceptProps')?.addEventListener('click', acceptProps);
+}
+
+async function acceptProps() {
+  const keys = [...document.querySelectorAll('.tx-prop-pick:checked')].map((el) => el.dataset.key);
+  if (!keys.length) return toast('先勾选要接受的建议');
+  try {
+    txDraft = await send('taxonomy:acceptProposals', { keys });
+    await renderTaxonomy();
+    toast(`已接受 ${keys.length} 条建议，记得再审定一次`);
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 async function approveTx() {
@@ -303,6 +362,18 @@ function wireTaxonomy() {
       toast(err.message);
     }
   });
+  $('#btnTxExtend')?.addEventListener('click', async () => {
+    const msg = $('#txExtendMsg');
+    if (msg) { msg.dataset.keep = '1'; msg.textContent = '正在扫描新条目…'; }
+    try {
+      const r = await send('taxonomy:extend');
+      if (msg) msg.textContent = `归入 ${r.assigned} 条，新增 ${r.proposals} 条建议，仍未覆盖 ${r.unmatched} 条`;
+      await renderTaxonomy();
+    } catch (err) {
+      if (msg) msg.textContent = err.message;
+    }
+  });
+
   $('#btnTxCancel')?.addEventListener('click', async () => {
     await send('taxonomy:cancel').catch(() => {});
     txDraft = null;

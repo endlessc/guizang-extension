@@ -16,7 +16,7 @@ import { runAccept } from '../lib/pending.js';
 import { DEWEY_HINTS } from '../lib/schemes.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme,
-  planExtend, applyExtend, acceptProposals,
+  planExtend, applyExtend, acceptProposals, coverageOf,
 } from '../lib/taxonomy.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
@@ -570,6 +570,22 @@ async function handle(msg) {
     });
     const pruned = pruneTaxonomy(draft, { minPerCategory: 2 });
     taxoDraft = { ...pruned.taxonomy, status: 'draft' };
+    taxoDraft.source = { ...taxoDraft.source, unmatched: coverageOf(taxoDraft, st.items).uncovered };
+    // 预览专用：?props=1 时挂一条假建议，用来检查建议清单的渲染
+    if (typeof location !== 'undefined' && location.search.includes('props')) {
+      const top = taxoDraft.nodes.find((n) => !n.parent);
+      if (top) {
+        const ids = st.items.slice(0, 5).map((it) => it.id);
+        taxoDraft.proposals = [{
+          key: 'p_preview.example.com',
+          name: 'Preview',
+          host: 'preview.example.com',
+          parent: top.code,
+          members: ids,
+          reason: 'preview.example.com 下 5 条',
+        }];
+      }
+    }
     emit({ type: 'taxonomy:start' });
     emit({ type: 'taxonomy:done', draft: taxoDraft });
     return { started: true };
@@ -584,11 +600,12 @@ async function handle(msg) {
     const next = applyExtend(taxoDraft, plan.assign);
     taxoDraft = {
       ...next,
+      source: { ...taxoDraft.source, unmatched: plan.pending },
       proposals: [...(taxoDraft.proposals || []), ...plan.proposals],
-      lastExtend: { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length },
+      lastExtend: { assigned, proposals: plan.proposals.length, unmatched: plan.pending },
     };
     emit({ type: 'taxonomy:done', draft: taxoDraft });
-    return { assigned, proposals: plan.proposals.length, unmatched: plan.unmatched.length };
+    return { assigned, proposals: plan.proposals.length, unmatched: plan.pending };
   }
 
   if (type === 'taxonomy:acceptProposals') {

@@ -12,7 +12,7 @@ import {
   normalizeName, normalizeNames, toScheme, computeStats, groupMembers, validateTaxonomy,
   sampleForSkeleton, buildTaxonomyFromSkeleton, assignByRules, TOP_LIMIT,
   renameNodes, removeNodes, approveTaxonomy,
-  planExtend, applyExtend, acceptProposals, siteLabel,
+  planExtend, applyExtend, acceptProposals, coverageOf, siteLabel,
 } from '../lib/taxonomy.js';
 
 let failed = 0;
@@ -296,6 +296,10 @@ console.log('审定：改名 / 删类 / 状态流转');
   const scheme = toScheme(approved);
   eq('折装后仍带父级', scheme.folders.filter((f) => f.parent).map((f) => f.code), ['010']);
   eq('折装顺序父在前', scheme.folders.map((f) => f.code), ['000', '010', '100']);
+
+  const withdrawn = approveTaxonomy({ ...tx, source: { items: 5, unmatched: 0 } }, { removed: ['020'], now: 1 });
+  eq('删类退回的成员计入未覆盖', withdrawn.source.unmatched, 2);
+  eq('没有未覆盖数的草稿不瞎加', approveTaxonomy(tx, { removed: ['020'], now: 1 }).source.unmatched, undefined);
 }
 
 console.log('站点标签');
@@ -307,6 +311,27 @@ console.log('站点标签');
   eq('www.example.io → Example', siteLabel('www.example.io'), 'Example');
   eq('localhost 原样', siteLabel('localhost'), 'localhost');
   eq('超长截到 12', siteLabel('a'.repeat(30) + '.com').length, 12);
+}
+
+console.log('覆盖率：全流程一个口径');
+{
+  const taxo = createTaxonomy({
+    id: 'cov',
+    nodes: [
+      { code: '100', name: '编程', members: ['a', 'b'] },
+      { code: '200', name: '资讯', members: ['a', 'gone'] },
+    ],
+  });
+  const items = [
+    { id: 'a', url: 'https://a.com/1' },
+    { id: 'b', url: 'https://b.com/2' },
+    { id: 'c', url: 'https://c.com/3' },
+    { id: 'd' }, // 没有 url 的条目不算进总数
+  ];
+  const cov = coverageOf(taxo, items);
+  eq('总数只算有 url 的', cov.items, 3);
+  eq('重复成员只算一次、不在书签里的成员不算', cov.covered, 2);
+  eq('未覆盖 = 总数 - 已覆盖', cov.uncovered, 1);
 }
 
 console.log('增量扩展：不动结构，只归类 + 出建议');
@@ -340,7 +365,9 @@ console.log('增量扩展：不动结构，只归类 + 出建议');
   eq('建议名字取站点', p.name, 'Example');
   eq('建议挂到 100（110 的顶层）', p.parent, '100');
   eq('建议带上簇内成员', p.members.length, 8);
-  eq('散兵游勇不算建议', plan.unmatched, ['lone']);
+  eq('散兵游勇不算建议', plan.leftover, ['lone']);
+  // pending 是「归完之后仍未归入任何类目」的真实条数：8 条在建议里 + 1 条散兵，都还没归
+  eq('仍未覆盖含建议里的条目', plan.pending, 9);
 
   const after = applyExtend(base, plan.assign);
   eq('归类后 100 多了一条', after.nodes.find((n) => n.code === '100').members.length, 2);
@@ -348,7 +375,7 @@ console.log('增量扩展：不动结构，只归类 + 出建议');
   eq('结构没变（节点数相同）', after.nodes.length, base.nodes.length);
   eq('原对象未被修改', base.nodes.find((n) => n.code === '110').members.length, 1);
 
-  const withProp = { ...after, proposals: plan.proposals };
+  const withProp = { ...after, proposals: plan.proposals, source: { items: items.length, unmatched: plan.pending } };
   const accepted = acceptProposals(withProp, [p.key]);
   eq('接受后多一个节点', accepted.nodes.length, withProp.nodes.length + 1);
   const added = accepted.nodes.find((n) => n.parent === '100' && n.code !== '110');
@@ -356,6 +383,14 @@ console.log('增量扩展：不动结构，只归类 + 出建议');
   eq('新节点继承成员', added.members.length, 8);
   eq('状态回到 draft（还要再审定）', accepted.status, 'draft');
   eq('建议被消费掉', accepted.proposals.length, 0);
+  eq('建议转正后未覆盖只剩散兵 1 条', accepted.source.unmatched, 1);
+
+  // 重名成员不该把未覆盖数减成负数
+  const dup = acceptProposals(
+    { ...withProp, proposals: [{ ...p, key: 'p_dup', members: ['old1', 'new1'] }] },
+    ['p_dup'],
+  );
+  eq('重复成员不减未覆盖数', dup.source.unmatched, 9);
 }
 
 console.log('增量扩展：父类满了不硬塞');
