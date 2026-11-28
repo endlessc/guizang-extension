@@ -18,7 +18,7 @@ import {
   classify, classifyHeuristic, classifyWithModel, designSkeleton, cleanTitles,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
@@ -204,9 +204,26 @@ async function runApply() {
   await ensureBackupFor(plan);
 
   const settings = await readSettings();
-  const tree = await chrome.bookmarks.getTree();
-  const { scheme } = parseTree(tree, parseOptsFor(settings));
-  const folderOf = new Map(scheme.map((f) => [f.code, f.id]));
+  let tree = await chrome.bookmarks.getTree();
+  let { scheme } = parseTree(tree, parseOptsFor(settings));
+  let folderOf = new Map(scheme.map((f) => [f.code, f.id]));
+
+  // 计划里出现但目录还不存在的（「按方案建档」会这样）：先按方案把目录建出来再搬
+  const wanted = [...new Set(ops.map((o) => o.to.code))].filter((code) => !folderOf.has(code));
+  if (wanted.length) {
+    const nameOf = new Map(plan.scheme.map((f) => [f.code, f.name]));
+    const folders = wanted.map((code) => ({ code, name: nameOf.get(code) || code }));
+    const kind = folders.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
+    const inst = planInstall(tree, { id: 'adhoc', kind, folders });
+    if (inst.conflict.length) {
+      throw new Error('目标目录和已有文件夹撞码：'
+        + inst.conflict.map((c) => `「${c.code}」现有为「${c.got}」`).join('、'));
+    }
+    await createFolders(inst);
+    tree = await chrome.bookmarks.getTree();
+    ({ scheme } = parseTree(tree, parseOptsFor(settings)));
+    folderOf = new Map(scheme.map((f) => [f.code, f.id]));
+  }
 
   applyCtl = { running: true, stop: false };
   broadcast({ type: 'organize:apply-start', total: ops.length });
@@ -372,13 +389,19 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
   try {
     const state = await loadState();
     const { items, scheme, settings, learned } = state;
-    if (!scheme.length) throw new Error('还没有分类目录，先到设置里装一套方案');
+    // 按方案建档：判定用方案定义的完整类目（不只书签栏里已建的那几个）
+    const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
+    if (scope === 'scheme' && !full) throw new Error('先在设置里选一套方案，再按方案建档');
+    if (!scheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
+    const targets = full
+      ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '' }))
+      : scheme;
 
-    const picked = (
-      scope === 'all' ? items
-      : scope === 'folder' && folderCode ? items.filter((it) => it.code === folderCode)
-      : items.filter((it) => !it.code)
-    ).slice(0, MAX_CANDIDATES);
+    const { candidates: picked } = preselect(items, {
+      scope,
+      folderCode,
+      codes: new Set(targets.map((f) => f.code)),
+    });
 
     organize.total = picked.length;
     organize.done = picked.length;
@@ -386,7 +409,7 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
 
     // 本地关键词规则 + 历史改判偏好先跑：零成本，能定的先定
     const suggestions = {};
-    for (const s of classifyHeuristic(picked, scheme, { schemeId: settings.schemeId, learned })) {
+    for (const s of classifyHeuristic(picked, targets, { schemeId: settings.schemeId, learned })) {
       suggestions[s.id] = { ...s };
     }
 
@@ -402,7 +425,7 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
         const stats = {};
         const refined = await classifyWithModel(
           lowConf,
-          scheme,
+          targets,
           settings,
           (done, total) => {
             organize.done = done;
@@ -425,11 +448,12 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
     const tree = await chrome.bookmarks.getTree();
     const plan = buildPlan({
       items,
-      scheme,
+      scheme: targets,
       scope,
       folderCode,
       suggestions,
       blocked: collectManagedIds(tree),
+      existing: new Set(scheme.map((f) => f.code)),
     });
     await writePlan(plan);
     return plan;

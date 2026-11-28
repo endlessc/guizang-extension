@@ -147,6 +147,11 @@ let learned = {
 let usageCache = null;
 let mockTheme = 'system';
 let settings = { ...DEFAULT_SETTINGS };
+// 预览用：?scheme=para / ?scheme=clc12 —— 只切当前方案、不建目录，模拟「选了方案还没建档」
+if (typeof location !== 'undefined') {
+  const want = new URLSearchParams(location.search).get('scheme');
+  if (want && getScheme(want, [])) settings = { ...settings, schemeId: want };
+}
 let taxoDraft = null;      // 分类法草稿（本地预览内存态）
 let plan = null;           // 整理计划（本地预览内存态）
 let journal = [];          // 整理日志
@@ -715,11 +720,22 @@ async function handle(msg) {
   if (type === 'organize:plan') {
     const st = stateLoad();
     const scope = msg.scope || 'inbox';
-    const picked = scope === 'all' ? st.items : st.items.filter((it) => !it.code);
+    const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
+    if (scope === 'scheme' && !full) throw new Error('先在设置里选一套方案，再按方案建档');
+    const targets = full ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '' })) : st.scheme;
+    const allScope = scope === 'all' || scope === 'scheme';
+    const picked = allScope ? st.items : st.items.filter((it) => !it.code);
     emit({ type: 'organize:start' });
     const suggestions = {};
-    for (const s of classifyHeuristic(picked, st.scheme, { schemeId: settings.schemeId, learned })) suggestions[s.id] = s;
-    plan = buildPlan({ items: st.items, scheme: st.scheme, scope, folderCode: msg.folderCode || '', suggestions });
+    for (const s of classifyHeuristic(picked, targets, { schemeId: settings.schemeId, learned })) suggestions[s.id] = s;
+    plan = buildPlan({
+      items: st.items,
+      scheme: targets,
+      scope,
+      folderCode: msg.folderCode || '',
+      suggestions,
+      existing: new Set(st.scheme.map((f) => f.code)),
+    });
     emit({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
     emit({ type: 'organize:done', plan });
     return { started: true };
@@ -735,6 +751,15 @@ async function handle(msg) {
       const meta = await handle({ type: 'backup:run', planId: plan.id });
       emit({ type: 'organize:backup-made', meta });
     }
+    // 按方案建档：缺的目标目录先建出来（真机同样在研究 runApply 里做）
+    const bar = findNode('1');
+    for (const code of [...new Set(ops.map((o) => o.to.code))]) {
+      const exists = [...bar.children].some((c) => !c.url && String(c.title).startsWith(code + ' '));
+      if (exists) continue;
+      const name = (plan.scheme.find((f) => f.code === code) || {}).name || code;
+      bar.children.push({ id: 'f' + code, title: `${code} ${name}`, parentId: bar.id, children: [] });
+    }
+
     emit({ type: 'organize:apply-start', total: ops.length });
     const done = [];
     let failed = 0;
@@ -952,7 +977,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.8.2-mock' }),
+      getManifest: () => ({ version: '0.9.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

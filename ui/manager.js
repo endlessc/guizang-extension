@@ -1761,11 +1761,14 @@ function organizePanel() {
         <div class="seg-tabs">
           <button type="button" class="seg-tab${S.orgScope === 'inbox' ? ' is-active' : ''}" data-org-scope="inbox">仅待归类</button>
           <button type="button" class="seg-tab${S.orgScope === 'all' ? ' is-active' : ''}" data-org-scope="all">全库巡检错放</button>
+          <button type="button" class="seg-tab${S.orgScope === 'scheme' ? ' is-active' : ''}" data-org-scope="scheme">按方案建档</button>
         </div>
         <div class="plan-empty-hint">${ready
           ? (S.orgScope === 'all'
               ? '全库巡检：优先挑「还不在本方案类目里」的书签（每次最多 200 条），归位后它们就离开候选池，再点一次自动接着下一批；方案内错放也会一并列出。确认无误且自动备份后才动手。'
-              : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
+              : S.orgScope === 'scheme'
+                ? '按方案建档：用当前方案定义的完整类目来判断（不只书签栏里已经建好的那几个），每批最多 200 条。计划里出现、但还没有对应文件夹的类目，会在执行时按方案自动创建，然后把这些书签搬进去——目录由你的收藏决定，不再是一套默认空目录。'
+                : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
           : '先到设置页装一套方案（杜威、中图法或自定义方案），再回来生成计划。'}</div>
         <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
         ${journalHistoryHtml()}
@@ -1787,8 +1790,9 @@ function organizePanel() {
   return head + `
     <div class="insp-body">
       <div class="plan-stats">
-        <span>范围 <b>${plan.scope === 'all' ? '全库' : '待归类'}</b></span>
-        ${plan.scope === 'all' && plan.outside ? `<span>方案外 <b>${plan.outside}</b></span>` : ''}
+        <span>范围 <b>${plan.scope === 'scheme' ? '按方案建档' : plan.scope === 'all' ? '全库' : '待归类'}</b></span>
+        ${(plan.scope === 'all' || plan.scope === 'scheme') && plan.outside ? `<span>方案外 <b>${plan.outside}</b></span>` : ''}
+        ${plan.created && plan.created.length ? `<span>新建目录 <b>${plan.created.length}</b></span>` : ''}
         <span>可移 <b>${s.ready}</b></span>
         <span>拿不准 <b>${s.unsure}</b></span>
         <span>跳过 <b>${s.skip}</b></span>
@@ -1812,7 +1816,7 @@ function organizePanel() {
 function planRow(op) {
   const tone = op.status === 'ready' ? '' : op.status === 'unsure' ? ' tone-warn' : op.status === 'blocked' ? ' tone-dead' : ' tone-ink';
   const fromPrefix = op.from && op.from.code ? `${esc(op.from.code)} ` : '';
-  const tag = op.status === 'ready' ? `${fromPrefix}→ ${esc(op.to.code)} ${esc(op.to.name)}`
+  const tag = op.status === 'ready' ? `${fromPrefix}→ ${esc(op.to.code)} ${esc(op.to.name)}${op.to.missing ? '（新建目录）' : ''}`
     : op.status === 'unsure' ? '拿不准'
     : op.status === 'blocked' ? '动不了'
     : '跳过';

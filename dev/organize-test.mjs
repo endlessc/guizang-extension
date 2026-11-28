@@ -73,9 +73,30 @@ console.log('状态判定');
   eq('受管 → blocked', plan.ops.find((o) => o.id === '4').status, 'blocked');
   eq('blocked 的说明', plan.ops.find((o) => o.id === '4').reason, '受管书签，无法移动');
   eq('统计', plan.stats, { total: 4, ready: 1, unsure: 1, blocked: 1, skip: 1 });
-  eq('目标类目带名字', plan.ops.find((o) => o.id === '1').to, { code: '100', name: '编程与后端' });
+  eq('目标类目带名字', plan.ops.find((o) => o.id === '1').to, { code: '100', name: '编程与后端', missing: false });
   eq('来源保留', plan.ops.find((o) => o.id === '1').source, 'model');
   eq('scheme 快照只留 code+name', Object.keys(plan.scheme[0]).sort(), ['code', 'name']);
+}
+
+console.log('按方案建档：缺的目录标出来，执行时再建');
+{
+  // 方案里有 000/100/500，但书签栏里只建了 000，另外两个要到执行时创建
+  const items = [item('a', ''), item('b', ''), item('c', '')];
+  const suggestions = {
+    a: { code: '100', conf: 0.9, source: 'model' },
+    b: { code: '500', conf: 0.9, source: 'model' },
+    c: { code: '000', conf: 0.9, source: 'model' },
+  };
+  const plan = buildPlan({
+    items, scheme, scope: 'all', suggestions, blocked: new Set(), existing: new Set(['000']), now: 9,
+  });
+  eq('缺目录的目标被标 missing', plan.ops.filter((o) => o.to.missing).map((o) => o.to.code).sort(), ['100', '500']);
+  eq('已有目录不标', plan.ops.find((o) => o.to.code === '000').to.missing, false);
+  eq('将新建的目录清单去重且带名字', plan.created, [
+    { code: '100', name: '编程与后端' }, { code: '500', name: '人工智能' },
+  ]);
+  const plain = buildPlan({ items, scheme, scope: 'all', suggestions, blocked: new Set(), now: 9 });
+  eq('不传 existing 时视为都已存在', plain.created.length, 0);
 }
 
 console.log('分组与排序');
