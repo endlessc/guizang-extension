@@ -196,10 +196,10 @@ async function ensureBackupFor(plan) {
 }
 
 /** 按类目批量移动，每 25 条让出一次事件循环；随时可停 */
-async function runApply() {
+async function runApply({ includeUnsure = false } = {}) {
   if (applyCtl.running) throw new Error('上一次整理还没结束');
   const plan = await readPlan();
-  const ops = readyOps(plan);
+  const ops = readyOps(plan, { includeUnsure });
   if (!ops.length) throw new Error('计划里没有可执行的条目');
 
   await ensureBackupFor(plan);
@@ -1255,8 +1255,8 @@ const handlers = {
     return { plan: plan || null, running: organize.running, applying: applyCtl.running, stopping: applyCtl.stop };
   },
 
-  'organize:apply': async () => {
-    runApply().catch((e) => {
+  'organize:apply': async ({ includeUnsure = false } = {}) => {
+    runApply({ includeUnsure }).catch((e) => {
       applyCtl = { running: false, stop: false };
       broadcast({ type: 'organize:error', message: String((e && e.message) || e) });
     });

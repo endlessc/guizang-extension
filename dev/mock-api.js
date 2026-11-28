@@ -780,7 +780,7 @@ async function handle(msg) {
 
   if (type === 'organize:apply') {
     if (!plan) throw new Error('还没有整理计划');
-    const ops = readyOps(plan);
+    const ops = readyOps(plan, { includeUnsure: Boolean(msg.includeUnsure) });
     if (!ops.length) throw new Error('计划里没有可执行的条目');
     // 真实后台在这里会先补一份备份，本地预览照做，避免预览和真机行为不一致
     if (!backups.length) {
@@ -1033,7 +1033,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.12.0-mock' }),
+      getManifest: () => ({ version: '0.13.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

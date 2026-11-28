@@ -9,7 +9,7 @@
  */
 
 import {
-  preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes,
+  preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes, readyOps,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -167,6 +167,20 @@ console.log('按方案建档：缺的目录标出来，执行时再建');
   eq('改判后新建清单跟着变', fixed.created.map((f) => f.code).sort(), ['100', '500']);
   const dropped = dropOp(fixed, 'a');
   eq('剔除后新建清单少一个', dropped.created.map((f) => f.code), ['500']);
+}
+
+console.log('执行集合：可选择连「拿不准」一起');
+{
+  const items = [item('r1', ''), item('u1', ''), item('b1', ''), item('s1', '')];
+  const suggestions = {
+    r1: { code: '100', conf: 0.9, source: 'model' },
+    u1: { code: '500', conf: 0.2, source: 'heuristic' },
+    s1: { code: '000', conf: 0.9, source: 'model' },
+  };
+  const plan = buildPlan({ items, scheme, suggestions, blocked: new Set(['b1']), now: 20 });
+  eq('默认只执行 ready', readyOps(plan).map((o) => o.id).sort(), ['r1', 's1']);
+  eq('拿不准默认不执行', readyOps(plan).some((o) => o.id === 'u1'), false);
+  eq('打开开关后连拿不准一起', readyOps(plan, { includeUnsure: true }).map((o) => o.id).sort(), ['r1', 's1', 'u1']);
 }
 
 console.log('分组与排序');

@@ -63,7 +63,8 @@ const S = {
   journals: [],            // 最近 3 次整理日志
   orgScope: 'inbox',       // 'inbox' | 'all'
   orgTab: 'plan',          // 'plan' | 'clean'
-  orgLimit: '200',         // 每轮条数：'200' | '500' | '1000' | 'all'
+  orgLimit: '200',
+  orgIncludeUnsure: false,         // 每轮条数：'200' | '500' | '1000' | 'all'
   cleanList: null,         // AI 标题洗白建议列表
   cleanBusy: false,
   serendipityOpen: false,
@@ -1853,8 +1854,14 @@ function organizePanel() {
       }${plan.scope === 'all' && plan.outside
         ? `<br>方案外共 ${plan.outside} 条，本轮计划列入 ${plan.ops.length} 条；执行完再点「重新生成」接着下一批，这个数字会越来越小直到清空`
         : ''}</div>
+      <div class="plan-foot-line">
+        <label class="opt-toggle" style="display:inline-flex;gap:6px;align-items:center">
+          <input type="checkbox" data-include-unsure ${S.orgIncludeUnsure ? 'checked' : ''} />
+          <span>连「拿不准」一起执行（多 ${s.unsure} 条，可撤销）</span>
+        </label>
+      </div>
       <div class="plan-foot-actions">
-        <button class="btn btn-primary btn-sm" data-apply ${s.ready ? '' : 'disabled'}>执行 ${s.ready} 条</button>
+        <button class="btn btn-primary btn-sm" data-apply ${(s.ready || (S.orgIncludeUnsure && s.unsure)) ? '' : 'disabled'}>执行 ${S.orgIncludeUnsure ? s.ready + s.unsure : s.ready} 条</button>
         <button class="btn btn-line btn-sm" data-gen>重新生成</button>
         <button class="btn btn-ghost btn-sm" data-clear>清空</button>
       </div>
@@ -1975,6 +1982,10 @@ function wireOrganize() {
     await send('organize:stop').catch(() => {});
     toast('已请求停止，等这一批返回后出计划');
   });
+  box.querySelector('[data-include-unsure]')?.addEventListener('change', (e) => {
+    S.orgIncludeUnsure = Boolean(e.target.checked);
+    renderInspector();
+  });
   box.querySelector('[data-clear]')?.addEventListener('click', async () => {
     await send('organize:cancel');
     S.plan = null;
@@ -1989,9 +2000,10 @@ function wireOrganize() {
   });
   box.querySelector('[data-apply]')?.addEventListener('click', async () => {
     S.applyBusy = true;
-    S.applyProgress = { done: 0, total: (S.plan && S.plan.stats.ready) || 0 };
+    const st = (S.plan && S.plan.stats) || {};
+    S.applyProgress = { done: 0, total: (st.ready || 0) + (S.orgIncludeUnsure ? (st.unsure || 0) : 0) };
     renderInspector();
-    await send('organize:apply').catch((err) => {
+    await send('organize:apply', { includeUnsure: S.orgIncludeUnsure }).catch((err) => {
       S.applyBusy = false;
       toast(err.message);
       renderInspector();
