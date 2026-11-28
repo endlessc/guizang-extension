@@ -11,6 +11,7 @@
 import {
   preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes, readyOps,
   subCodeFor, splitSubs, applySubs, planFolders, deriveSubs, schemeCreated, extendTargets,
+  leftoverFolders, estimateLeftovers,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -332,6 +333,25 @@ console.log('判定池：方案类目 + 挂在下头的现存二级');
     [{ code: '110', name: '语言' }],
     { '110': '100' },
   ).filter((f) => f.code === '110').length, 1);
+}
+
+console.log('全新生成：搬空后的旧目录');
+{
+  const dirs = [
+    { code: '000', name: '综合与工具', id: '10', depth: 1 },
+    { code: '010', name: '效率工具', id: '11', depth: 2 },
+    { code: '020', name: '开发与编程', id: '12', depth: 2 },
+    { code: '100', name: '编程', id: '20', depth: 1 },
+  ];
+  const items = [{ id: 'a', code: '100' }, { id: 'b', code: '010' }];
+  const keep = new Set(['000', '100']);
+
+  eq('没有书签留下的旧类目才算', leftoverFolders(dirs, items, keep).map((f) => f.code), ['020']);
+  eq('按深度从深到浅（先删子目录）', leftoverFolders(dirs, [], new Set(['100'])).map((f) => f.code), ['010', '020', '000']);
+
+  const est = estimateLeftovers(dirs, items, keep, new Set(['b']));
+  eq('预估：这轮会搬走的条目不算留下', est.map((f) => f.code), ['010', '020']);
+  eq('在新结构里的目录一律保留', leftoverFolders(dirs, [], keep).some((f) => keep.has(f.code)), false);
 }
 
 if (failed) {

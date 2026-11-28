@@ -1796,7 +1796,7 @@ function renderInspector() {
 async function undoJournal(id) {
   const r = await send('organize:undo', { journalId: id }).catch((err) => ({ error: err.message }));
   if (r.error) return toast(r.error);
-  toast(`已撤销 ${r.restored} 条`);
+  toast(`已撤销 ${r.restored} 条${r.rebuilt ? `，并重建 ${r.rebuilt} 个目录` : ''}`);
   await load();
 }
 
@@ -1980,7 +1980,9 @@ function organizePanel() {
           ? (S.orgScope === 'all'
               ? '全库巡检：优先挑「还不在本方案类目里」的书签（每次最多 200 条），归位后它们就离开候选池，再点一次自动接着下一批；方案内错放也会一并列出。确认无误且自动备份后才动手。'
               : S.orgScope === 'scheme'
-                ? '按方案建档：判定池 = 方案定义的类目 + 挂在这些类目下的现存二级（拆出来的 010/020 算方案内，不会被当「方案外」重判）。只增不删：建缺的目录、把判到别的类目的书签搬过去，判到同一个类目的不动。每批最多 200 条。'
+                ? (S.orgTree === 'fresh'
+                  ? '全新生成：所有书签按方案重新判一遍（旧分类不作数），生成前先整树备份；执行时搬完只清掉搬空的旧类目目录，书签一个不删，撤销会先重建目录再搬回。每批最多 200 条。'
+                  : '按方案建档：判定池 = 方案定义的类目 + 挂在这些类目下的现存二级（拆出来的 010/020 算方案内，不会被当「方案外」重判）。只增不删：建缺的目录、把判到别的类目的书签搬过去，判到同一个类目的不动。每批最多 200 条。')
                 : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
           : '先到设置页装一套方案（杜威、中图法或自定义方案），再回来生成计划。'}</div>
         <div class="plan-limit">
@@ -1993,11 +1995,14 @@ function organizePanel() {
           <span class="plan-limit-label">目录结构</span>
           <button type="button" class="seg-tab${S.orgTree === 'collection' ? ' is-active' : ''}" data-org-tree="collection">按我的收藏生成</button>
           <button type="button" class="seg-tab${S.orgTree === 'scheme' ? ' is-active' : ''}" data-org-tree="scheme">用方案的默认分类</button>
+          <button type="button" class="seg-tab${S.orgTree === 'fresh' ? ' is-active' : ''}" data-org-tree="fresh">全新生成</button>
         </div>
         <div class="plan-empty-hint">${
           S.orgTree === 'scheme'
             ? '照用方案的默认分类：方案里有几个类目就建几个（含空目录），书签按方案类目归位。'
-            : '按收藏生成：只建真正用得到的目录，空类目一个都不建。'
+            : S.orgTree === 'fresh'
+              ? '全新生成：生成前先整树备份；所有书签按方案重新判一遍（旧分类不再作数），执行后把搬空的旧类目目录清掉。目录只增不删书签，可在日志里撤销。'
+              : '按收藏生成：只建真正用得到的目录，空类目一个都不建。'
         }</div>` : ''}
         ${S.orgScope === 'scheme' && S.orgTree === 'scheme' ? '' : `
         <div class="plan-foot-line" style="margin-top:10px">
@@ -2059,6 +2064,9 @@ function organizePanel() {
         ${s.blocked ? `<span class="tone-dead">动不了 <b>${s.blocked}</b></span>` : ''}
       </div>
       ${plan.tree === 'scheme' ? '<div class="plan-empty-hint" style="margin-top:8px">目录结构：用方案的默认分类（方案里有几个建几个，含空目录）</div>' : ''}
+      ${plan.tree === 'fresh' ? `<div class="scheme-warn" style="margin:8px 0">全新生成：已备份整树${plan.backupAt ? `（${relTime(plan.backupAt)}）` : ''}。
+        执行后会把搬空的旧类目目录清掉${plan.removeEstimate && plan.removeEstimate.length ? `，预计 <b>${plan.removeEstimate.length}</b> 个（${esc(plan.removeEstimate.slice(0, 6).map((f) => f.code).join('、'))}${plan.removeEstimate.length > 6 ? '…' : ''}）` : '（本轮预估没有要清的空目录）'}。
+        撤销会先重建目录再把书签搬回。</div>` : ''}
       ${groups || '<div class="plan-empty"><div class="plan-empty-hint">计划是空的：没有需要移动的书签。</div></div>'}
     </div>
     <div class="insp-foot plan-foot">

@@ -19,7 +19,7 @@ import {
   callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, deriveSubs, schemeCreated, extendTargets, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, deriveSubs, schemeCreated, extendTargets, leftoverFolders, estimateLeftovers, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal } from './lib/wal.js';
 import { migratePending, prunePending, runAccept } from './lib/pending.js';
@@ -404,10 +404,37 @@ async function runApply({ includeUnsure = false } = {}) {
     throw new Error(`目标目录对不上：${codes}。多半是计划生成后目录被改名了，重新生成计划再执行`);
   }
 
+  // 全新生成：搬完之后清掉搬空的旧类目目录。只删空的，删一个记一个，撤销时按记录重建
+  let removed = [];
+  if (plan.tree === 'fresh' && res.journalId) {
+    const settings = await readSettings();
+    const parsed = parseTree(await chrome.bookmarks.getTree(), parseOptsFor(settings));
+    const keep = new Set((plan.scheme || []).map((f) => f.code));
+    for (const f of leftoverFolders(parsed.folderScheme, parsed.items, keep)) {
+      try {
+        const [node] = await chrome.bookmarks.get(f.id);
+        await chrome.bookmarks.remove(f.id);
+        removed.push({
+          id: f.id, title: node.title, parentId: node.parentId, index: node.index || 0, depth: f.depth || 0,
+        });
+      } catch {}   // 不空 / 已被删掉 / 受管：跳过，绝不为了「干净」硬删
+    }
+    if (removed.length) {
+      const list = await readJournal();
+      const hit = findEntry(list, res.journalId);
+      if (hit) {
+        const next = list.map((e) => (e.id === res.journalId
+          ? { ...e, folders: [...removed].sort((a, b) => (a.depth || 0) - (b.depth || 0)), removedFolders: removed.length }
+          : e));
+        await chrome.storage.local.set({ [JOURNAL_KEY]: next });
+      }
+    }
+  }
+
   await chrome.storage.local.remove(PLAN_KEY);
   broadcast({ type: 'organize:done', plan: null });
   broadcast({ type: 'state:changed' });
-  return { applied: res.moved, failed: res.failed, journalId: res.journalId, created: res.created };
+  return { applied: res.moved, failed: res.failed, journalId: res.journalId, created: res.created, removed: removed.length };
 }
 
 /** 撤销：只把这次动过的条目 move 回原处（含 index），不碰别的书签 */
@@ -417,14 +444,30 @@ async function runUndo(journalId) {
   if (!entry) throw new Error('没有可撤销的整理记录');
   if (entry.undoneAt) throw new Error('这次整理已经撤销过了');
 
+  // 全新生成会删掉搬空的旧目录：先按记录把目录建回来，拿到新旧 id 映射，书签才搬得回去
+  const folderMap = new Map();
+  let rebuilt = 0;
+  for (const f of [...(entry.folders || [])].sort((a, b) => (a.depth || 0) - (b.depth || 0))) {
+    try {
+      const node = await chrome.bookmarks.create({
+        parentId: folderMap.get(f.parentId) || f.parentId,
+        title: f.title,
+        index: f.index,
+      });
+      folderMap.set(f.id, node.id);
+      rebuilt += 1;
+    } catch {}   // 父目录也找不回来就跳过；能恢复多少恢复多少
+  }
+
   let restored = 0;
   for (const rec of [...(entry.ops || [])].reverse()) {
+    const back = folderMap.get(rec.fromFolderId) || rec.fromFolderId;
     try {
-      await chrome.bookmarks.move(rec.id, { parentId: rec.fromFolderId, index: rec.fromIndex });
+      await chrome.bookmarks.move(rec.id, { parentId: back, index: rec.fromIndex });
       restored += 1;
     } catch {
       try {
-        await chrome.bookmarks.move(rec.id, { parentId: rec.fromFolderId });
+        await chrome.bookmarks.move(rec.id, { parentId: back });
         restored += 1;
       } catch {}
     }
@@ -432,7 +475,7 @@ async function runUndo(journalId) {
   const next = markUndone(list, entry.id);
   await chrome.storage.local.set({ [JOURNAL_KEY]: next });
   broadcast({ type: 'state:changed' });
-  return { restored, total: (entry.ops || []).length };
+  return { restored, rebuilt, total: (entry.ops || []).length };
 }
 
 /** 分类法设计流水线：只读语料 + 一次模型调用，不碰书签 */
@@ -550,16 +593,19 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
     const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
     if (scope === 'scheme' && !full) throw new Error('还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成');
     if (!folderScheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
-    // 按方案建档：方案的类目 + 挂在这些类目下的现存二级（拆出来的 010/020 不该被当「方案外」重判）
+    // 结构来源：collection = 方案 + 现存二级；fresh = 只认方案定义（旧结构全部重判）
     const targets = full
-      ? extendTargets(full.folders, folderScheme, parentOf)
+      ? (tree === 'fresh'
+        ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null }))
+        : extendTargets(full.folders, folderScheme, parentOf))
       : folderScheme;   // 没选方案时，退回"现存目录"当判定依据
 
     const { candidates: picked } = preselect(items, {
       scope,
       folderCode,
       codes: new Set(targets.map((f) => f.code)),
-      limit,
+      // 全新生成按定义就是「当前所有收藏重新分类」，不按每轮条数截断
+      limit: tree === 'fresh' ? 'all' : limit,
     });
 
     organize.total = picked.length;
@@ -643,7 +689,16 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
       limit,
     });
 
-    // 结构来源二选一：照用方案的默认分类（建全，含空目录），或按收藏生成（只建用到的 + 派生二级）
+    // 全新生成：先把当前整树备份下来，再谈重建——备份不成功就不往下走
+    if (scope === 'scheme' && tree === 'fresh') {
+      const meta = await saveBackup(tree, { planId: plan.id, schemeId: settings.schemeId || '' });
+      plan.tree = 'fresh';
+      plan.backupId = meta.id;
+      plan.backupAt = meta.at;
+    }
+
+    // 结构来源：照用方案的默认分类（建全，含空目录）、按收藏生成（只建用到的 + 派生二级），
+    // 或全新生成（同按收藏生成，但旧目录会被重判并在搬空后清理）
     if (scope === 'scheme' && tree === 'scheme') {
       plan.tree = 'scheme';
       plan.created = schemeCreated(targets, new Set(folderScheme.map((f) => f.code)));
@@ -670,6 +725,12 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
           broadcast({ type: 'organize:warn', message: '这轮没有 ≥6 条的类目，暂不派生二级' });
         }
       }
+    }
+    if (plan.tree === 'fresh') {
+      const keep = new Set(targets.map((f) => f.code));
+      const moving = new Set(readyOps(plan).map((op) => op.id));
+      const left = estimateLeftovers(folderScheme, items, keep, moving);
+      plan.removeEstimate = left.map((f) => ({ code: f.code, name: f.name }));
     }
     if (orgCtl.stop) broadcast({ type: 'organize:warn', message: '已停止生成，计划按已拿到的建议出' });
     await writePlan(plan);
