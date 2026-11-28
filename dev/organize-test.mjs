@@ -10,7 +10,7 @@
 
 import {
   preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes, readyOps,
-  subCodeFor, splitSubs, applySubs, planFolders, deriveSubs, schemeCreated,
+  subCodeFor, splitSubs, applySubs, planFolders, deriveSubs, schemeCreated, extendTargets,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -310,6 +310,28 @@ console.log('目录结构的两种来源');
   ]);
   eq('全建过了就是空清单', schemeCreated(full, new Set(['100', '110', '200'])), []);
   eq('空方案不报错', schemeCreated(undefined, new Set()), []);
+}
+
+console.log('判定池：方案类目 + 挂在下头的现存二级');
+{
+  const scheme = [{ code: '000', name: '综合与工具' }, { code: '100', name: '编程' }];
+  const dirs = [
+    { code: '000', name: '综合与工具' },
+    { code: '100', name: '编程' },
+    { code: '010', name: '效率工具' },
+    { code: '020', name: '开发与编程' },
+    { code: 'F1', name: '杂项' },
+  ];
+  const parentOf = { '010': '000', '020': '000' };
+  const targets = extendTargets(scheme, dirs, parentOf);
+  eq('并进两个现存二级', targets.map((f) => f.code), ['000', '100', '010', '020']);
+  eq('二级记住父级，建目录时父在前', targets.find((f) => f.code === '010').parent, '000');
+  eq('与方案无关的目录不混进来', targets.some((f) => f.code === 'F1'), false);
+  eq('方案已定义的编码不重复', extendTargets(
+    [{ code: '100', name: '编程' }, { code: '110', name: '语言', parent: '100' }],
+    [{ code: '110', name: '语言' }],
+    { '110': '100' },
+  ).filter((f) => f.code === '110').length, 1);
 }
 
 if (failed) {

@@ -19,7 +19,7 @@ import {
   callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, deriveSubs, schemeCreated, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, deriveSubs, schemeCreated, extendTargets, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal } from './lib/wal.js';
 import { migratePending, prunePending, runAccept } from './lib/pending.js';
@@ -545,13 +545,14 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
   broadcast({ type: 'organize:start' });
   try {
     const state = await loadState();
-    const { items, folderScheme, settings, learned } = state;
+    const { items, folderScheme, parentOf, settings, learned } = state;
     // 按方案建档：判定用方案定义的完整类目（不只书签栏里已建的那几个）
     const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
     if (scope === 'scheme' && !full) throw new Error('还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成');
     if (!folderScheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
+    // 按方案建档：方案的类目 + 挂在这些类目下的现存二级（拆出来的 010/020 不该被当「方案外」重判）
     const targets = full
-      ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null }))
+      ? extendTargets(full.folders, folderScheme, parentOf)
       : folderScheme;   // 没选方案时，退回"现存目录"当判定依据
 
     const { candidates: picked } = preselect(items, {

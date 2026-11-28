@@ -686,10 +686,28 @@ function schemeLine() {
       ? `<div class="plan-empty-line">判定类目：现存目录（还没选用方案）</div>`
       : `<div class="plan-empty-line">还没有可用的分类目录</div>`;
   }
+  const defined = (cur.codes || []).length;
   const subs = (cur.folders || []).filter((f) => f.parent).length;
-  return `<div class="plan-empty-line">判定类目：<b>${(cur.codes || []).length}</b> 个（${esc(cur.name)}${
+  const extra = anchoredSubs(cur);
+  return `<div class="plan-empty-line">判定类目：<b>${defined}</b> 个（${esc(cur.name)}${
     subs ? `，含 ${subs} 个二级` : ''
-  }）</div>`;
+  }）${extra ? ` + <b>${extra}</b> 个现存二级` : ''}</div>`;
+}
+
+/** 现存目录里，祖先落在当前方案编码中的二级个数（判定池会把它算进去） */
+function anchoredSubs(cur) {
+  const known = new Set(cur.codes || []);
+  let n = 0;
+  for (const code of Object.keys(S.parentOf)) {
+    let c = S.parentOf[code];
+    let guard = 0;
+    while (c && guard < 8 && !known.has(c)) {
+      c = S.parentOf[c];
+      guard += 1;
+    }
+    if (c && known.has(c)) n += 1;
+  }
+  return n;
 }
 
 function renderRail() {
@@ -1962,7 +1980,7 @@ function organizePanel() {
           ? (S.orgScope === 'all'
               ? '全库巡检：优先挑「还不在本方案类目里」的书签（每次最多 200 条），归位后它们就离开候选池，再点一次自动接着下一批；方案内错放也会一并列出。确认无误且自动备份后才动手。'
               : S.orgScope === 'scheme'
-                ? '按方案建档：用当前方案定义的完整类目来判断（不只书签栏里已经建好的那几个），每批最多 200 条。计划里出现、但还没有对应文件夹的类目，会在执行时按方案自动创建，然后把这些书签搬进去——目录由你的收藏决定，不再是一套默认空目录。'
+                ? '按方案建档：判定池 = 方案定义的类目 + 挂在这些类目下的现存二级（拆出来的 010/020 算方案内，不会被当「方案外」重判）。只增不删：建缺的目录、把判到别的类目的书签搬过去，判到同一个类目的不动。每批最多 200 条。'
                 : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
           : '先到设置页装一套方案（杜威、中图法或自定义方案），再回来生成计划。'}</div>
         <div class="plan-limit">
