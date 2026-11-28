@@ -63,6 +63,7 @@ const S = {
   journals: [],            // 最近 3 次整理日志
   orgScope: 'inbox',       // 'inbox' | 'all'
   orgTab: 'plan',          // 'plan' | 'clean'
+  orgLimit: '200',         // 每轮条数：'200' | '500' | '1000' | 'all'
   cleanList: null,         // AI 标题洗白建议列表
   cleanBusy: false,
   serendipityOpen: false,
@@ -1749,6 +1750,8 @@ function organizePanel() {
       <div class="plan-busy">
         <div class="plan-busy-line">${pr.stage === 'model' ? '模型正在判断' : '正在预筛'} ${pr.done}/${pr.total || '…'}</div>
         <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
+        <div class="plan-empty-hint" style="margin-top:10px">中途停止会保留已拿到的建议，并据此生成计划。</div>
+        <button class="btn btn-line btn-sm" data-stop-plan style="margin-top:10px">停止生成</button>
       </div>
     </div>`;
   }
@@ -1773,6 +1776,11 @@ function organizePanel() {
                 ? '按方案建档：用当前方案定义的完整类目来判断（不只书签栏里已经建好的那几个），每批最多 200 条。计划里出现、但还没有对应文件夹的类目，会在执行时按方案自动创建，然后把这些书签搬进去——目录由你的收藏决定，不再是一套默认空目录。'
                 : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
           : '先到设置页装一套方案（杜威、中图法或自定义方案），再回来生成计划。'}</div>
+        <div class="plan-limit">
+          <span class="plan-limit-label">每轮条数</span>
+          ${['200', '500', '1000', 'all'].map((v) => `<button type="button" class="seg-tab${S.orgLimit === v ? ' is-active' : ''}" data-org-limit="${v}">${v === 'all' ? '全部' : v}</button>`).join('')}
+        </div>
+        <div class="plan-empty-hint">一次跑完 = 本轮不设上限；条数越多，模型请求越久，但进度和「停止」都可用。</div>
         <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
         ${journalHistoryHtml()}
       </div>
@@ -1855,6 +1863,9 @@ function wireOrganize() {
   box.querySelectorAll('[data-org-scope]').forEach((btn) => {
     btn.addEventListener('click', () => { S.orgScope = btn.dataset.orgScope; renderInspector(); });
   });
+  box.querySelectorAll('[data-org-limit]').forEach((btn) => {
+    btn.addEventListener('click', () => { S.orgLimit = btn.dataset.orgLimit; renderInspector(); });
+  });
   box.querySelector('[data-run-clean]')?.addEventListener('click', async () => {
     S.cleanBusy = true;
     renderInspector();
@@ -1913,11 +1924,16 @@ function wireOrganize() {
     S.planBusy = true;
     S.planProgress = { stage: 'preselect', done: 0, total: 0 };
     renderInspector();
-    await send('organize:plan', { scope: S.orgScope }).catch((err) => {
+    const limit = S.orgLimit === 'all' ? 'all' : Number(S.orgLimit) || 200;
+    await send('organize:plan', { scope: S.orgScope, limit }).catch((err) => {
       S.planBusy = false;
       toast(err.message);
       renderInspector();
     });
+  });
+  box.querySelector('[data-stop-plan]')?.addEventListener('click', async () => {
+    await send('organize:stop').catch(() => {});
+    toast('已请求停止，等这一批返回后出计划');
   });
   box.querySelector('[data-clear]')?.addEventListener('click', async () => {
     await send('organize:cancel');

@@ -751,6 +751,7 @@ async function handle(msg) {
       folderCode: msg.folderCode || '',
       suggestions,
       existing: new Set(st.scheme.map((f) => f.code)),
+      limit: msg.limit === 'all' ? 'all' : (Number(msg.limit) || 200),
     });
     emit({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
     emit({ type: 'organize:done', plan });
@@ -1007,7 +1008,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.9.2-mock' }),
+      getManifest: () => ({ version: '0.10.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

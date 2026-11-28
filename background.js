@@ -43,6 +43,7 @@ const WEEKLY_ALARM = 'guizang-weekly-check';
 /** 整理计划的生成进度（只在内存里，页面靠广播） */
 let organize = { running: false, stage: '', done: 0, total: 0 };
 let applyCtl = { running: false, stop: false };
+let orgCtl = { stop: false };   // 计划生成阶段的中断开关
 
 /** 正在跑的检测，只存在内存里；页面靠它显示进度 */
 let scan = { running: false, done: 0, total: 0, startedAt: 0 };
@@ -383,7 +384,8 @@ async function writePlan(plan) {
  * 生成整理计划：预筛 → 历史偏好/本地规则 → 低置信度送模型（附带弱标题 <head> 摘要）→ 冲突消解。
  * 全程只读书签，不动任何数据。
  */
-async function runOrganize(scope = 'inbox', folderCode = '') {
+async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES) {
+  orgCtl = { stop: false };
   organize = { running: true, stage: 'preselect', done: 0, total: 0 };
   broadcast({ type: 'organize:start' });
   try {
@@ -401,6 +403,7 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
       scope,
       folderCode,
       codes: new Set(targets.map((f) => f.code)),
+      limit,
     });
 
     organize.total = picked.length;
@@ -431,7 +434,7 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
             organize.done = done;
             broadcast({ type: 'organize:progress', stage: 'model', done, total });
           },
-          { learned, pageMeta, stats },
+          { learned, pageMeta, stats, shouldStop: () => orgCtl.stop },
         );
         for (const s of refined) suggestions[s.id] = { ...s };
         if (stats.failed && stats.failed.length) {
@@ -454,7 +457,9 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
       suggestions,
       blocked: collectManagedIds(tree),
       existing: new Set(scheme.map((f) => f.code)),
+      limit,
     });
+    if (orgCtl.stop) broadcast({ type: 'organize:warn', message: '已停止生成，计划按已拿到的建议出' });
     await writePlan(plan);
     return plan;
   } finally {
@@ -1212,9 +1217,9 @@ const handlers = {
     return { ok: true };
   },
 
-  'organize:plan': async ({ scope = 'inbox', folderCode = '' } = {}) => {
+  'organize:plan': async ({ scope = 'inbox', folderCode = '', limit = MAX_CANDIDATES } = {}) => {
     if (organize.running) throw new Error('上一次整理计划还在生成');
-    runOrganize(scope, folderCode).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
+    runOrganize(scope, folderCode, limit).catch((e) => broadcast({ type: 'organize:error', message: String((e && e.message) || e) }));
     return { started: true };
   },
 
@@ -1233,6 +1238,7 @@ const handlers = {
 
   'organize:stop': async () => {
     applyCtl.stop = true;
+    orgCtl.stop = true;
     return { stopping: true };
   },
 

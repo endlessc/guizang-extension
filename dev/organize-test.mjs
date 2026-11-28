@@ -49,6 +49,15 @@ console.log('预筛');
   const planAll = buildPlan({ items: mixed, scheme, scope: 'all', suggestions: {}, blocked: new Set(), now: 7 });
   eq('计划里带方案外条数', [planAll.outside, planAll.pool], [2, 4]);
 
+  // 每轮上限：可调，也可一次跑完
+  const small = preselect(mixed, { scope: 'all', codes: new Set(['000', '100', '500']), limit: 2 });
+  eq('limit 决定本轮条数', small.candidates.length, 2);
+  eq('limit 之外记进 overflow', small.overflow, 2);
+  const everything = preselect(mixed, { scope: 'all', codes: new Set(['000', '100', '500']), limit: 'all' });
+  eq('limit=all 不设上限', [everything.candidates.length, everything.overflow], [4, 0]);
+  const planAllLimit = buildPlan({ items: mixed, scheme, scope: 'all', suggestions: {}, blocked: new Set(), limit: 'all', now: 8 });
+  eq('计划里记录本轮上限', [planAllLimit.limit, planAllLimit.pool], [4, 4]);
+
   const many = Array.from({ length: MAX_CANDIDATES + 5 }, (_, i) => item('x' + i, ''));
   const r = preselect(many);
   eq('超出上限被截断', [r.candidates.length, r.overflow], [MAX_CANDIDATES, 5]);

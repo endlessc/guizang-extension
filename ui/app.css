@@ -1678,3 +1678,8 @@ body.is-col-resizing{cursor:col-resize !important;user-select:none !important;}
 
 
 .sg-note{ background:var(--warn-wash, #F8F3E3); border-color:var(--warn, #B98A2E); }
+
+/* 整理：每轮条数（分段小按钮） */
+.plan-limit{ display:flex; align-items:center; gap:6px; margin:12px 0 6px; flex-wrap:wrap; }
+.plan-limit-label{ font-size:11px; color:var(--ink-3); letter-spacing:.04em; }
+.plan-limit .seg-tab{ padding:4px 10px; font-size:11.5px; }
