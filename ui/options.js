@@ -340,7 +340,7 @@ async function installTx() {
       return;
     }
     txConflict = [];
-    toast(`已落成目录：新建 ${r.created} 个，复用 ${r.reused} 个`);
+    toast(`已落成目录：新建 ${r.created} 个，复用 ${r.reused} 个${schemeNote(r)}`);
     const summary = await send('summary:load');
     renderScheme(summary.folderScheme);
     await renderPicker();
@@ -535,10 +535,10 @@ async function previewScheme(id, schemes = []) {
       toast('已导出自定义方案');
     });
     $('#btnDeleteScheme')?.addEventListener('click', async () => {
-      await send('scheme:deleteCustom', { schemeId: id });
+      const r = await send('scheme:deleteCustom', { schemeId: id });
       box.innerHTML = '';
       await renderPicker();
-      toast('已删除自定义方案');
+      toast(`已删除自定义方案${schemeNote(r)}`);
     });
   } catch (err) {
     box.innerHTML = `<div class="scheme-plan"><span class="test-msg bad">${esc(err.message)}</span></div>`;
@@ -586,13 +586,22 @@ function wireCustomSchemes() {
   });
 }
 
+/**
+ * 换方案后旧建议的去向：迁移几条、作废几条。
+ * 换方案不再静默清空——这两类计数必须说出来，用户才知道哪些要重判。
+ */
+function schemeNote(r) {
+  const bits = [];
+  if (r.mapped) bits.push(`迁移 ${r.mapped} 条`);
+  if (r.dropped) bits.push(`作废 ${r.dropped} 条`);
+  return bits.length ? `；换方案：建议${bits.join('，')}` : '';
+}
+
 async function selectScheme(id) {
   try {
     const r = await send('scheme:select', { schemeId: id });
     await renderPicker();
-    toast(r.dropped
-      ? `已选用：${id}；换了方案，${r.dropped} 条旧建议已作废`
-      : '已选用这套方案（没有建任何目录）');
+    toast(`已选用这套方案（没有建任何目录）${schemeNote(r)}`);
   } catch (err) {
     toast(err.message);
   }
@@ -615,8 +624,7 @@ async function installScheme(id) {
     const r = await send('scheme:install', { schemeId: id });
     if (!r.installed) return toast('有编码冲突，未安装');
     const base = `已启用：新建 ${r.created} 个目录，复用 ${r.reused} 个`;
-    // 换方案会让旧建议全部作废（不同方案会撞码但语义不同），必须说清楚
-    toast(r.dropped ? `${base}；换了方案，${r.dropped} 条旧建议已作废` : base);
+    toast(base + schemeNote(r));
     $('#schemePreview').innerHTML = '';
     const summary = await send('summary:load');
     renderScheme(summary.folderScheme);

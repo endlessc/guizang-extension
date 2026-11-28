@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 /**
- * 归类建议的失效与容错（本轮的四个修复对应的断言）。
+ * 归类建议的迁移与容错（对应的断言）：
  *
- *   1. 换方案 → 旧建议全部作废（不同方案会撞码但语义不同）
+ *   1. 换方案 → 按类名显式迁移，映射不了的才作废，两类计数都要报出来
  *   2. 读取时 → 目标编码不存在的建议被剔除
  *   3. 接受时 → 某一组目标找不到，不打断其它组
  *   4. 接受后 → 只有成功的那些建议被清掉
@@ -10,7 +10,7 @@
  * 用法：node dev/pending-test.mjs
  */
 
-import { onSchemeChange, prunePending, groupPending, runAccept } from '../lib/pending.js';
+import { migratePending, prunePending, groupPending, runAccept } from '../lib/pending.js';
 
 let failed = 0;
 function eq(label, got, want) {
@@ -29,18 +29,52 @@ const pend = {
   c: { code: 'F1', conf: 0.6 },
 };
 
-console.log('换方案即作废');
+console.log('换方案 → 按类名迁移，映射不了才作废');
 {
-  const same = onSchemeChange('dewey', 'dewey', pend);
-  eq('同一套方案重复安装：保留', [same.changed, same.dropped, Object.keys(same.pending).length], [false, 0, 3]);
+  const dewey = [
+    { code: '000', name: '总论' },
+    { code: '100', name: '哲学与心理学' },
+    { code: '300', name: '社会科学' },
+  ];
+  const para = [
+    { code: '100', name: '项目' },
+    { code: '200', name: '领域' },
+    { code: '300', name: '资源' },
+  ];
+  // 三个编码在 PARA 里都能找到同码，但类名全不同 —— 一个都不该被搬过去
+  const r = migratePending(pend, { from: dewey, to: para });
+  eq('同码不同义：不按编码硬映射', [r.mapped, r.dropped], [0, 3]);
+  eq('全部作废但报出条数', Object.keys(r.pending).length, 0);
+  eq('作废的 id 逐个报出', r.droppedIds.sort(), ['a', 'b', 'c']);
 
-  const changed = onSchemeChange('', 'dewey', pend);
-  eq('换了方案：标记 changed', changed.changed, true);
-  eq('换了方案：全部作废', Object.keys(changed.pending).length, 0);
-  eq('换了方案：报出清掉几条', changed.dropped, 3);
+  const tech = [{ code: '100', name: '编程' }, { code: '200', name: '设计' }];
+  const next = [{ code: 'A', name: '编程' }, { code: 'B', name: '资讯' }];
+  const p2 = {
+    x: { code: '100', conf: 0.9, source: 'model', model: 'deepseek-chat', promptVersion: 'p1', reason: '是技术文档' },
+    y: { code: '200', conf: 0.5, source: 'heuristic', model: '', promptVersion: '' },
+  };
+  const r2 = migratePending(p2, { from: tech, to: next });
+  eq('同名类目 → 换成新方案的编码', r2.pending.x.code, 'A');
+  eq('两条：一条迁移一条作废', [r2.mapped, r2.dropped], [1, 1]);
+  eq('新方案没有同名 → 该条作废', r2.pending.y, undefined);
+  eq('建议上的血缘随迁移保留', [r2.pending.x.model, r2.pending.x.promptVersion], ['deepseek-chat', 'p1']);
+  eq('理由与置信度也原样保留', [r2.pending.x.conf, r2.pending.x.reason], [0.9, '是技术文档']);
 
-  const toEmpty = onSchemeChange('dewey', '', pend);
-  eq('删掉当前方案也算变化', [toEmpty.changed, toEmpty.dropped], [true, 3]);
+  const r3 = migratePending({ z: { code: '999' } }, { from: tech, to: next });
+  eq('旧方案没有这个编码 → 作废', [r3.mapped, r3.dropped], [0, 1]);
+
+  const r4 = migratePending({ n: { code: '' } }, { from: tech, to: next });
+  eq('没有编码的建议 → 作废', [r4.mapped, r4.dropped], [0, 1]);
+
+  const r5 = migratePending({}, { from: tech, to: next });
+  eq('没有建议：两个计数都是 0', [Object.keys(r5.pending).length, r5.mapped, r5.dropped], [0, 0, 0]);
+
+  const self = [{ code: 'F1', name: '甲' }, { code: 'F2', name: '乙' }];
+  const r6 = migratePending(pend, { from: self, to: self });
+  eq('同一套方案：编码原样、全部算迁移', [r6.pending.a.code, r6.mapped, r6.dropped], ['F1', 3, 0]);
+
+  const r7 = migratePending(p2, { from: tech, to: [] });
+  eq('换成空方案（没有目标）：全部作废', [r7.mapped, r7.dropped], [0, 2]);
 }
 
 console.log('目标编码不存在 → 剔除');

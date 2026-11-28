@@ -11,8 +11,8 @@ import { parseOptsOf, listSchemes, getScheme, sanitizeCustomScheme } from '../li
 import { planInstall } from '../lib/scheme-install.js';
 import { flattenTree, checkBackupReady, validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { PROTO } from '../lib/version.js';
-import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS } from '../lib/llm.js';
-import { runAccept } from '../lib/pending.js';
+import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS, PROMPT_VERSION } from '../lib/llm.js';
+import { runAccept, migratePending } from '../lib/pending.js';
 import { DEWEY_HINTS } from '../lib/schemes.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme,
@@ -132,6 +132,18 @@ const STATUS = {
 let root;
 let health = {};
 let pending = {};
+
+/**
+ * 换方案：和 background 一样按类名迁移，再谈作废。
+ * 预览里的 toast 计数必须和真机一致，否则演示会撒谎。
+ */
+function migrateFor(newId, customs = settings.customSchemes || []) {
+  if ((settings.schemeId || '') === (newId || '')) return { mapped: 0, dropped: 0 };
+  const foldersOf = (id) => (getScheme(id || '', customs) || {}).folders || [];
+  const res = migratePending(pending, { from: foldersOf(settings.schemeId), to: foldersOf(newId) });
+  pending = res.pending;
+  return { mapped: res.mapped, dropped: res.dropped };
+}
 let meta = {
   b06: { tags: ['rust', '语言'], note: '官方圣经，常翻常新', star: true, readState: 'read', updatedAt: Date.now() },
   b27: { tags: ['transformer', '论文'], note: '精读 Attention 机制必看', star: true, readState: 'unread', updatedAt: Date.now() },
@@ -515,11 +527,15 @@ async function handle(msg) {
     // 与真机一致：立即返回，结果走广播
     (async () => {
       const list = await classify(targets, st.folderScheme, settings);
+      // 预览用：?lineage=1 —— 把本地规则的建议装成模型判的，用来检查血缘行的排版
+      const tagged = typeof location !== 'undefined' && location.search.includes('lineage=1')
+        ? list.map((s) => ({ ...s, source: 'model', model: 'deepseek-chat', promptVersion: PROMPT_VERSION }))
+        : list;
       await new Promise((r) => setTimeout(r, 420));
-      list.forEach((s) => { pending[s.id] = { ...s, at: Date.now() }; });
+      tagged.forEach((s) => { pending[s.id] = { ...s, at: Date.now() }; });
       emit({ type: 'ai:progress', done: targets.length, total: targets.length });
       emit({ type: 'state:changed' });
-      emit({ type: 'ai:done', total: targets.length, count: list.length, failed: [], source: 'heuristic' });
+      emit({ type: 'ai:done', total: targets.length, count: tagged.length, failed: [], source: 'heuristic' });
     })();
     return { started: true };
   }
@@ -732,14 +748,12 @@ async function handle(msg) {
       created.set(f.code, node.id);
     }
     taxoDraft = { ...taxoDraft, status: 'installed', schemeId: scheme.id, installedAt: Date.now() };
-    settings = {
-      ...settings,
-      schemeId: scheme.id,
-      customSchemes: [...(settings.customSchemes || []).filter((x) => x.id !== scheme.id), scheme],
-    };
+    const customs = [...(settings.customSchemes || []).filter((x) => x.id !== scheme.id), scheme];
+    const sw = migrateFor(scheme.id, customs);
+    settings = { ...settings, schemeId: scheme.id, customSchemes: customs };
     emit({ type: 'taxonomy:done', draft: taxoDraft });
     emit({ type: 'state:changed' });
-    return { installed: true, created: created.size, reused: plan.exists.length, schemeId: scheme.id };
+    return { installed: true, created: created.size, reused: plan.exists.length, schemeId: scheme.id, mapped: sw.mapped, dropped: sw.dropped };
   }
   if (type === 'taxonomy:cancel') {
     taxoDraft = null;
@@ -1050,14 +1064,10 @@ async function handle(msg) {
   if (type === 'scheme:select') {
     const scheme = getScheme(msg.schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
-    let dropped = 0;
-    if ((settings.schemeId || '') !== msg.schemeId) {
-      dropped = Object.keys(pending).length;
-      if (dropped) for (const k of Object.keys(pending)) delete pending[k];
-    }
+    const sw = migrateFor(msg.schemeId);
     settings = { ...settings, schemeId: msg.schemeId };
     emit({ type: 'state:changed' });
-    return { selected: true, schemeId: msg.schemeId, dropped };
+    return { selected: true, schemeId: msg.schemeId, mapped: sw.mapped, dropped: sw.dropped };
   }
 
   if (type === 'scheme:install') {
@@ -1069,14 +1079,10 @@ async function handle(msg) {
     for (const f of plan.missing) {
       bar.children.push({ id: 'f' + scheme.id + f.code, title: `${f.code} ${f.name}`, parentId: bar.id, children: [] });
     }
-    let dropped = 0;
-    if ((settings.schemeId || '') !== msg.schemeId) {
-      dropped = Object.keys(pending).length;
-      if (dropped) for (const k of Object.keys(pending)) delete pending[k];
-    }
+    const sw = migrateFor(msg.schemeId);
     settings = { ...settings, schemeId: msg.schemeId };
     emit({ type: 'state:changed' });
-    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId: msg.schemeId, dropped };
+    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId: msg.schemeId, mapped: sw.mapped, dropped: sw.dropped };
   }
 
   if (type === 'settings:save') { settings = { ...settings, ...msg.settings }; return { settings }; }
@@ -1137,7 +1143,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.21.0-mock' }),
+      getManifest: () => ({ version: '0.22.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

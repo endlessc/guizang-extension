@@ -12,7 +12,7 @@ import { normalizeMeta, collectAllTags, recordOverride, matchLearned, pickSerend
 import { parseHeadHtml, isWeakTitle, cleanTitleLocal } from '../lib/head.js';
 import { sanitizeCustomScheme, getScheme, parseOptsOf, parseSchemeLines } from '../lib/schemes.js';
 import { normalizeBase } from '../lib/llm.js';
-import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages } from '../lib/llm.js';
+import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages, PROMPT_VERSION } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { sampleOps } from '../lib/organize.js';
 import { parseTree } from '../lib/tree.js';
@@ -378,6 +378,26 @@ console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
   assert.equal(stats2.batches, 2);
   console.log('  ✓ stats 记录总批数');
   passed += 11;
+}
+
+console.log('9. 建议血缘：模型与提示词版本（lib/llm.js）');
+{
+  const scheme = [{ code: '100', name: '编程' }];
+  const items = [{ id: 'a', title: 'Rust 所有权', host: 'a.com', url: 'https://a.com/1' }];
+  const settings = { apiKey: 'k', baseUrl: 'http://mock', model: 'deepseek-chat' };
+  const out = await classifyWithModel(items, scheme, settings, null, {
+    call: async () => JSON.stringify({ items: [{ id: 'a', code: '100', conf: 0.9, reason: 'x' }] }),
+  });
+  assert.equal(out[0].model, 'deepseek-chat', '建议要记住是哪个模型判的');
+  console.log('  ✓ 建议带模型名');
+  assert.equal(out[0].promptVersion, PROMPT_VERSION, '建议要记住提示词版本');
+  console.log('  ✓ 建议带提示词版本');
+  const [h] = classifyHeuristic(items, scheme, { schemeId: 'dewey' });
+  assert.equal(h.model, '', '本地规则没有模型血缘');
+  console.log('  ✓ 本地规则不带模型名');
+  assert.equal(h.promptVersion, '', '本地规则没有提示词版本');
+  console.log('  ✓ 本地规则不带提示词版本');
+  passed += 4;
 }
 
 console.log(`\n✅ 全部通过（${passed} 项断言）`);

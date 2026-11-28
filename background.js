@@ -22,7 +22,7 @@ import {
 import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, sampleOps, subCodeFor, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal } from './lib/wal.js';
-import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
+import { migratePending, prunePending, runAccept } from './lib/pending.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
   approveTaxonomy, toScheme, planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme,
@@ -349,6 +349,28 @@ async function commitOps({
   if (wal) await writeWal(null);
 
   return { conflict: [], created, reused, moved, failed, stopped, journalId, total: ops.length };
+}
+
+/**
+ * 换方案时把已有建议显式迁移过去（同一套方案重复启用则不动）。
+ *
+ * 迁移与作废都写进库，并把两个计数返回给 UI —— 不能静默清空：
+ * 用户看到「作废 12 条」才知道哪些建议需要重新判。
+ *
+ * @param {string} fromId 旧方案 id（'' 表示没有）
+ * @param {string} toId 新方案 id
+ * @param {Array} customs 当前的全部自定义方案（新旧都要能查到定义）
+ * @returns {Promise<{changed: boolean, mapped: number, dropped: number}>}
+ */
+async function migrateSuggestions(fromId, toId, customs = []) {
+  if ((fromId || '') === (toId || '')) return { changed: false, mapped: 0, dropped: 0 };
+  const { pending = {} } = await chrome.storage.local.get('pending');
+  if (!Object.keys(pending).length) return { changed: true, mapped: 0, dropped: 0 };
+
+  const foldersOf = (id) => (getScheme(id || '', customs) || {}).folders || [];
+  const res = migratePending(pending, { from: foldersOf(fromId), to: foldersOf(toId) });
+  await chrome.storage.local.set({ pending: res.pending });
+  return { changed: true, mapped: res.mapped, dropped: res.dropped };
 }
 
 /** 整理计划提交：薄封装，负责挑可执行条目、清计划与广播 */
@@ -1242,12 +1264,11 @@ const handlers = {
     const settings = await readSettings();
     const list = (settings.customSchemes || []).filter((s) => s.id !== schemeId);
     const next = { ...settings, customSchemes: list, schemeId: settings.schemeId === schemeId ? '' : settings.schemeId };
-    const { pending: curPending = {} } = await chrome.storage.local.get('pending');
-    const sw = onSchemeChange(settings.schemeId, next.schemeId, curPending);
-    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
+    // 删掉当前方案就等于换成空方案：没有可迁移的目标，全部作废
+    const sw = await migrateSuggestions(settings.schemeId, next.schemeId, settings.customSchemes || []);
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
-    return { schemes: listSchemes(list), dropped: sw.dropped };
+    return { schemes: listSchemes(list), mapped: sw.mapped, dropped: sw.dropped };
   },
 
   'scheme:preview': async ({ schemeId }) => {
@@ -1302,9 +1323,7 @@ const handlers = {
     const settings = await readSettings();
     const customs = (settings.customSchemes || []).filter((s) => s.id !== scheme.id);
     customs.push(sanitizeCustomScheme({ ...scheme, custom: true }));
-    const { pending = {} } = await chrome.storage.local.get('pending');
-    const sw = onSchemeChange(settings.schemeId, scheme.id, pending);
-    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
+    const sw = await migrateSuggestions(settings.schemeId, scheme.id, customs);
     await chrome.storage.local.set({ settings: { ...settings, customSchemes: customs, schemeId: scheme.id } });
 
     const installed = {
@@ -1317,7 +1336,7 @@ const handlers = {
     await chrome.storage.local.set({ [TAXONOMY_KEY]: installed });
     broadcast({ type: 'taxonomy:done', draft: installed });
     broadcast({ type: 'state:changed' });
-    return { installed: true, created: made, reused: res.reused, schemeId: scheme.id, dropped: sw.dropped };
+    return { installed: true, created: made, reused: res.reused, schemeId: scheme.id, mapped: sw.mapped, dropped: sw.dropped };
   },
 
   /**
@@ -1614,12 +1633,10 @@ const handlers = {
     const scheme = getScheme(schemeId, (await readSettings()).customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
     const settings = await readSettings();
-    const { pending: curPending = {} } = await chrome.storage.local.get('pending');
-    const sw = onSchemeChange(settings.schemeId, schemeId, curPending);
-    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
+    const sw = await migrateSuggestions(settings.schemeId, schemeId, settings.customSchemes || []);
     await chrome.storage.local.set({ settings: { ...settings, schemeId } });
     broadcast({ type: 'state:changed' });
-    return { selected: true, schemeId, dropped: sw.dropped };
+    return { selected: true, schemeId, mapped: sw.mapped, dropped: sw.dropped };
   },
 
   'scheme:install': async ({ schemeId }) => {
@@ -1635,15 +1652,13 @@ const handlers = {
     });
     if (res.conflict.length) return { installed: false, conflict: res.conflict };
 
-    // 换方案 → 旧建议全部作废：不同方案会撞码但语义不同（杜威 100 哲学 / PARA 100 项目）
-    const { pending: curPending = {} } = await chrome.storage.local.get('pending');
-    const sw = onSchemeChange(settings.schemeId, schemeId, curPending);
-    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
+    // 换方案 → 已有建议显式迁移：同名的换编码留下，没处去的作废并计数
+    const sw = await migrateSuggestions(settings.schemeId, schemeId, settings.customSchemes || []);
 
     const next = { ...settings, schemeId };
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
-    return { installed: true, created: res.created, reused: res.reused, schemeId, dropped: sw.dropped };
+    return { installed: true, created: res.created, reused: res.reused, schemeId, mapped: sw.mapped, dropped: sw.dropped };
   },
 
   'bookmarks:update': async ({ id, title, url }) => {

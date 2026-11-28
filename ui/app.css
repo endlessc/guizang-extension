@@ -932,6 +932,7 @@ body:has(.selbar) #toast{bottom:72px;}
 .sg-arrow{color:var(--ink-4);}
 .sg-unsure-tag{font-size:10px;color:var(--warn);background:var(--warn-wash);padding:1px 5px;border-radius:3px;}
 .sg-why{font-size:11.5px;color:var(--ink-2);line-height:1.7;margin-top:6px;}
+.sg-lineage{font-size:10.5px;color:var(--ink-4);font-family:var(--mono);margin-top:3px;letter-spacing:.01em;}
 .sg-actions{display:flex;gap:6px;margin-top:10px;}
 .sg-picker{display:grid;grid-template-columns:1fr 1fr;gap:4px;margin-top:10px;max-height:220px;overflow:auto;}
 .sg-pick{

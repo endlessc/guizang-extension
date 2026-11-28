@@ -1027,7 +1027,7 @@ function rowHtml(it, opts = {}) {
         ${dupBadge}${catBadge}${tagsHtml}${usagePill}
       </div>
     </div>
-    ${pend ? `<span class="row-suggest" title="AI 建议归入 ${esc(pend.code)} ${esc(folderName(pend.code))}">${icon('arrowRight', 11)}<span class="tnum">${esc(pend.code)}</span></span>` : '<span class="row-suggest is-empty"></span>'}
+    ${pend ? `<span class="row-suggest" title="AI 建议归入 ${esc(pend.code)} ${esc(folderName(pend.code))}${pend.model ? ' · ' + esc(pend.model) : ''}">${icon('arrowRight', 11)}<span class="tnum">${esc(pend.code)}</span></span>` : '<span class="row-suggest is-empty"></span>'}
     ${moved ? `<span class="st st-warn" title="已跳转至新地址，可在详情中更新"><span class="st-dot"></span><span class="st-code">301</span></span>` : statusMark(h)}
     <time class="row-date tnum">${fmtDate(it.added)}</time>
     <div class="row-actions">
@@ -2159,10 +2159,19 @@ function aiPanel() {
     </div>` : ''}`;
 }
 
+/** 建议的血缘：哪个模型、哪版提示词判的；本地规则没有血缘，返回空串 */
+function lineageOf(p) {
+  const bits = [];
+  if (p.model) bits.push(p.model);
+  if (p.promptVersion) bits.push(`提示词 ${p.promptVersion}`);
+  return bits.join(' · ');
+}
+
 function suggestionCard(p) {
   const it = p.item;
   const unsure = p.conf < 0.75;
   const picking = S.picking === p.id;
+  const lineage = lineageOf(p);
   return `<div class="sg" data-sg="${esc(p.id)}">
     <div class="sg-top">
       <button class="sg-title" data-locate="${esc(p.id)}">${esc(it.title)}</button>
@@ -2180,6 +2189,7 @@ function suggestionCard(p) {
       ${p.source === 'learned' ? '<span class="sg-unsure-tag" style="color:var(--ok);background:var(--ok-wash)">历史偏好</span>' : ''}
     </div>
     <p class="sg-why">${esc(p.reason || '模型没有给出理由')}</p>
+    ${lineage ? `<p class="sg-lineage">${esc(lineage)}</p>` : ''}
     ${picking ? `<div class="sg-picker">${S.folderScheme.map((f) => `
         <button class="sg-pick${f.code === p.code ? ' is-on' : ''}" data-override="${esc(p.id)}" data-code="${esc(f.code)}">
           <span class="sg-pick-num">${esc(f.code)}</span>${esc(f.name)}</button>`).join('')}</div>`
