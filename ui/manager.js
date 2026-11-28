@@ -1669,6 +1669,28 @@ function journalHistoryHtml() {
   </div>`;
 }
 
+let planTick = null;
+function stopPlanTick() {
+  if (planTick) { clearInterval(planTick); planTick = null; }
+}
+function startPlanTick() {
+  if (planTick) return;
+  planTick = setInterval(async () => {
+    if (!S.planBusy) { stopPlanTick(); return; }
+    renderInspector();
+    if (Date.now() - (S.planPollAt || 0) < 5000) return;
+    S.planPollAt = Date.now();
+    const r = await send('organize:load').catch(() => null);
+    // 后台既不在跑、也没有计划：多半是 service worker 被回收了，别让界面一直转
+    if (r && !r.running && !r.plan) {
+      S.planBusy = false;
+      stopPlanTick();
+      toast('生成中断了：后台已经不在运行，也没有拿到计划，请重新点一次生成');
+      renderInspector();
+    }
+  }, 1000);
+}
+
 function organizePanel() {
   const plan = S.plan;
   const busy = S.planBusy;
@@ -1746,11 +1768,16 @@ function organizePanel() {
   if (busy) {
     const pr = S.planProgress || { stage: 'preselect', done: 0, total: 0 };
     const pct = pr.total ? Math.round((pr.done / pr.total) * 100) : 6;
+    const waited = S.planStartedAt ? Math.max(0, Math.round((Date.now() - S.planStartedAt) / 1000)) : 0;
+    const batchLine = pr.stage === 'model' && pr.batch && pr.batches
+      ? `第 ${pr.batch}/${pr.batches} 批 · 已完成 ${pr.done}/${pr.total || '…'}`
+      : '正在预筛书签';
     return head + `<div class="insp-body">
       <div class="plan-busy">
         <div class="plan-busy-line">${pr.stage === 'model' ? '模型正在判断' : '正在预筛'} ${pr.done}/${pr.total || '…'}</div>
         <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
-        <div class="plan-empty-hint" style="margin-top:10px">中途停止会保留已拿到的建议，并据此生成计划。</div>
+        <div class="plan-empty-hint" style="margin-top:10px">${batchLine} · 已等 ${waited} 秒${waited > 90 ? '（单批最长 120 秒，超时会自动重试一次）' : ''}</div>
+        <div class="plan-empty-hint">中途停止会保留已拿到的建议，并据此生成计划。</div>
         <button class="btn btn-line btn-sm" data-stop-plan style="margin-top:10px">停止生成</button>
       </div>
     </div>`;
@@ -1922,6 +1949,9 @@ function wireOrganize() {
   });
   box.querySelector('[data-gen]')?.addEventListener('click', async () => {
     S.planBusy = true;
+    S.planStartedAt = Date.now();
+    S.planPollAt = 0;
+    startPlanTick();
     S.planProgress = { stage: 'preselect', done: 0, total: 0 };
     renderInspector();
     const limit = S.orgLimit === 'all' ? 'all' : Number(S.orgLimit) || 200;
@@ -2918,12 +2948,19 @@ onBroadcast((msg) => {
   }
   if (msg.type === 'organize:start') {
     S.planBusy = true;
-    S.planProgress = { stage: 'preselect', done: 0, total: 0 };
+    S.planStartedAt = Date.now();
+    S.planPollAt = 0;
+    S.planProgress = { stage: 'preselect', done: 0, total: 0, at: Date.now() };
+    startPlanTick();
     renderInspector();
     return;
   }
   if (msg.type === 'organize:progress') {
-    S.planProgress = { stage: msg.stage, done: msg.done, total: msg.total };
+    S.planProgress = {
+      stage: msg.stage, done: msg.done, total: msg.total,
+      batch: msg.batch || 0, batches: msg.batches || 0, at: msg.at || Date.now(),
+    };
+    if (msg.at) S.planStartedAt = S.planStartedAt || msg.at;
     renderInspector();
     return;
   }
@@ -2951,6 +2988,8 @@ onBroadcast((msg) => {
   }
   if (msg.type === 'organize:done') {
     S.planBusy = false;
+    S.planStartedAt = 0;
+    stopPlanTick();
     S.planProgress = null;
     S.plan = msg.plan || null;
     renderInspector();
@@ -2959,6 +2998,8 @@ onBroadcast((msg) => {
   }
   if (msg.type === 'organize:error') {
     S.planBusy = false;
+    S.planStartedAt = 0;
+    stopPlanTick();
     renderInspector();
     toast(msg.message || '整理计划生成失败');
     return;

@@ -224,6 +224,19 @@ console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
   assert.equal(calls, 3, '失败批次应重试一次');
   console.log('  ✓ 失败批次重试一次后才放弃');
 
+  // 每批开始先报一次，失败也推进进度（界面不再永远停在 0）
+  const startedBatches = [];
+  const advanced = [];
+  const out3 = await classifyWithModel(items, scheme, settings, (done) => advanced.push(done), {
+    call: async () => { throw new Error('模拟超时'); },
+    onBatchStart: (batch, batches) => startedBatches.push([batch, batches]),
+    stats: {},
+  });
+  assert.deepEqual(startedBatches, [[1, 2], [2, 2]], '每批开始都要报批次');
+  assert.deepEqual(advanced, [24, 48], '失败的批次也要推进进度');
+  assert.equal(out3.length, 0);
+  console.log('  ✓ 每批开始报批次、失败也推进进度');
+
   // 第 2 批返回不可解析内容：只丢这一批，并记录
   calls = 0;
   const stats2 = {};
@@ -242,7 +255,7 @@ console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
   console.log('  ✓ 解析失败也记进 stats');
   assert.equal(stats2.batches, 2);
   console.log('  ✓ stats 记录总批数');
-  passed += 8;
+  passed += 9;
 }
 
 console.log(`\n✅ 全部通过（${passed} 项断言）`);

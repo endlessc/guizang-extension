@@ -408,7 +408,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
 
     organize.total = picked.length;
     organize.done = picked.length;
-    broadcast({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
+    broadcast({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length, at: Date.now() });
 
     // 本地关键词规则 + 历史改判偏好先跑：零成本，能定的先定
     const suggestions = {};
@@ -432,9 +432,24 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
           settings,
           (done, total) => {
             organize.done = done;
-            broadcast({ type: 'organize:progress', stage: 'model', done, total });
+            broadcast({ type: 'organize:progress', stage: 'model', done, total, at: Date.now() });
           },
-          { learned, pageMeta, stats, shouldStop: () => orgCtl.stop },
+          {
+            learned,
+            pageMeta,
+            stats,
+            shouldStop: () => orgCtl.stop,
+            onBatchStart: (batch, batches, size) => broadcast({
+              type: 'organize:progress',
+              stage: 'model',
+              done: organize.done,
+              total: organize.total,
+              batch,
+              batches,
+              batchSize: size,
+              at: Date.now(),
+            }),
+          },
         );
         for (const s of refined) suggestions[s.id] = { ...s };
         if (stats.failed && stats.failed.length) {
