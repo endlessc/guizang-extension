@@ -150,7 +150,7 @@ const triage = createTriageController({
 
 /* ── 路由与 Hash 监听 ───────────────────────────── */
 
-const BUILTIN_VIEWS = ['all', 'starred', 'unread', 'pending', 'dead', 'susp', 'moved', 'dups', 'unchecked', 'inbox', 'usage'];
+const BUILTIN_VIEWS = ['all', 'starred', 'unread', 'pending', 'dead', 'susp', 'moved', 'dups', 'unchecked', 'inbox', 'usage', 'organize'];
 
 function parseHash() {
   const hash = location.hash.replace(/^#/, '');
@@ -285,6 +285,7 @@ function viewMeta() {
   if (v.kind === 'inbox') return { label: '待归类', note: '可直接拖拽到左侧分类，或按 T 进入「逐卷审定」键盘极速清仓。' };
   if (v.kind === 'tag') return { label: `#${v.tag}`, note: '按旁挂标签交叉检索的结果，不影响 Chrome 原生书签文件夹结构。' };
   if (v.kind === 'usage') return { label: '常阅与吃灰', note: '结合本地浏览历史（按需授权）洞察高频常阅与超过半年未打开的尘封藏卷。' };
+  if (v.kind === 'organize') return { label: '整理与洗白', note: '按方案把待归类或全库错放的条目归位；确认后才会真的移动。' };
   return { label: '全部收藏', note: '' };
 }
 
@@ -539,16 +540,14 @@ function renderFilterBar() {
 
 /* ── 书架 + 拖拽归类落点 ───────────────────────── */
 
-function railItem({ code, name, count, bad, active, open, view, iconName, tone, dropKind = '' }) {
+function railItem({ code, name, count, bad, active, view, iconName, tone, dropKind = '' }) {
   const lead = code
     ? `<span class="rail-num">${esc(code)}</span>`
     : `<span class="rail-icon tone-${tone || 'ink'}">${icon(iconName, 13)}</span>`;
   const countTone = tone === 'dead' && count ? ' tone-dead' : tone === 'warn' && count ? ' tone-warn' : '';
   const tip = code ? `${code} ${name}（${count} 条${bad ? `，${bad} 条失效` : ''}，可拖入归类）` : `${name}（${count} 条）`;
   const dropAttr = dropKind ? ` data-drop-kind="${dropKind}"` : (code ? ` data-drop-code="${esc(code)}"` : '');
-  return `<button class="rail-item${active ? ' is-active' : ''}${open ? ' is-open' : ''}" data-view="${view}"${
-    open ? ' aria-expanded="true"' : ''
-  }${dropAttr} title="${esc(tip)}">
+  return `<button class="rail-item${active ? ' is-active' : ''}" data-view="${view}"${dropAttr} title="${esc(tip)}">
     ${lead}
     <span class="rail-name">${esc(name)}</span>
     ${bad ? `<span class="rail-bad" title="${bad} 条失效">${bad}</span>` : ''}
@@ -629,7 +628,7 @@ function renderRail() {
   parts.push('<div class="section-label">智能视图</div>');
   parts.push(railItem({ name: '待归类', count: c.inbox, view: 'inbox', iconName: 'inbox', tone: 'brand', active: S.view.kind === 'inbox' }));
   parts.push(railItem({ name: '归类建议', count: c.pending, view: 'pending', iconName: 'sparkle', tone: 'brand', active: S.view.kind === 'pending' }));
-  parts.push(railItem({ name: '整理与洗白', count: S.plan ? S.plan.ops.length : 0, view: '__organize', iconName: 'folder', tone: 'ink', open: S.drawer === 'organize' }));
+  parts.push(railItem({ name: '整理与洗白', count: S.plan ? S.plan.ops.length : 0, view: 'organize', iconName: 'folder', tone: 'ink', active: S.view.kind === 'organize' }));
   parts.push(railItem({ name: '已失效', count: c.dead, view: 'dead', iconName: 'alert', tone: 'dead', active: S.view.kind === 'dead' }));
   parts.push(railItem({ name: '疑似失效', count: c.susp, view: 'susp', iconName: 'clock', tone: 'warn', active: S.view.kind === 'susp' }));
   parts.push(railItem({ name: '已跳转', count: c.moved, view: 'moved', iconName: 'redirect', tone: 'ink', active: S.view.kind === 'moved' }));
@@ -666,15 +665,13 @@ function renderRail() {
   $('#rail').querySelectorAll('[data-view]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const v = btn.dataset.view;
-      if (v === '__organize') {
-        if (S.drawer === 'organize') {
-          S.drawer = null;
-          S.selected = null;
-          renderInspector();
-          renderRail();
-        } else {
-          openOrganize();
-        }
+      if (v === 'organize') {
+        S.view = { kind: 'organize' };
+        S.drawer = null;          // 视图与抽屉互斥
+        S.selected = null;
+        $('.rail')?.classList.remove('is-mobile-open');
+        syncMobileOverlay();
+        renderAll();
         return;
       }
       S.view = BUILTIN_VIEWS.includes(v) ? { kind: v } : { kind: 'folder', code: v };
@@ -779,6 +776,7 @@ function serendipityHtml() {
 }
 
 function renderHead() {
+  if (S.view.kind === 'organize') { $('#listHead').innerHTML = ''; return; }
   const rows = visible();
   const meta = viewMeta();
   const dGroups = S.view.kind === 'dups' ? dupGroups() : [];
@@ -1068,8 +1066,15 @@ function cardTileHtml(it, opts = {}) {
 }
 
 function renderList() {
-  const rows = visible();
   const list = $('#list');
+  if (S.view.kind === 'organize') {
+    const colHost = $('#colHeadHost');
+    if (colHost) colHost.innerHTML = '';
+    list.innerHTML = `<div class="organize-view">${organizePanel()}</div>`;
+    wireOrganize($('#list'));
+    return;
+  }
+  const rows = visible();
   const colHost = $('#colHeadHost');
   const isCards = S.viewMode === 'cards';
   list.classList.toggle('mode-compact', S.viewMode === 'compact');
@@ -1630,12 +1635,6 @@ function renderInspector() {
     syncMobileOverlay();
     return;
   }
-  if (S.drawer === 'organize') {
-    box.innerHTML = organizePanel();
-    wireOrganize();
-    syncMobileOverlay();
-    return;
-  }
   const it = S.items.find((x) => x.id === S.selected);
   if (!it) {
     box.hidden = true;
@@ -1657,11 +1656,11 @@ async function undoJournal(id) {
 }
 
 function openOrganize(tab = 'plan') {
-  S.drawer = 'organize';
   S.orgTab = tab;
+  S.view = { kind: 'organize' };
+  S.drawer = null;            // 视图与抽屉互斥
   S.selected = null;
-  renderInspector();
-  renderRail();
+  renderAll();
 }
 
 function journalHistoryHtml() {
@@ -1922,12 +1921,12 @@ function planRow(op, plan) {
   </div>`;
 }
 
-function wireOrganize() {
-  const box = $('#inspector');
+function wireOrganize(root) {
+  const box = root || $('#inspector');
   box.querySelector('[data-close]')?.addEventListener('click', () => {
     S.drawer = null;
-    renderInspector();
-    renderRail();
+    S.view = { kind: 'all' };
+    renderAll();
   });
   box.querySelectorAll('[data-org-tab]').forEach((btn) => {
     btn.addEventListener('click', () => { S.orgTab = btn.dataset.orgTab; renderInspector(); });
@@ -3140,6 +3139,12 @@ document.addEventListener('keydown', async (e) => {
     }
     if (S.editing) { S.editing = null; renderInspector(); return; }
     if (S.drawer) { S.drawer = null; S.editing = null; renderInspector(); renderTop(); return; }
+    if (S.view.kind === 'organize') {
+      // 整理现在是一个视图：Esc 退出到全部收藏，而不是试图关掉不存在的抽屉
+      S.view = { kind: 'all' };
+      renderAll();
+      return;
+    }
   }
 
   if (isInput) return;

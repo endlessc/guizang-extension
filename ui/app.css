@@ -1689,11 +1689,9 @@ body.is-col-resizing{cursor:col-resize !important;user-select:none !important;}
   font-size:11.5px; color:var(--ink-3); border-left:2px solid var(--rule); }
 .plan-sub-head span{ font-variant-numeric:tabular-nums; color:var(--ink-4); }
 
-/* 抽屉入口：和「当前视图」区分开，避免看起来同时选中两项 */
-.rail-item.is-open{
-  background:color-mix(in srgb, var(--brand) 12%, transparent);
-  color:var(--brand-ink);
-  box-shadow:inset 3px 0 0 var(--brand);
-}
-.rail-item.is-open .rail-name{font-weight:600;}
-.rail-item.is-open .rail-count{color:var(--brand-ink);}
+/* 整理视图：从右侧抽屉搬进主区后，给它一个可读的行宽与留白 */
+.organize-view{ max-width:920px; margin:0 auto; padding:18px 26px 40px; }
+.organize-view .insp-head{ padding:0 0 12px; border-bottom:1px solid var(--rule-soft); }
+.organize-view .insp-body{ padding:10px 0 0; }
+.organize-view .plan-empty{ padding:36px 8px; }
+.organize-view .plan-foot{ position:sticky; bottom:0; background:var(--paper-0); border-top:1px solid var(--rule-soft); }
