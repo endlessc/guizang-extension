@@ -1764,7 +1764,7 @@ function organizePanel() {
         </div>
         <div class="plan-empty-hint">${ready
           ? (S.orgScope === 'all'
-              ? '全库巡检：扫描已分类与待归类书签（每次最多 200 条），仅列出建议跨类目迁徙的错放条目；确认无误且自动备份后才动手。'
+              ? '全库巡检：优先挑「还不在本方案类目里」的书签（每次最多 200 条），归位后它们就离开候选池，再点一次自动接着下一批；方案内错放也会一并列出。确认无误且自动备份后才动手。'
               : '按类目列出「待归类书签该挪去哪」，逐条可剔除或改判；确认无误且自动备份后才执行。')
           : '先到设置页装一套方案（杜威、中图法或自定义方案），再回来生成计划。'}</div>
         <button class="btn btn-primary btn-md" data-gen ${ready ? '' : 'disabled'}>生成整理计划</button>
@@ -1788,6 +1788,7 @@ function organizePanel() {
     <div class="insp-body">
       <div class="plan-stats">
         <span>范围 <b>${plan.scope === 'all' ? '全库' : '待归类'}</b></span>
+        ${plan.scope === 'all' && plan.outside ? `<span>方案外 <b>${plan.outside}</b></span>` : ''}
         <span>可移 <b>${s.ready}</b></span>
         <span>拿不准 <b>${s.unsure}</b></span>
         <span>跳过 <b>${s.skip}</b></span>
@@ -1796,7 +1797,10 @@ function organizePanel() {
       ${groups || '<div class="plan-empty"><div class="plan-empty-hint">计划是空的：没有需要移动的书签。</div></div>'}
     </div>
     <div class="insp-foot plan-foot">
-      <div class="plan-foot-line">生成于 ${relTime(plan.at)}${plan.overflow ? ` · 还有 ${plan.overflow} 条没纳入` : ''}</div>
+      <div class="plan-foot-line">生成于 ${relTime(plan.at)}${plan.overflow ? ` · 还有 ${plan.overflow} 条没纳入` : ''
+      }${plan.scope === 'all' && plan.outside
+        ? `<br>方案外共 ${plan.outside} 条，本轮计划列入 ${plan.ops.length} 条；执行完再点「重新生成」接着下一批，这个数字会越来越小直到清空`
+        : ''}</div>
       <div class="plan-foot-actions">
         <button class="btn btn-primary btn-sm" data-apply ${s.ready ? '' : 'disabled'}>执行 ${s.ready} 条</button>
         <button class="btn btn-line btn-sm" data-gen>重新生成</button>

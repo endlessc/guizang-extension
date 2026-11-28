@@ -40,6 +40,15 @@ console.log('预筛');
   eq('inbox 只挑未分类', preselect(items).candidates.map((i) => i.id), ['1', '3']);
   eq('all 全都要', preselect(items, { scope: 'all' }).candidates.length, 3);
 
+  // 方案外的排前面：它们归位后就离开候选池，下一轮才会浮出后面的条目
+  const mixed = [item('a', '100'), item('b', 'F1'), item('c', '500'), item('d', 'F2')];
+  const all = preselect(mixed, { scope: 'all', codes: new Set(['000', '100', '500']) });
+  eq('方案外优先', all.candidates.map((i) => i.id), ['b', 'd', 'a', 'c']);
+  eq('方案外单独计数', all.outside, 2);
+  eq('候选池总数不受排序影响', all.pool, 4);
+  const planAll = buildPlan({ items: mixed, scheme, scope: 'all', suggestions: {}, blocked: new Set(), now: 7 });
+  eq('计划里带方案外条数', [planAll.outside, planAll.pool], [2, 4]);
+
   const many = Array.from({ length: MAX_CANDIDATES + 5 }, (_, i) => item('x' + i, ''));
   const r = preselect(many);
   eq('超出上限被截断', [r.candidates.length, r.overflow], [MAX_CANDIDATES, 5]);
