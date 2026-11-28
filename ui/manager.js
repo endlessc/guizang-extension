@@ -1783,7 +1783,7 @@ function organizePanel() {
         <span class="plan-group-name">${esc(g.name)}</span>
         <span class="plan-group-n">${g.ops.length}</span>
       </div>
-      ${g.ops.map(planRow).join('')}
+      ${g.ops.map((op) => planRow(op, plan)).join('')}
     </div>`).join('');
 
   const s = plan.stats;
@@ -1813,7 +1813,8 @@ function organizePanel() {
     </div>`;
 }
 
-function planRow(op) {
+function planRow(op, plan) {
+  const pickList = (plan && plan.scheme && plan.scheme.length) ? plan.scheme : S.scheme;
   const tone = op.status === 'ready' ? '' : op.status === 'unsure' ? ' tone-warn' : op.status === 'blocked' ? ' tone-dead' : ' tone-ink';
   const fromPrefix = op.from && op.from.code ? `${esc(op.from.code)} ` : '';
   const tag = op.status === 'ready' ? `${fromPrefix}→ ${esc(op.to.code)} ${esc(op.to.name)}${op.to.missing ? '（新建目录）' : ''}`
@@ -1832,7 +1833,7 @@ function planRow(op) {
         ${op.reason ? `<span class="plan-why" title="${esc(op.reason)}">${esc(op.reason)}</span>` : ''}
       </div>
       ${pickable ? `<select class="plan-pick" data-pick="${esc(op.id)}" title="改判到哪个类目" aria-label="改判目标类目">
-        ${S.scheme.map((f) => `<option value="${esc(f.code)}"${op.to && op.to.code === f.code ? ' selected' : ''}>${esc(f.code)} ${esc(f.name)}</option>`).join('')}
+        ${pickList.map((f) => `<option value="${esc(f.code)}"${op.to && op.to.code === f.code ? ' selected' : ''}>${esc(f.code)} ${esc(f.name)}</option>`).join('')}
       </select>` : ''}
     </div>
   </div>`;

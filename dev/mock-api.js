@@ -152,6 +152,22 @@ if (typeof location !== 'undefined') {
   const want = new URLSearchParams(location.search).get('scheme');
   if (want && getScheme(want, [])) settings = { ...settings, schemeId: want };
 }
+// 预览用：?custom=1 —— 挂一套「只定义、未建档」的自定义方案（701/702），用来验证按方案建档
+if (typeof location !== 'undefined' && location.search.includes('custom=')) {
+  const demo = {
+    id: 'custom-demo',
+    name: '演示方案',
+    kind: 'digit',
+    desc: '预览用：只定义类目，书签栏里没有对应目录',
+    custom: true,
+    folders: [
+      { code: '701', name: '前端工程', hint: 'angular angularjs react native 前端 框架' },
+      { code: '702', name: '后端工程', hint: 'java spring servlet 后端 服务' },
+    ],
+  };
+  settings = { ...settings, customSchemes: [demo], schemeId: 'custom-demo' };
+}
+
 let taxoDraft = null;      // 分类法草稿（本地预览内存态）
 let plan = null;           // 整理计划（本地预览内存态）
 let journal = [];          // 整理日志
@@ -825,7 +841,8 @@ async function handle(msg) {
   }
   if (type === 'organize:override') {
     if (!plan) throw new Error('还没有整理计划');
-    plan = overrideOp(plan, msg.id, msg.code);
+    const exists = new Set(stateLoad().scheme.map((f) => f.code));
+    plan = overrideOp(plan, msg.id, msg.code, { existing: exists });
     emit({ type: 'organize:done', plan });
     return plan;
   }
@@ -977,7 +994,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.9.0-mock' }),
+      getManifest: () => ({ version: '0.9.1-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },
