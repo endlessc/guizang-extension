@@ -10,7 +10,7 @@
 
 import {
   preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes, readyOps,
-  subCodeFor, applySubs,
+  subCodeFor, applySubs, planFolders,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -188,6 +188,20 @@ console.log('二级拆分：写回计划并参与建目录');
   eq('条目挂到二级', split.ops.map((o) => (o.to.sub ? o.to.sub.code : '')).sort(), ['110', '110', '120']);
   eq('将新建含一级与二级', split.created.map((f) => f.code), ['100', '110', '120']);
   eq('改判/剔除后二级编码不变', applySubs(plan, { '100': { subs: [{ name: 'X' }], assign: {} } }).subs['100'][0].code, '110');
+}
+
+console.log('提交前：这次要保证存在哪些目录');
+{
+  const plan = {
+    scheme: [{ code: '100', name: '编程', parent: null }],
+    subs: { '100': [{ code: '110', name: 'Java' }, { code: '120', name: '数据库' }] },
+  };
+  eq('二级目标连父级一起列出', planFolders(plan, [
+    { to: { code: '100', sub: { code: '110' } } },
+    { to: { code: '100', sub: { code: '110' } } },
+  ]).map((f) => f.code), ['100', '110']);
+  eq('一级目标只列自己', planFolders(plan, [{ to: { code: '100' } }]).map((f) => f.code), ['100']);
+  eq('没有目标就没有目录', planFolders(plan, []), []);
 }
 
 console.log('执行集合：可选择连「拿不准」一起');

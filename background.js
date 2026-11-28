@@ -19,7 +19,7 @@ import {
   callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, applySubs, sampleOps, subCodeFor, recount, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, sampleOps, subCodeFor, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
@@ -230,85 +230,123 @@ async function splitByModel(topName, items, settings, { chunk = 40, sampleSize =
   };
 }
 
-async function runApply({ includeUnsure = false } = {}) {
-  if (applyCtl.running) throw new Error('上一次整理还没结束');
-  const plan = await readPlan();
-  const ops = readyOps(plan, { includeUnsure });
-  if (!ops.length) throw new Error('计划里没有可执行的条目');
-
-  await ensureBackupFor(plan);
+/**
+ * 统一的提交入口：prepare（备份 / 冲突校验）→ commit（建目录 / 搬条目）→ 记录。
+ *
+ * 三条业务路径都走这里：
+ *   organize:apply        ops=计划里可执行的条目，folders=这些条目要用的目录
+ *   taxonomy:install      ops=[]（只建目录），folders=方案里的全部类目
+ *   organize:splitFolder  先造计划再按 apply 走
+ */
+async function commitOps({
+  planId = '', planAt = Date.now(), folders = [], ops = [],
+  backup = true, journal = true, scope = 'inbox', progress = false,
+} = {}) {
+  if (backup) await ensureBackupFor({ id: planId || 'adhoc' + planAt.toString(36), at: planAt });
 
   const settings = await readSettings();
   let tree = await chrome.bookmarks.getTree();
   let { folderScheme } = parseTree(tree, parseOptsFor(settings));
   let folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
 
-  // 计划里出现但目录还不存在的：连祖先把目录建出来再搬（二级挂到对应一级下）
-  const folderTree = [
-    ...(plan.scheme || []),
-    ...Object.entries(plan.subs || {}).flatMap(([top, list]) =>
-      (list || []).map((x) => ({ code: x.code, name: x.name, parent: top }))),
-  ];
-  const targetCodeOf = (op) => (op.to && op.to.sub ? op.to.sub.code : op.to.code);
-  const wanted = foldersForCodes([...new Set(ops.map(targetCodeOf))], folderTree)
-    .filter((f) => !folderOf.has(f.code));
+  // prepare：缺的目录按「父在前」建；同码异名一律拦下，一个都不建
+  const wanted = folders.filter((f) => f && f.code && !folderOf.has(f.code));
+  let created = 0;
+  let reused = folderScheme.length;
   if (wanted.length) {
-    const folders = wanted.map((f) => ({ code: f.code, name: f.name, parent: f.parent }));
-    const kind = folders.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
-    const inst = planInstall(tree, { id: 'adhoc', kind, folders });
+    const kind = wanted.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
+    const inst = planInstall(tree, { id: 'adhoc', kind, folders: wanted });
     if (inst.conflict.length) {
-      throw new Error('目标目录和已有文件夹撞码：'
-        + inst.conflict.map((c) => `「${c.code}」现有为「${c.got}」`).join('、'));
+      return {
+        conflict: inst.conflict,
+        created: 0, reused, moved: 0, failed: 0, stopped: false, journalId: '',
+      };
     }
-    await createFolders(inst);
+    ({ made: created } = await createFolders(inst));
     tree = await chrome.bookmarks.getTree();
     ({ folderScheme } = parseTree(tree, parseOptsFor(settings)));
     folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
   }
 
-  applyCtl = { running: true, stop: false };
-  broadcast({ type: 'organize:apply-start', total: ops.length });
-
-  const done = [];
+  // commit：搬条目（没有 ops 时只建目录，如 taxonomy:install）
+  let moved = 0;
   let failed = 0;
   let stopped = false;
-  for (let i = 0; i < ops.length; i += 1) {
-    if (applyCtl.stop) { stopped = true; break; }
-    const op = ops[i];
-    const targetCode = targetCodeOf(op);
-    const target = folderOf.get(targetCode);
-    if (!target) { failed += 1; continue; }
-    try {
-      const [node] = await chrome.bookmarks.get(op.id);
-      await chrome.bookmarks.move(op.id, { parentId: target });
-      done.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code: targetCode });
-    } catch {
-      failed += 1;
+  const done = [];
+  if (ops.length) {
+    applyCtl = { running: true, stop: false };
+    if (progress) broadcast({ type: 'organize:apply-start', total: ops.length });
+    for (let i = 0; i < ops.length; i += 1) {
+      if (applyCtl.stop) { stopped = true; break; }
+      const op = ops[i];
+      const code = op.to && op.to.sub ? op.to.sub.code : op.to && op.to.code;
+      const target = folderOf.get(code);
+      if (!target) { failed += 1; continue; }
+      try {
+        const [node] = await chrome.bookmarks.get(op.id);
+        await chrome.bookmarks.move(op.id, { parentId: target });
+        done.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code });
+        moved += 1;
+      } catch {
+        failed += 1;
+      }
+      if (progress && i % 25 === 24) {
+        broadcast({ type: 'organize:apply-progress', done: moved + failed, total: ops.length });
+        await new Promise((r) => setTimeout(r, 0));
+      }
     }
-    if (i % 25 === 24) {
-      broadcast({ type: 'organize:apply-progress', done: done.length + failed, total: ops.length });
-      await new Promise((r) => setTimeout(r, 0));
+    applyCtl = { running: false, stop: false };
+  }
+
+  // 记录：只有真的动过条目才写撤销日志
+  let journalId = '';
+  if (journal && done.length) {
+    const entry = {
+      id: 'j' + Date.now().toString(36),
+      at: Date.now(),
+      planId,
+      scope,
+      applied: done.length,
+      failed,
+      ops: done,
+    };
+    const list = pushEntry(await readJournal(), entry);
+    await chrome.storage.local.set({ [JOURNAL_KEY]: list });
+    journalId = entry.id;
+    if (progress) {
+      broadcast({
+        type: 'organize:applied',
+        entry: { ...entry, ops: undefined, count: done.length },
+        failed, total: ops.length, stopped,
+      });
     }
   }
 
-  const entry = {
-    id: 'j' + Date.now().toString(36),
-    at: Date.now(),
-    planId: plan.id,
-    scope: plan.scope || 'inbox',
-    applied: done.length,
-    failed,
-    ops: done,
-  };
-  const journal = pushEntry(await readJournal(), entry);
-  await chrome.storage.local.set({ [JOURNAL_KEY]: journal });
-  await chrome.storage.local.remove(PLAN_KEY);
-  applyCtl = { running: false, stop: false };
+  return { conflict: [], created, reused, moved, failed, stopped, journalId, total: ops.length };
+}
 
-  broadcast({ type: 'organize:applied', entry: { ...entry, ops: undefined, count: done.length }, failed, total: ops.length, stopped });
+/** 整理计划提交：薄封装，负责挑可执行条目、清计划与广播 */
+async function runApply({ includeUnsure = false } = {}) {
+  if (applyCtl.running) throw new Error('上一次整理还没结束');
+  const plan = await readPlan();
+  const ops = readyOps(plan, { includeUnsure });
+  if (!ops.length) throw new Error('计划里没有可执行的条目');
+
+  const res = await commitOps({
+    planId: plan.id,
+    planAt: plan.at,
+    folders: planFolders(plan, ops),
+    ops,
+    backup: true,
+    journal: true,
+    scope: plan.scope || 'inbox',
+    progress: true,
+  });
+
+  await chrome.storage.local.remove(PLAN_KEY);
   broadcast({ type: 'organize:done', plan: null });
   broadcast({ type: 'state:changed' });
-  return { applied: done.length, failed, journalId: entry.id };
+  return { applied: res.moved, failed: res.failed, journalId: res.journalId, created: res.created };
 }
 
 /** 撤销：只把这次动过的条目 move 回原处（含 index），不碰别的书签 */
@@ -1217,18 +1255,23 @@ const handlers = {
     return next;
   },
 
-  /** 落成目录：折成方案 → planInstall（只建缺的、冲突拦下）→ 启用 */
+  /** 落成目录：折成方案 → commitOps（只建目录；冲突拦下）→ 启用 */
   'taxonomy:install': async () => {
     const draft = await readTaxonomy();
     if (!draft) throw new Error('还没有分类法草稿');
     if (draft.status !== 'approved') throw new Error('先审定，再落成目录');
 
     const scheme = toScheme(draft);
-    const tree = await chrome.bookmarks.getTree();
-    const plan = planInstall(tree, scheme);
-    if (plan.conflict.length) return { installed: false, conflict: plan.conflict, plan };
-
-    const { made } = await createFolders(plan);
+    // 提交：只建目录、不动条目，所以不过备份闸门、不写撤销日志
+    const res = await commitOps({
+      planId: 'install:' + scheme.id,
+      folders: scheme.folders.map((f) => ({ code: f.code, name: f.name, parent: f.parent || null })),
+      ops: [],
+      backup: false,
+      journal: false,
+    });
+    if (res.conflict.length) return { installed: false, conflict: res.conflict };
+    const made = res.created;
 
     const settings = await readSettings();
     const customs = (settings.customSchemes || []).filter((s) => s.id !== scheme.id);
@@ -1243,12 +1286,12 @@ const handlers = {
       status: 'installed',
       installedAt: Date.now(),
       schemeId: scheme.id,
-      snapshot: { barId: plan.barId, exists: plan.exists.map((e) => ({ code: e.code, folderId: e.folderId })), created: made },
+      snapshot: { created: made },
     };
     await chrome.storage.local.set({ [TAXONOMY_KEY]: installed });
     broadcast({ type: 'taxonomy:done', draft: installed });
     broadcast({ type: 'state:changed' });
-    return { installed: true, created: made, reused: plan.exists.length, schemeId: scheme.id, dropped: sw.dropped };
+    return { installed: true, created: made, reused: res.reused, schemeId: scheme.id, dropped: sw.dropped };
   },
 
   /**
@@ -1528,11 +1571,15 @@ const handlers = {
     const settings = await readSettings();
     const scheme = getScheme(schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
-    const tree = await chrome.bookmarks.getTree();
-    const plan = planInstall(tree, scheme);
-    if (plan.conflict.length) return { installed: false, conflict: plan.conflict, plan };
+    const res = await commitOps({
+      planId: 'install:' + schemeId,
+      folders: (scheme.folders || []).map((f) => ({ code: f.code, name: f.name, parent: f.parent || null })),
+      ops: [],
+      backup: false,
+      journal: false,
+    });
+    if (res.conflict.length) return { installed: false, conflict: res.conflict };
 
-    await createFolders(plan);
     // 换方案 → 旧建议全部作废：不同方案会撞码但语义不同（杜威 100 哲学 / PARA 100 项目）
     const { pending: curPending = {} } = await chrome.storage.local.get('pending');
     const sw = onSchemeChange(settings.schemeId, schemeId, curPending);
@@ -1541,7 +1588,7 @@ const handlers = {
     const next = { ...settings, schemeId };
     await chrome.storage.local.set({ settings: next });
     broadcast({ type: 'state:changed' });
-    return { installed: true, created: plan.missing.length, reused: plan.exists.length, schemeId, dropped: sw.dropped };
+    return { installed: true, created: res.created, reused: res.reused, schemeId, dropped: sw.dropped };
   },
 
   'bookmarks:update': async ({ id, title, url }) => {

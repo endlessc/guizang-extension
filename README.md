@@ -45,6 +45,17 @@ chrome://extensions → 打开「开发者模式」→「加载已解压的扩�
 | **提交 / commit** | 备份闸门 → 校验 → 动树 → 写日志 | `organize:apply`、`taxonomy:install`、`organize:splitFolder` |
 | **建议 / suggestion** | 带来源的判定结果 | `{ id, code, conf, reason, source }`，`source ∈ model/heuristic/user` |
 
+**提交只有一个入口**：`commitOps({ folders, ops, backup, journal })`。
+三条业务路径都走它，差异写在一张策略表里，而不是各写一遍：
+
+| 路径 | folders | ops | 备份 | 撤销日志 |
+| --- | --- | --- | --- | --- |
+| `organize:apply` | 本次要用的目录（含祖先） | 可执行条目 | 要 | 要 |
+| `taxonomy:install` / `scheme:install` | 方案全部类目 | 空 | 不要 | 不要 |
+| `organize:splitFolder` | 造出计划后同 apply | 拆分后的条目 | 要 | 要 |
+
+prepare 阶段的规则统一为：**同码异名一律拦下，一个都不建**；缺的目录按「父在前」建。
+
 两条约束写在这里，避免以后再绕回去：
 
 - **书签树是单父树**：一个书签只能在一个目录里。多主题只能靠标签（`meta.tags`）这个分面表达，不要试图靠目录。
