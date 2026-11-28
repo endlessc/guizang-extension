@@ -25,8 +25,12 @@
             <input name="model" spellcheck="false" placeholder="deepseek-chat" /></label>
           <label class="field"><span>最大输出 (max_tokens)</span>
             <input name="maxTokens" type="number" min="200" step="100" /></label>
+          <label class="field"><span>每批条数</span>
+            <input name="modelBatch" type="number" min="4" max="200" step="4" /></label>
           <label class="field"><span>单批超时（秒）</span>
             <input name="modelTimeout" type="number" min="20" step="10" /></label>
+          <div class="hint" style="grid-column:1/-1">每批条数受「最大输出」限制：每条约 40–60 个输出 token，
+            3000 的分配上限大约 40 条/批；想让一批过百条，先把 max_tokens 提到 8000 以上。</div>
         </div>
         <label class="opt-toggle">
           <input type="checkbox" name="fetchHeadOnAi" />

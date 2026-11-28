@@ -280,6 +280,32 @@ console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
   assert.equal(out3.length, 0);
   console.log('  ✓ 每批开始报批次、失败也推进进度');
 
+  // 每批条数可配：48 条用 48 一批只发 1 次请求
+  let calls2 = 0;
+  const started2 = [];
+  const out4 = await classifyWithModel(items, scheme, settings, null, {
+    batchSize: 48,
+    call: async (st, messages) => {
+      calls2 += 1;
+      return replyOf(messages, '100');
+    },
+    onBatchStart: (b, total) => started2.push([b, total]),
+    stats: {},
+  });
+  assert.equal(out4.length, 48);
+  assert.equal(calls2, 1, '48 条按 48/批 只应发一次请求');
+  assert.deepEqual(started2, [[1, 1]]);
+  console.log('  ✓ 每批条数可配（48 条 → 1 次请求）');
+
+  // 越界的批大小会被夹到 4..200
+  const out5 = await classifyWithModel(items.slice(0, 8), scheme, settings, null, {
+    batchSize: 1000,
+    call: async (st, messages) => replyOf(messages, '100'),
+    stats: {},
+  });
+  assert.equal(out5.length, 8);
+  console.log('  ✓ 批大小越界会被夹住');
+
   // 第 2 批返回不可解析内容：只丢这一批，并记录
   calls = 0;
   const stats2 = {};
@@ -298,7 +324,7 @@ console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
   console.log('  ✓ 解析失败也记进 stats');
   assert.equal(stats2.batches, 2);
   console.log('  ✓ stats 记录总批数');
-  passed += 9;
+  passed += 11;
 }
 
 console.log(`\n✅ 全部通过（${passed} 项断言）`);
