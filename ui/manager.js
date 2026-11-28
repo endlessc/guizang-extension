@@ -793,6 +793,9 @@ function renderHead() {
       <span class="crumb-count tnum">${rows.length}</span>
     </div>
     <div class="list-tools">
+      ${S.view.kind === 'folder' && rows.length >= 6 && S.aiReady
+        ? `<button class="btn btn-line btn-sm" id="btnSplitFolder" title="让模型给这个目录分 2–5 个二级，建子目录并搬进去（可撤销）">${icon('folder', 13)}<span>拆分此目录</span></button>`
+        : ''}
       ${canTriage ? `<button class="btn btn-line btn-sm" id="btnTriage" title="逐卷审定沉浸归档 (T)">${icon('triage', 13)}<span>逐卷审定</span></button>` : ''}
       ${S.view.kind === 'inbox' && rows.length ? `<button class="btn btn-primary btn-sm" id="btnClassifyInbox">${icon('sparkle', 13)}<span>AI 归类这 ${rows.length} 条</span></button>` : ''}
       ${S.view.kind === 'moved' && movedReady.length ? `<button class="btn btn-primary btn-sm" id="btnApplyRedirects">${icon('check', 13)}<span>一键更新 ${movedReady.length} 条跳转</span></button>` : ''}
@@ -847,6 +850,21 @@ function renderHead() {
   });
 
   $('#btnTriage')?.addEventListener('click', () => triage.open(rows));
+  $('#btnSplitFolder')?.addEventListener('click', async (e) => {
+    const btn = e.currentTarget;
+    const code = S.view.kind === 'folder' ? S.view.code : '';
+    btn.disabled = true;
+    btn.innerHTML = `${icon('folder', 13)}<span>正在拆分…</span>`;
+    try {
+      const r = await send('organize:splitFolder', { code });
+      toast(`已拆成 ${r.subs} 个二级目录，移动 ${r.ops} 条；可在「整理」里撤销`);
+      await load();
+    } catch (err) {
+      toast(err.message);
+      btn.disabled = false;
+      btn.innerHTML = `${icon('folder', 13)}<span>拆分此目录</span>`;
+    }
+  });
   $('#btnExport')?.addEventListener('click', exportDead);
   $('#btnExportModal')?.addEventListener('click', openExportModal);
   $('#btnSerendipity')?.addEventListener('click', () => {
@@ -1670,7 +1688,7 @@ function journalHistoryHtml() {
     <div class="journal-head">最近整理与归类日志（可撤销）</div>
     ${list.map((j) => `<div class="journal-item">
       <div class="journal-item-meta">
-        <span>移动 <b>${j.applied || j.count || 0}</b> 条${j.scope === 'all' ? '（全库）' : j.scope === 'ai' ? '（AI 建议）' : '（待归类）'}</span>
+        <span>移动 <b>${j.applied || j.count || 0}</b> 条${j.scope === 'all' ? '（全库）' : j.scope === 'ai' ? '（AI 建议）' : j.scope === 'folder' ? '（按目录拆分）' : '（待归类）'}</span>
         <span class="journal-item-when">${relTime(j.at)}</span>
       </div>
       ${j.undoneAt

@@ -152,6 +152,11 @@ if (typeof location !== 'undefined') {
   const want = new URLSearchParams(location.search).get('scheme');
   if (want && getScheme(want, [])) settings = { ...settings, schemeId: want };
 }
+// 预览用：?ai=1 —— 装作已配好模型（aiReady），用于验证需要模型才出现的入口
+if (typeof location !== 'undefined' && location.search.includes('ai=1')) {
+  settings = { ...settings, apiKey: 'preview-key', model: 'preview/model' };
+}
+
 // 预览用：?custom=1 —— 挂一套「只定义、未建档」的自定义方案（701/702），用来验证按方案建档
 if (typeof location !== 'undefined' && location.search.includes('custom=')) {
   const demo = {
@@ -842,6 +847,55 @@ async function handle(msg) {
     return { applied: done.length, failed, journalId: entry.id };
   }
 
+  if (type === 'organize:splitFolder') {
+    const code = String(msg.code || '');
+    const st = stateLoad();
+    const items = st.items.filter((it) => String(it.code || '') === code);
+    if (items.length < 6) throw new Error(`这个目录只有 ${items.length} 条，少于 6 条不必拆`);
+    const findFolder = (c) => {
+      let hit = null;
+      walk(root, (n) => { if (!hit && !n.url && n.title && String(n.title).startsWith(c + ' ')) hit = n; });
+      return hit;
+    };
+    const folder = findFolder(code);
+    if (!folder) throw new Error('找不到这个类目文件夹（可能已被改名或删除）');
+    emit({ type: 'organize:split-start', total: 1 });
+    const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'other'; } };
+    const hosts = [...new Set(items.map((i) => hostOf(i.url)))].slice(0, 2);
+    while (hosts.length < 2) hosts.push(hosts.length ? 'misc.' + hosts.length : 'mine');
+    const subs = hosts.map((h, i) => ({
+      code: code[0] + String((i + 1) * 10).padStart(2, '0'),
+      name: h.split('.').slice(-2)[0].slice(0, 8), hint: h,
+    }));
+    for (const sub of subs) {
+      if (findFolder(sub.code)) continue;
+      folder.children.push({ id: 'f' + sub.code, title: `${sub.code} ${sub.name}`, parentId: folder.id, children: [] });
+    }
+    let moved = 0;
+    const ops = [];
+    for (const it of items) {
+      const node = findNode(it.id);
+      const sub = subs[Math.max(0, hosts.indexOf(hostOf(it.url)))];
+      const target = findFolder(sub.code);
+      if (!node || !target) continue;
+      const fromFolderId = node.parentId;
+      const fromIndex = node.index || 0;
+      detach(node);
+      node.parentId = target.id;
+      target.children.push(node);
+      moved += 1;
+      ops.push({ id: it.id, fromFolderId, fromIndex, toFolderId: target.id, code: sub.code });
+    }
+    const entry = { id: 'j' + Date.now().toString(36), at: Date.now(), planId: '', scope: 'folder', applied: moved, failed: 0, ops };
+    journal = [entry, ...journal].slice(0, 3);
+    plan = null;
+    emit({ type: 'organize:split-progress', done: 1, total: 1 });
+    emit({ type: 'organize:done', plan: null });
+    emit({ type: 'organize:applied', entry: { ...entry, ops: undefined, count: moved }, failed: 0, total: moved, stopped: false });
+    emit({ type: 'state:changed' });
+    return { started: true, subs: subs.length, ops: moved };
+  }
+
   if (type === 'organize:split') {
     if (!plan) throw new Error('还没有整理计划');
     const groups = new Map();
@@ -1079,7 +1133,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.17.0-mock' }),
+      getManifest: () => ({ version: '0.18.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

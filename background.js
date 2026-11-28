@@ -19,7 +19,7 @@ import {
   callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, applySubs, sampleOps, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, applySubs, sampleOps, subCodeFor, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
@@ -198,6 +198,38 @@ async function ensureBackupFor(plan) {
 }
 
 /** 按类目批量移动，每 25 条让出一次事件循环；随时可停 */
+
+/**
+ * 两段式拆二级：① 抽样定 2–5 个子类名；② 按 40 条一块对号入座。
+ * 每块输出都很小，一二百条的大类目也不会撞 max_tokens。
+ */
+async function splitByModel(topName, items, settings, { chunk = 40, sampleSize = 60 } = {}) {
+  const sample = sampleOps(items, sampleSize);
+  const names = parseSubNames(
+    await callModel(settings, buildSubNamesMessages(topName, sample), { maxTokens: 800 }),
+  );
+  const assign = {};
+  let badChunks = 0;
+  for (let i = 0; i < items.length; i += chunk) {
+    const part = items.slice(i, i + chunk);
+    try {
+      const got = parseSubAssign(
+        await callModel(settings, buildSubAssignMessages(topName, names, part), { maxTokens: 1600 }),
+        part,
+        names.length,
+      );
+      Object.assign(assign, got);
+    } catch {
+      badChunks += 1;
+    }
+  }
+  return {
+    subs: names.map((n, i) => ({ ...n, code: subCodeFor(topName, i) })),
+    assign,
+    badChunks,
+  };
+}
+
 async function runApply({ includeUnsure = false } = {}) {
   if (applyCtl.running) throw new Error('上一次整理还没结束');
   const plan = await readPlan();
@@ -1311,6 +1343,65 @@ const handlers = {
     return { started: true };
   },
 
+  /** 把一个已存在的类目拆成二级：生成只针对该目录的计划并立即执行（走备份闸门与撤销日志） */
+  'organize:splitFolder': async ({ code }) => {
+    if (applyCtl.running) throw new Error('上一次整理还没结束');
+    const settings = await readSettings();
+    if (!hasModel(settings)) throw new Error('拆分目录需要模型：先在设置里配好 API Key');
+    const state = await loadState();
+    const codeKey = String(code || '');
+    const items = state.items.filter((it) => String(it.code || '') === codeKey);
+    if (items.length < 6) throw new Error(`这个目录只有 ${items.length} 条，少于 6 条不必拆`);
+
+    const parsed = parseTree(await chrome.bookmarks.getTree(), parseOptsFor(settings));
+    const folder = parsed.scheme.find((f) => f.code === codeKey);
+    if (!folder) throw new Error('找不到这个类目文件夹（可能已被改名或删除）');
+
+    broadcast({ type: 'organize:split-start', total: 1 });
+    let got;
+    try {
+      got = await splitByModel(folder.name, items, settings);
+    } finally {
+      broadcast({ type: 'organize:split-progress', done: 1, total: 1 });
+    }
+    const { subs, assign } = got;
+    if (!subs || subs.length < 2) throw new Error('模型给出的子类少于 2 个，换个模型或稍后重试');
+
+    const byId = new Map(items.map((it) => [it.id, it]));
+    const ops = Object.entries(assign)
+      .filter(([id]) => byId.has(id))
+      .map(([id, idx]) => {
+        const sub = subs[idx];
+        const it = byId.get(id);
+        return {
+          id,
+          title: it.title || '',
+          url: it.url || '',
+          from: { code: codeKey, folderId: it.folderId || '' },
+          to: { code: codeKey, name: folder.name, sub: { code: sub.code, name: sub.name }, missing: true },
+          conf: 1,
+          source: 'model',
+          reason: '拆分目录',
+          status: 'ready',
+        };
+      });
+    if (!ops.length) throw new Error('模型没有把任何条目分到子类');
+
+    const plan = recount({
+      id: 'p' + Date.now().toString(36),
+      at: Date.now(),
+      scope: 'folder',
+      scheme: [{ code: codeKey, name: folder.name, parent: null }],
+      subs: { [codeKey]: subs.map((x) => ({ code: x.code, name: x.name, hint: x.hint })) },
+      existing: parsed.scheme.map((f) => f.code),
+      ops,
+    });
+    await writePlan(plan);
+    // 立即执行：建子目录 → 搬条目；备份与撤销都在 runApply 里
+    await runApply();
+    return { started: true, subs: subs.length, ops: ops.length };
+  },
+
   /** 把整理结果再拆一层二级：按一级分组，逐组问模型要 2–5 个子类并分配条目 */
   'organize:split': async ({ minPerTop = 6 } = {}) => {
     const plan = await readPlan();
@@ -1328,33 +1419,11 @@ const handlers = {
     broadcast({ type: 'organize:split-start', total: todo.length });
     const mapping = {};
     let done = 0;
-    const CHUNK = 40;
     for (const [code, ops] of todo) {
       const name = (plan.scheme.find((f) => f.code === code) || {}).name || code;
       try {
-        // 第一段：抽样定 2–5 个子类名（输出很小，不会截断）
-        const sample = sampleOps(ops, 60);
-        const names = parseSubNames(
-          await callModel(settings, buildSubNamesMessages(name, sample), { maxTokens: 800 }),
-        );
+        const { subs: names, assign, badChunks } = await splitByModel(name, ops, settings);
         if (names.length < 2) throw new Error('模型给出的子类少于 2 个');
-
-        // 第二段：按 40 条一块「对号入座」，每块输出只有块内条目
-        const assign = {};
-        let badChunks = 0;
-        for (let i = 0; i < ops.length; i += CHUNK) {
-          const chunk = ops.slice(i, i + CHUNK);
-          try {
-            const got = parseSubAssign(
-              await callModel(settings, buildSubAssignMessages(name, names, chunk), { maxTokens: 1600 }),
-              chunk,
-              names.length,
-            );
-            Object.assign(assign, got);
-          } catch {
-            badChunks += 1;
-          }
-        }
         if (Object.keys(assign).length) mapping[code] = { subs: names, assign };
         if (badChunks) {
           broadcast({
