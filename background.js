@@ -409,8 +409,7 @@ async function runApply({ includeUnsure = false } = {}) {
   if (plan.tree === 'fresh' && res.journalId) {
     const settings = await readSettings();
     const parsed = parseTree(await chrome.bookmarks.getTree(), parseOptsFor(settings));
-    const keep = new Set((plan.scheme || []).map((f) => f.code));
-    for (const f of leftoverFolders(parsed.folderScheme, parsed.items, keep)) {
+    for (const f of leftoverFolders(parsed.folderScheme, parsed.items, planCodes(plan))) {
       try {
         const [node] = await chrome.bookmarks.get(f.id);
         await chrome.bookmarks.remove(f.id);
@@ -435,6 +434,14 @@ async function runApply({ includeUnsure = false } = {}) {
   broadcast({ type: 'organize:done', plan: null });
   broadcast({ type: 'state:changed' });
   return { applied: res.moved, failed: res.failed, journalId: res.journalId, created: res.created, removed: removed.length };
+}
+
+/** 新结构里的全部编码：一级 + 派生出来的二级。清理旧目录时这些一律保留 */
+function planCodes(plan) {
+  return new Set([
+    ...((plan && plan.scheme) || []).map((f) => f.code),
+    ...Object.values((plan && plan.subs) || {}).flatMap((list) => (list || []).map((s) => s.code)),
+  ]);
 }
 
 /** 撤销：只把这次动过的条目 move 回原处（含 index），不碰别的书签 */
@@ -727,7 +734,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
       }
     }
     if (plan.tree === 'fresh') {
-      const keep = new Set(targets.map((f) => f.code));
+      const keep = planCodes(plan);
       const moving = new Set(readyOps(plan).map((op) => op.id));
       const left = estimateLeftovers(folderScheme, items, keep, moving);
       plan.removeEstimate = left.map((f) => ({ code: f.code, name: f.name }));

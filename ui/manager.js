@@ -1815,7 +1815,9 @@ function journalHistoryHtml() {
     <div class="journal-head">最近整理与归类日志（可撤销）</div>
     ${list.map((j) => `<div class="journal-item">
       <div class="journal-item-meta">
-        <span>移动 <b>${j.applied || j.count || 0}</b> 条${j.scope === 'all' ? '（全库）' : j.scope === 'ai' ? '（AI 建议）' : j.scope === 'folder' ? '（按目录拆分）' : '（待归类）'}</span>
+        <span>移动 <b>${j.applied || j.count || 0}</b> 条${
+          j.removedFolders ? `，清理 <b>${j.removedFolders}</b> 个空目录` : ''
+        }${j.scope === 'all' ? '（全库）' : j.scope === 'ai' ? '（AI 建议）' : j.scope === 'folder' ? '（按目录拆分）' : '（待归类）'}</span>
         <span class="journal-item-when">${relTime(j.at)}</span>
       </div>
       ${j.undoneAt
