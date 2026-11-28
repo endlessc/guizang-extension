@@ -1929,17 +1929,17 @@ function wireOrganize(root) {
     renderAll();
   });
   box.querySelectorAll('[data-org-tab]').forEach((btn) => {
-    btn.addEventListener('click', () => { S.orgTab = btn.dataset.orgTab; renderInspector(); });
+    btn.addEventListener('click', () => { S.orgTab = btn.dataset.orgTab; renderOrgArea(); });
   });
   box.querySelectorAll('[data-org-scope]').forEach((btn) => {
-    btn.addEventListener('click', () => { S.orgScope = btn.dataset.orgScope; renderInspector(); });
+    btn.addEventListener('click', () => { S.orgScope = btn.dataset.orgScope; renderOrgArea(); });
   });
   box.querySelectorAll('[data-org-limit]').forEach((btn) => {
-    btn.addEventListener('click', () => { S.orgLimit = btn.dataset.orgLimit; renderInspector(); });
+    btn.addEventListener('click', () => { S.orgLimit = btn.dataset.orgLimit; renderOrgArea(); });
   });
   box.querySelector('[data-run-clean]')?.addEventListener('click', async () => {
     S.cleanBusy = true;
-    renderInspector();
+    renderOrgArea();
     try {
       const ids = visible().slice(0, 40).map((x) => x.id);
       const r = await send('ai:cleanTitles', { ids });
@@ -1949,7 +1949,7 @@ function wireOrganize(root) {
       S.cleanList = [];
     } finally {
       S.cleanBusy = false;
-      renderInspector();
+      renderOrgArea();
     }
   });
   box.querySelectorAll('[data-apply-clean]').forEach((btn) => {
@@ -1973,7 +1973,7 @@ function wireOrganize(root) {
   box.querySelectorAll('[data-drop-clean]').forEach((btn) => {
     btn.addEventListener('click', () => {
       S.cleanList = (S.cleanList || []).filter((x) => x.id !== btn.dataset.dropClean);
-      renderInspector();
+      renderOrgArea();
     });
   });
   box.querySelector('[data-apply-clean-all]')?.addEventListener('click', async () => {
@@ -1997,12 +1997,12 @@ function wireOrganize(root) {
     S.planPollAt = 0;
     startPlanTick();
     S.planProgress = { stage: 'preselect', done: 0, total: 0 };
-    renderInspector();
+    renderOrgArea();
     const limit = S.orgLimit === 'all' ? 'all' : Number(S.orgLimit) || 200;
     await send('organize:plan', { scope: S.orgScope, limit }).catch((err) => {
       S.planBusy = false;
       toast(err.message);
-      renderInspector();
+      renderOrgArea();
     });
   });
   box.querySelector('[data-stop-plan]')?.addEventListener('click', async () => {
@@ -2011,41 +2011,41 @@ function wireOrganize(root) {
   });
   box.querySelector('[data-include-unsure]')?.addEventListener('change', (e) => {
     S.orgIncludeUnsure = Boolean(e.target.checked);
-    renderInspector();
+    renderOrgArea();
   });
   box.querySelector('[data-split]')?.addEventListener('click', async () => {
     S.splitBusy = true;
     S.splitProgress = { done: 0, total: 0 };
-    renderInspector();
+    renderOrgArea();
     await send('organize:split').catch((err) => {
       toast(err.message);
     }).finally(() => {
       S.splitBusy = false;
       S.splitProgress = null;
-      renderInspector();
+      renderOrgArea();
     });
   });
   box.querySelector('[data-clear]')?.addEventListener('click', async () => {
     await send('organize:cancel');
     S.plan = null;
-    renderInspector();
+    renderOrgArea();
     renderRail();
   });
   box.querySelectorAll('[data-drop]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const plan = await send('organize:drop', { id: btn.dataset.drop }).catch(() => null);
-      if (plan) { S.plan = plan; renderInspector(); renderRail(); }
+      if (plan) { S.plan = plan; renderOrgArea(); renderRail(); }
     });
   });
   box.querySelector('[data-apply]')?.addEventListener('click', async () => {
     S.applyBusy = true;
     const st = (S.plan && S.plan.stats) || {};
     S.applyProgress = { done: 0, total: (st.ready || 0) + (S.orgIncludeUnsure ? (st.unsure || 0) : 0) };
-    renderInspector();
+    renderOrgArea();
     await send('organize:apply', { includeUnsure: S.orgIncludeUnsure }).catch((err) => {
       S.applyBusy = false;
       toast(err.message);
-      renderInspector();
+      renderOrgArea();
     });
   });
   box.querySelector('[data-stop]')?.addEventListener('click', async () => {
@@ -2058,7 +2058,7 @@ function wireOrganize(root) {
   box.querySelectorAll('[data-pick]').forEach((sel) => {
     sel.addEventListener('change', async () => {
       const plan = await send('organize:override', { id: sel.dataset.pick, code: sel.value }).catch(() => null);
-      if (plan) { S.plan = plan; renderInspector(); renderRail(); toast('已改判并记住此域名偏好'); }
+      if (plan) { S.plan = plan; renderOrgArea(); renderRail(); toast('已改判并记住此域名偏好'); }
     });
   });
 }
@@ -2898,6 +2898,12 @@ $('#list')?.addEventListener('scroll', closeContextMenu, { passive: true });
 
 /* ── 组装与事件 ───────────────────────────────── */
 
+function renderOrgArea() {
+  if (S.view.kind === 'organize') { renderHead(); renderList(); }
+  renderInspector();
+  renderRail();
+}
+
 function renderAll() {
   renderTop();
   renderRail();
@@ -3030,29 +3036,29 @@ onBroadcast((msg) => {
       batchAt: msg.batch ? (msg.at || Date.now()) : (S.planProgress && S.planProgress.batchAt) || 0,
     };
     if (msg.at) S.planStartedAt = S.planStartedAt || msg.at;
-    renderInspector();
+    renderOrgArea();
     return;
   }
   if (msg.type === 'organize:split-start') {
     S.splitBusy = true;
     S.splitProgress = { done: 0, total: msg.total || 0 };
-    renderInspector();
+    renderOrgArea();
     return;
   }
   if (msg.type === 'organize:split-progress') {
     S.splitProgress = { done: msg.done || 0, total: msg.total || 0 };
-    renderInspector();
+    renderOrgArea();
     return;
   }
   if (msg.type === 'organize:apply-start') {
     S.applyBusy = true;
     S.applyProgress = { done: 0, total: msg.total };
-    renderInspector();
+    renderOrgArea();
     return;
   }
   if (msg.type === 'organize:apply-progress') {
     S.applyProgress = { done: msg.done, total: msg.total };
-    renderInspector();
+    renderOrgArea();
     return;
   }
   if (msg.type === 'organize:applied') {
@@ -3072,7 +3078,7 @@ onBroadcast((msg) => {
     stopPlanTick();
     S.planProgress = null;
     S.plan = msg.plan || null;
-    renderInspector();
+    renderOrgArea();
     renderRail();
     return;
   }
@@ -3080,7 +3086,7 @@ onBroadcast((msg) => {
     S.planBusy = false;
     S.planStartedAt = 0;
     stopPlanTick();
-    renderInspector();
+    renderOrgArea();
     toast(msg.message || '整理计划生成失败');
     return;
   }
