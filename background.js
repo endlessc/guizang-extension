@@ -408,7 +408,10 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
 
     organize.total = picked.length;
     organize.done = picked.length;
-    broadcast({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length, at: Date.now() });
+    broadcast({
+      type: 'organize:progress', stage: 'preselect',
+      done: picked.length, total: picked.length, candidates: picked.length, at: Date.now(),
+    });
 
     // 本地关键词规则 + 历史改判偏好先跑：零成本，能定的先定
     const suggestions = {};
@@ -424,7 +427,10 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
       organize.stage = 'model';
       organize.total = lowConf.length;
       organize.done = 0;
-      broadcast({ type: 'organize:progress', stage: 'model', done: 0, total: lowConf.length });
+      broadcast({
+        type: 'organize:progress', stage: 'model', done: 0,
+        total: lowConf.length, candidates: picked.length, at: Date.now(),
+      });
       try {
         const pageMeta = await enrichWeakHeads(lowConf, settings);
         const stats = {};
@@ -434,7 +440,10 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
           settings,
           (done, total) => {
             organize.done = done;
-            broadcast({ type: 'organize:progress', stage: 'model', done, total, at: Date.now() });
+            broadcast({
+              type: 'organize:progress', stage: 'model', done, total,
+              candidates: picked.length, at: Date.now(),
+            });
           },
           {
             learned,
@@ -449,6 +458,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
               batch,
               batches,
               batchSize: size,
+              candidates: picked.length,
               at: Date.now(),
             }),
           },
