@@ -3,7 +3,7 @@
 import {
   $, esc, icon, mark, send, toast, triggerUndo, fmtDate, relTime, faviconMark, wireFavicons,
   TONE, PROBLEM, SUSPECT, statusMark, onBroadcast, debounce, checkProto,
-  THEMES, getTheme, setThemeAnimated,
+  THEMES, getTheme, setThemeAnimated, confirmDialog,
 } from './shared.js';
 import { groupByCode, treeOrder, familyOf } from '../lib/tree.js';
 import { groupOps } from '../lib/organize.js';
@@ -1014,6 +1014,12 @@ function renderHead() {
 
   $('#btnApplyRedirects')?.addEventListener('click', async () => {
     const ids = movedReady.map((it) => it.id);
+    const ok = await confirmDialog({
+      title: '更新跳转链接？',
+      message: `把 ${ids.length} 条书签的地址换成检测到的新地址。更新后提示里可以撤销。`,
+      okText: `更新 ${ids.length} 条`,
+    });
+    if (!ok) return;
     const r = await send('health:applyRedirects', { ids }).catch((e) => ({ error: e.message }));
     if (r.error) return toast(r.error);
     await load();
@@ -1030,6 +1036,13 @@ function renderHead() {
   $('#btnCleanDups')?.addEventListener('click', async () => {
     const ids = dGroups.flatMap((g) => g.removeIds);
     const snapshots = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
+    const ok = await confirmDialog({
+      title: '清理重复书签？',
+      message: `每组只保留一条，将删除 ${ids.length} 条重复项。删除后提示里可以撤销。`,
+      okText: `清理 ${ids.length} 条`,
+      danger: true,
+    });
+    if (!ok) return;
     const r = await send('bookmarks:remove', { ids }).catch((e) => ({ error: e.message }));
     if (r.error) return toast(r.error);
     await load();
@@ -1483,6 +1496,16 @@ async function moveWithUndo(ids, code, learn = false) {
 async function deleteWithUndo(ids) {
   const snapshots = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
   if (!snapshots.length) return;
+  // 单条删除靠提示里的「撤销」兜底；成批删除先问一句，免得手滑
+  if (ids.length > 1) {
+    const ok = await confirmDialog({
+      title: '删除这些书签？',
+      message: `将从书签栏删除 ${ids.length} 条。删除后提示里可以撤销，但撤销只保留到下一次整理。`,
+      okText: `删除 ${ids.length} 条`,
+      danger: true,
+    });
+    if (!ok) return;
+  }
   const r = await send('bookmarks:remove', { ids }).catch((err) => ({ error: err.message }));
   if (r.error) return toast(r.error);
   if (ids.includes(S.selected)) { S.selected = null; S.drawer = null; S.editing = null; }
@@ -1794,6 +1817,13 @@ function renderInspector() {
 }
 
 async function undoJournal(id) {
+  const ok = await confirmDialog({
+    title: '撤销这次整理？',
+    message: '会把这次搬走的书签放回原位、重建被删掉的目录，并清掉本次新建的空目录。\n撤销本身不能再撤回。',
+    okText: '撤销',
+    danger: true,
+  });
+  if (!ok) return;
   const r = await send('organize:undo', { journalId: id }).catch((err) => ({ error: err.message }));
   if (r.error) return toast(r.error);
   toast(`已撤销 ${r.restored} 条${r.rebuilt ? `，重建 ${r.rebuilt} 个旧目录` : ''}${
@@ -2179,6 +2209,12 @@ function wireOrganize(root) {
   box.querySelector('[data-apply-clean-all]')?.addEventListener('click', async () => {
     const list = S.cleanList || [];
     if (!list.length) return;
+    const ok = await confirmDialog({
+      title: '应用全部标题修改？',
+      message: `会修改 ${list.length} 条书签的标题。应用后提示里可以撤销。`,
+      okText: `应用 ${list.length} 条`,
+    });
+    if (!ok) return;
     const r = await send('bookmarks:batchRename', { changes: list.map((x) => ({ id: x.id, title: x.to })) });
     S.cleanList = [];
     await load();
@@ -2236,6 +2272,13 @@ function wireOrganize(root) {
     });
   });
   box.querySelector('[data-wal-rollback]')?.addEventListener('click', async () => {
+    const ok = await confirmDialog({
+      title: '按中断记录回滚？',
+      message: '会把中断记录里已经搬走的书签搬回原目录。只动记录里那些条目。',
+      okText: '回滚',
+      danger: true,
+    });
+    if (!ok) return;
     const r = await send('organize:walRollback').catch((err) => ({ error: err.message }));
     if (r.error) return toast(r.error);
     toast(`已按记录回滚 ${r.restored || 0} 条`);

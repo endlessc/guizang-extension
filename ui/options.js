@@ -61,8 +61,24 @@ async function boot() {
 
   $('#test').addEventListener('click', test);
   $('#form').addEventListener('submit', save);
-  $('#clearHealth').addEventListener('click', () => clear('health:clear', '检测结果'));
-  $('#clearPending').addEventListener('click', () => clear('ai:ignoreAll', '归类建议'));
+  $('#clearHealth').addEventListener('click', async () => {
+    if (!await confirmDialog({
+      title: '清空检测记录',
+      message: '会删掉所有链接健康状态，下次要重新检测。这一步不可撤销。',
+      okText: '清空',
+      danger: true,
+    })) return;
+    clear('health:clear', '检测结果');
+  });
+  $('#clearPending').addEventListener('click', async () => {
+    if (!await confirmDialog({
+      title: '重置归类建议',
+      message: '会丢掉所有还没确认的归类建议。这一步不可撤销。',
+      okText: '重置',
+      danger: true,
+    })) return;
+    clear('ai:ignoreAll', '归类建议');
+  });
   wireTaxonomy();
   await renderTaxonomy().catch(() => {});
   $('#openShortcuts')?.addEventListener('click', () => chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }));
