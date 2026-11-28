@@ -684,21 +684,22 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
       }
     }
 
-    const tree = await chrome.bookmarks.getTree();
+    // 注意别叫 tree：函数参数里的 tree 是「结构来源」，同名会形成暂时性死区
+    const bookmarkTree = await chrome.bookmarks.getTree();
     let plan = buildPlan({
       items,
       scheme: targets,
       scope,
       folderCode,
       suggestions,
-      blocked: collectManagedIds(tree),
+      blocked: collectManagedIds(bookmarkTree),
       existing: new Set(folderScheme.map((f) => f.code)),
       limit,
     });
 
     // 全新生成：先把当前整树备份下来，再谈重建——备份不成功就不往下走
     if (scope === 'scheme' && tree === 'fresh') {
-      const meta = await saveBackup(tree, { planId: plan.id, schemeId: settings.schemeId || '' });
+      const meta = await saveBackup(bookmarkTree, { planId: plan.id, schemeId: settings.schemeId || '' });
       plan.tree = 'fresh';
       plan.backupId = meta.id;
       plan.backupAt = meta.at;
