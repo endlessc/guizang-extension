@@ -1688,3 +1688,12 @@ body.is-col-resizing{cursor:col-resize !important;user-select:none !important;}
 .plan-sub-head{ display:flex; gap:8px; align-items:baseline; margin:10px 0 4px; padding-left:10px;
   font-size:11.5px; color:var(--ink-3); border-left:2px solid var(--rule); }
 .plan-sub-head span{ font-variant-numeric:tabular-nums; color:var(--ink-4); }
+
+/* 抽屉入口：和「当前视图」区分开，避免看起来同时选中两项 */
+.rail-item.is-open{
+  background:color-mix(in srgb, var(--brand) 12%, transparent);
+  color:var(--brand-ink);
+  box-shadow:inset 3px 0 0 var(--brand);
+}
+.rail-item.is-open .rail-name{font-weight:600;}
+.rail-item.is-open .rail-count{color:var(--brand-ink);}

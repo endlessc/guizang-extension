@@ -539,14 +539,16 @@ function renderFilterBar() {
 
 /* ── 书架 + 拖拽归类落点 ───────────────────────── */
 
-function railItem({ code, name, count, bad, active, view, iconName, tone, dropKind = '' }) {
+function railItem({ code, name, count, bad, active, open, view, iconName, tone, dropKind = '' }) {
   const lead = code
     ? `<span class="rail-num">${esc(code)}</span>`
     : `<span class="rail-icon tone-${tone || 'ink'}">${icon(iconName, 13)}</span>`;
   const countTone = tone === 'dead' && count ? ' tone-dead' : tone === 'warn' && count ? ' tone-warn' : '';
   const tip = code ? `${code} ${name}（${count} 条${bad ? `，${bad} 条失效` : ''}，可拖入归类）` : `${name}（${count} 条）`;
   const dropAttr = dropKind ? ` data-drop-kind="${dropKind}"` : (code ? ` data-drop-code="${esc(code)}"` : '');
-  return `<button class="rail-item${active ? ' is-active' : ''}" data-view="${view}"${dropAttr} title="${esc(tip)}">
+  return `<button class="rail-item${active ? ' is-active' : ''}${open ? ' is-open' : ''}" data-view="${view}"${
+    open ? ' aria-expanded="true"' : ''
+  }${dropAttr} title="${esc(tip)}">
     ${lead}
     <span class="rail-name">${esc(name)}</span>
     ${bad ? `<span class="rail-bad" title="${bad} 条失效">${bad}</span>` : ''}
@@ -627,7 +629,7 @@ function renderRail() {
   parts.push('<div class="section-label">智能视图</div>');
   parts.push(railItem({ name: '待归类', count: c.inbox, view: 'inbox', iconName: 'inbox', tone: 'brand', active: S.view.kind === 'inbox' }));
   parts.push(railItem({ name: '归类建议', count: c.pending, view: 'pending', iconName: 'sparkle', tone: 'brand', active: S.view.kind === 'pending' }));
-  parts.push(railItem({ name: '整理与洗白', count: S.plan ? S.plan.ops.length : 0, view: '__organize', iconName: 'folder', tone: 'ink', active: S.drawer === 'organize' }));
+  parts.push(railItem({ name: '整理与洗白', count: S.plan ? S.plan.ops.length : 0, view: '__organize', iconName: 'folder', tone: 'ink', open: S.drawer === 'organize' }));
   parts.push(railItem({ name: '已失效', count: c.dead, view: 'dead', iconName: 'alert', tone: 'dead', active: S.view.kind === 'dead' }));
   parts.push(railItem({ name: '疑似失效', count: c.susp, view: 'susp', iconName: 'clock', tone: 'warn', active: S.view.kind === 'susp' }));
   parts.push(railItem({ name: '已跳转', count: c.moved, view: 'moved', iconName: 'redirect', tone: 'ink', active: S.view.kind === 'moved' }));
@@ -665,7 +667,14 @@ function renderRail() {
     btn.addEventListener('click', () => {
       const v = btn.dataset.view;
       if (v === '__organize') {
-        openOrganize();
+        if (S.drawer === 'organize') {
+          S.drawer = null;
+          S.selected = null;
+          renderInspector();
+          renderRail();
+        } else {
+          openOrganize();
+        }
         return;
       }
       S.view = BUILTIN_VIEWS.includes(v) ? { kind: v } : { kind: 'folder', code: v };
