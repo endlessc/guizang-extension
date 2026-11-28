@@ -48,8 +48,9 @@ function runFixtures() {
   const out = {};
   for (const name of FIXTURES) {
     const tree = JSON.parse(readFileSync(join(HERE, 'fixtures', `${name}.json`), 'utf8'));
-    // folderScheme 是 scheme 的别名（术语改名引入），不进基线：基线只描述原有语义
-    const { folderScheme, ...rest } = parseTree(tree);
+    // folderScheme 是 scheme 的别名（术语改名引入），parentOf 是展示层后来加的子类关系，
+    // 两者都不进基线：基线只描述「识别层」原有的语义
+    const { folderScheme, parentOf, ...rest } = parseTree(tree);
     out[name] = rest;
   }
   return out;

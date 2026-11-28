@@ -653,6 +653,31 @@ body:has(.selbar) #toast{bottom:72px;}
 .rail-item.is-active .rail-bad{
   color:var(--on-brand);background:color-mix(in srgb, var(--on-brand) 22%, transparent);
 }
+/* 拆出来的二级：缩进挂在父类下面，并在父类行标出「含几个子类」 */
+.rail-item.is-sub{height:28px;padding-left:26px;}
+.rail-item.is-sub .rail-num{width:26px;font-size:10.5px;font-weight:500;color:var(--ink-4);}
+.rail-item.is-sub .rail-name{font-size:12px;font-weight:400;}
+.rail-item.is-sub.is-active .rail-name{font-weight:500;}
+.rail-sub-mark{
+  flex:none;display:inline-flex;align-items:center;gap:3px;font-size:10px;line-height:16px;
+  padding:0 5px;border-radius:3px;color:var(--ink-3);background:var(--paper-2);
+  font-variant-numeric:tabular-nums;
+}
+.rail-item.is-active .rail-sub-mark{color:var(--on-brand);background:color-mix(in srgb, var(--on-brand) 18%, transparent);}
+
+/* 一级目录被拆成二级后：本目录可能是空的，给一组子类入口，别让它看起来像废弃目录 */
+.sub-chips{margin:14px 0 4px;}
+.sub-chips-head{font-size:11.5px;color:var(--ink-3);margin-bottom:8px;}
+.sub-chips-list{display:flex;flex-wrap:wrap;gap:6px;}
+.sub-chip{
+  display:inline-flex;align-items:baseline;gap:7px;padding:6px 10px;border-radius:6px;
+  border:1px solid var(--rule);background:var(--paper-0);color:var(--ink-2);
+  font-size:12px;transition:all .14s var(--ease-spring);
+}
+.sub-chip:hover{border-color:var(--brand);color:var(--brand-ink);background:var(--brand-wash);}
+.sub-chip-num{font-size:10.5px;color:var(--ink-4);font-variant-numeric:tabular-nums;}
+.sub-chip-name{font-weight:500;}
+.sub-chip-count{font-size:11px;color:var(--ink-3);font-variant-numeric:tabular-nums;}
 
 .rail-foot{
   flex:none;border-top:1px solid var(--rule);padding:12px 14px 14px;

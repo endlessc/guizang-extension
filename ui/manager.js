@@ -5,7 +5,7 @@ import {
   TONE, PROBLEM, SUSPECT, statusMark, onBroadcast, debounce, checkProto,
   THEMES, getTheme, setThemeAnimated,
 } from './shared.js';
-import { groupByCode } from '../lib/tree.js';
+import { groupByCode, treeOrder } from '../lib/tree.js';
 import { groupOps } from '../lib/organize.js';
 import { findDuplicates, duplicateIdSet, removableCount } from '../lib/dedup.js';
 import { filterAndScore, parseQuery } from '../lib/search.js';
@@ -30,6 +30,7 @@ const S = {
   loaded: false,
   items: [],
   folderScheme: [],
+  parentOf: {},            // code → 父 code（拆出来的二级靠它挂回一级）
   health: {},
   pending: {},
   meta: {},
@@ -541,16 +542,19 @@ function renderFilterBar() {
 
 /* ── 书架 + 拖拽归类落点 ───────────────────────── */
 
-function railItem({ code, name, count, bad, active, view, iconName, tone, dropKind = '' }) {
+function railItem({ code, name, count, bad, active, view, iconName, tone, dropKind = '', level = 0, subCount = 0 }) {
   const lead = code
     ? `<span class="rail-num">${esc(code)}</span>`
     : `<span class="rail-icon tone-${tone || 'ink'}">${icon(iconName, 13)}</span>`;
   const countTone = tone === 'dead' && count ? ' tone-dead' : tone === 'warn' && count ? ' tone-warn' : '';
-  const tip = code ? `${code} ${name}（${count} 条${bad ? `，${bad} 条失效` : ''}，可拖入归类）` : `${name}（${count} 条）`;
+  // 有子类的一级目录：本目录「0 条」是真的，但别让人以为它是空的，把子类情况写进提示
+  const subNote = subCount ? `，下含 ${subCount} 个子类` : '';
+  const tip = code ? `${code} ${name}（本目录 ${count} 条${bad ? `，${bad} 条失效` : ''}${subNote}，可拖入归类）` : `${name}（${count} 条）`;
   const dropAttr = dropKind ? ` data-drop-kind="${dropKind}"` : (code ? ` data-drop-code="${esc(code)}"` : '');
-  return `<button class="rail-item${active ? ' is-active' : ''}" data-view="${view}"${dropAttr} title="${esc(tip)}">
+  return `<button class="rail-item${active ? ' is-active' : ''}${level > 0 ? ' is-sub' : ''}" data-view="${view}"${dropAttr} title="${esc(tip)}">
     ${lead}
     <span class="rail-name">${esc(name)}</span>
+    ${subCount ? `<span class="rail-sub-mark" title="下含 ${subCount} 个子类">${icon('folder', 10)}${subCount}</span>` : ''}
     ${bad ? `<span class="rail-bad" title="${bad} 条失效">${bad}</span>` : ''}
     <span class="rail-count${countTone}">${count}</span>
   </button>`;
@@ -611,6 +615,54 @@ function wireRailDropTargets() {
   });
 }
 
+/** code → 直接子类个数 */
+function childCounts() {
+  const map = new Map();
+  for (const f of S.folderScheme) {
+    const p = S.parentOf[f.code];
+    if (p) map.set(p, (map.get(p) || 0) + 1);
+  }
+  return map;
+}
+
+/** 某目录的直接子类，按展示顺序 */
+function childFolders(code) {
+  return treeOrder(S.folderScheme, S.parentOf).filter((f) => S.parentOf[f.code] === code);
+}
+
+function codeCount(code) {
+  let n = 0;
+  for (const it of S.items) if ((it.code || '') === code) n += 1;
+  return n;
+}
+
+/** 一级目录被拆开后：给一组子类入口，别让「本目录 0 条」看起来像空目录 */
+function subChipsHtml(code) {
+  const kids = childFolders(code);
+  if (!kids.length) return '';
+  const total = kids.reduce((n, k) => n + codeCount(k.code), 0);
+  return `<div class="sub-chips">
+    <div class="sub-chips-head">下含 ${kids.length} 个子类 · 共 ${total} 条</div>
+    <div class="sub-chips-list">${kids.map((k) => `
+      <button type="button" class="sub-chip" data-goto-code="${esc(k.code)}" title="进入 ${esc(k.code)} ${esc(k.name)}">
+        <span class="sub-chip-num">${esc(k.code)}</span>
+        <span class="sub-chip-name">${esc(k.name)}</span>
+        <span class="sub-chip-count">${codeCount(k.code)}</span>
+      </button>`).join('')}</div>
+  </div>`;
+}
+
+function wireSubChips(root) {
+  root.querySelectorAll('[data-goto-code]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      S.view = { kind: 'folder', code: btn.dataset.gotoCode };
+      S.selected = null;
+      S.drawer = null;
+      renderAll();
+    });
+  });
+}
+
 function renderRail() {
   const c = counts();
   const byCode = {};
@@ -645,10 +697,13 @@ function renderRail() {
   }));
 
   if (S.folderScheme.length) parts.push('<div class="section-label">分类<span class="section-aside">可拖入</span></div>');
-  for (const f of S.folderScheme) {
+  // 拆出来的二级按父子关系缩进挂在下面，而不是按编码顺序散在列表末尾
+  const kids = childCounts();
+  for (const f of treeOrder(S.folderScheme, S.parentOf)) {
     parts.push(railItem({
       code: f.code, name: f.name, count: byCode[f.code] || 0,
-      bad: badByCode[f.code] || 0, view: f.code,
+      bad: badByCode[f.code] || 0, view: f.code, level: f.level,
+      subCount: kids.get(f.code) || 0,
       active: S.view.kind === 'folder' && S.view.code === f.code,
     }));
   }
@@ -1160,6 +1215,15 @@ function renderList() {
         <div class="empty-title">卷目已清，暂无待决建议</div>
         <div class="empty-hint">所有书签皆已妥善归类。收录新网址时，建议将在此呈递。</div>
       </div>`;
+    } else if (S.view.kind === 'folder' && childFolders(S.view.code).length) {
+      // 拆成二级之后，一级目录自己没有直接条目是正常的——别把它画成「空目录」
+      list.innerHTML = `<div class="empty">
+        <div class="empty-rule"></div>
+        <div class="empty-title">这一级没有直接书签</div>
+        <div class="empty-hint">收藏都在子类里，点下面进去看；也可以把别处的书签拖进这个分卷。</div>
+        ${subChipsHtml(S.view.code)}
+      </div>`;
+      wireSubChips(list);
     } else {
       list.innerHTML = `<div class="empty">
         <div class="empty-rule"></div>
@@ -1220,7 +1284,10 @@ function renderList() {
       </div>`
     : '<div class="list-tail"></div>';
 
-  list.innerHTML = body + tail;
+  // 一级目录下还有子类时，列表上方补一条入口（有直接条目时也不会看不到子类）
+  const subStrip = S.view.kind === 'folder' && !S.q.trim() ? subChipsHtml(S.view.code) : '';
+  list.innerHTML = subStrip + body + tail;
+  if (subStrip) wireSubChips(list);
 
   $('#btnLoadMore')?.addEventListener('click', () => { S.renderLimit += 200; renderList(); });
   $('#btnLoadAll')?.addEventListener('click', () => { S.renderLimit = rows.length; renderList(); });
@@ -3015,6 +3082,7 @@ async function load() {
   const st = await send('state:load');
   S.items = st.items;
   S.folderScheme = st.folderScheme;
+  S.parentOf = st.parentOf || {};
   S.health = st.health || {};
   S.pending = st.pending || {};
   S.meta = st.meta || {};

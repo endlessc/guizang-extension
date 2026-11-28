@@ -15,7 +15,7 @@ import { normalizeBase } from '../lib/llm.js';
 import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages, PROMPT_VERSION } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { sampleOps } from '../lib/organize.js';
-import { parseTree } from '../lib/tree.js';
+import { parseTree, treeOrder } from '../lib/tree.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -398,6 +398,39 @@ console.log('9. 建议血缘：模型与提示词版本（lib/llm.js）');
   assert.equal(h.promptVersion, '', '本地规则没有提示词版本');
   console.log('  ✓ 本地规则不带提示词版本');
   passed += 4;
+}
+
+console.log('10. 拆二级后的父子关系与展示顺序（lib/tree.js）');
+{
+  const tree = [{
+    id: '0', title: '', children: [{
+      id: '1', title: '书签栏', children: [
+        {
+          id: '10', title: '000 综合与工具', children: [
+            { id: '11', title: '010 效率工具', children: [{ id: '111', title: 'a', url: 'https://a.com' }] },
+            { id: '12', title: '020 开发与编程', children: [] },
+          ],
+        },
+        { id: '20', title: '100 编程与后端', children: [] },
+      ],
+    }],
+  }];
+  const r = parseTree(tree);
+  assert.equal(r.parentOf['010'], '000', '子文件夹要记下父编码');
+  console.log('  ✓ 子文件夹记下父编码');
+  assert.equal(r.parentOf['100'], undefined, '一级目录没有父编码');
+  console.log('  ✓ 一级目录没有父编码');
+
+  const ordered = treeOrder(r.folderScheme, r.parentOf);
+  assert.deepEqual(ordered.map((f) => f.code), ['000', '010', '020', '100'], '子类紧跟父类');
+  console.log('  ✓ 子类紧跟父类，不再散到列表末尾');
+  assert.deepEqual(ordered.map((f) => f.level), [0, 1, 1, 0], '层级从 0 起算');
+  console.log('  ✓ 层级从 0 起算');
+
+  const cyc = treeOrder([{ code: 'A' }, { code: 'B' }], { A: 'B', B: 'A' });
+  assert.equal(cyc.length, 2, '父子关系成环时也不能漏画');
+  console.log('  ✓ 父子关系成环时也不漏画');
+  passed += 5;
 }
 
 console.log(`\n✅ 全部通过（${passed} 项断言）`);

@@ -3,6 +3,7 @@
 import { $, esc, icon, mark, send, toast, openManager, THEMES, getTheme, setThemeAnimated } from './shared.js';
 import { toMarkdown, toNetscapeHtml } from '../lib/export.js';
 import { parseSchemeLines } from '../lib/schemes.js';
+import { treeOrder } from '../lib/tree.js';
 
 import { ensureEnv } from './env.js';
 await ensureEnv();
@@ -46,7 +47,7 @@ async function boot() {
   currentSettings = summary.settings || {};
   fill(currentSettings);
   renderThemes();
-  renderScheme(summary.folderScheme);
+  renderScheme(summary.folderScheme, summary.parentOf);
   await renderPicker().catch(() => {});
   await renderPermissions().catch(() => {});
   await renderLearned().catch(() => {});
@@ -342,7 +343,7 @@ async function installTx() {
     txConflict = [];
     toast(`已落成目录：新建 ${r.created} 个，复用 ${r.reused} 个${schemeNote(r)}`);
     const summary = await send('summary:load');
-    renderScheme(summary.folderScheme);
+    renderScheme(summary.folderScheme, summary.parentOf);
     await renderPicker();
     await renderTaxonomy();
   } catch (err) {
@@ -627,21 +628,22 @@ async function installScheme(id) {
     toast(base + schemeNote(r));
     $('#schemePreview').innerHTML = '';
     const summary = await send('summary:load');
-    renderScheme(summary.folderScheme);
+    renderScheme(summary.folderScheme, summary.parentOf);
     await renderPicker();
   } catch (err) {
     toast(err.message);
   }
 }
 
-function renderScheme(scheme) {
+function renderScheme(scheme, parentOf = {}) {
   const box = $('#scheme');
   if (!scheme.length) {
     box.innerHTML = `<div class="scheme-empty">没找到分类文件夹。在书签栏里新建一个，标题写成「500 人工智能」这样就行。</div>`;
     return;
   }
-  box.innerHTML = scheme
-    .map((f) => `<div class="scheme-item">
+  // 二级缩进挂在父类下面，别让拆出来的 010/020 看起来和 000 平级
+  box.innerHTML = treeOrder(scheme, parentOf)
+    .map((f) => `<div class="scheme-item${f.level ? ' is-sub' : ''}">
       <span class="code">${esc(f.code)}</span>
       <span class="nm">${esc(f.name)}</span>
     </div>`)

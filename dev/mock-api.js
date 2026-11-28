@@ -265,7 +265,7 @@ function emit(msg) {
 }
 
 function stateLoad() {
-  const { items, folders, scheme, inboxId } = parseTree(
+  const { items, folders, scheme, inboxId, parentOf } = parseTree(
     [JSON.parse(JSON.stringify(root))],
     parseOptsOf(settings.schemeId, settings.customSchemes || []),
   );
@@ -276,7 +276,7 @@ function stateLoad() {
     if (!p || !p.code || !codes.has(p.code)) { delete pending[id]; pendingDropped += 1; }
   }
   return {
-    items, folders, folderScheme: scheme, inboxId,
+    items, folders, folderScheme: scheme, parentOf, inboxId,
     health: JSON.parse(JSON.stringify(health)),
     pending: JSON.parse(JSON.stringify(pending)),
     pendingDropped,
@@ -290,7 +290,7 @@ function stateLoad() {
 }
 
 function summaryLoad() {
-  const { items, folderScheme: scheme, inboxId } = parseTree(
+  const { items, folderScheme: scheme, inboxId, parentOf } = parseTree(
     [JSON.parse(JSON.stringify(root))],
     parseOptsOf(settings.schemeId, settings.customSchemes || []),
   );
@@ -307,7 +307,7 @@ function summaryLoad() {
   const serendipity = pickSerendipity(items, { health, meta, count: 3, seed: 42 })
     .map((it) => ({ id: it.id, title: it.title, url: it.url, host: it.host, code: it.code, added: it.added }));
   return {
-    scheme, inboxId, settings, meta: JSON.parse(JSON.stringify(meta)), aiReady: Boolean(settings.apiKey && settings.model),
+    scheme, parentOf, inboxId, settings, meta: JSON.parse(JSON.stringify(meta)), aiReady: Boolean(settings.apiKey && settings.model),
     counts: {
       all: items.length, dead, susp, moved, dups: dups.length, unchecked, inbox,
       pending: Object.keys(pending).length,
@@ -1145,7 +1145,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.22.1-mock' }),
+      getManifest: () => ({ version: '0.22.2-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

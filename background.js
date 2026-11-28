@@ -88,7 +88,7 @@ async function loadState() {
   const store = await chrome.storage.local.get(KEYS);
   const settings = { ...DEFAULT_SETTINGS, ...(store.settings || {}) };
   const tree = await chrome.bookmarks.getTree();
-  const { items, folders, folderScheme, inboxId } = parseTree(tree, parseOptsFor(settings));
+  const { items, folders, folderScheme, inboxId, parentOf } = parseTree(tree, parseOptsFor(settings));
   const health = store.health || {};
   const pending = store.pending || {};
   const rawMeta = store.meta || {};
@@ -122,6 +122,7 @@ async function loadState() {
     items,
     folders,
     folderScheme,
+    parentOf,
     inboxId,
     health,
     pending,
@@ -928,7 +929,7 @@ const handlers = {
   'summary:load': async () => {
     const settings = await readSettings();
     const { parsed, inboxId } = await ensureInbox(undefined, settings);
-    const { items, folderScheme } = parsed;
+    const { items, folderScheme, parentOf } = parsed;
     const { health = {}, pending = {}, meta = {} } = await chrome.storage.local.get(['health', 'pending', 'meta']);
     let dead = 0;
     let susp = 0;
@@ -949,6 +950,7 @@ const handlers = {
 
     return {
       folderScheme,
+      parentOf,
       inboxId,
       settings,
       meta,
