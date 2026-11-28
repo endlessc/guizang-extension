@@ -1769,15 +1769,21 @@ function organizePanel() {
     const pr = S.planProgress || { stage: 'preselect', done: 0, total: 0 };
     const pct = pr.total ? Math.round((pr.done / pr.total) * 100) : 6;
     const waited = S.planStartedAt ? Math.max(0, Math.round((Date.now() - S.planStartedAt) / 1000)) : 0;
+    const batchWaited = pr.batchAt ? Math.max(0, Math.round((Date.now() - pr.batchAt) / 1000)) : 0;
+    const perBatch = pr.batchSize || 0;
+    // 把「本轮总数」和「每批条数」分开写：193 是本轮要判的总条数，一批只有 24 条
     const batchLine = pr.stage === 'model' && pr.batch && pr.batches
-      ? `第 ${pr.batch}/${pr.batches} 批 · 已完成 ${pr.done}/${pr.total || '…'}`
+      ? `第 ${pr.batch}/${pr.batches} 批（${perBatch ? `每批 ${perBatch} 条，` : ''}本轮共 ${pr.total || '…'} 条）· 本批已等 ${batchWaited} 秒`
       : '正在预筛书签';
+    const slowHint = pr.stage === 'model' && batchWaited > 90
+      ? '（单批上限 120 秒，超时会自动重试一次）'
+      : '';
     return head + `<div class="insp-body">
       <div class="plan-busy">
         <div class="plan-busy-line">${pr.stage === 'model' ? '模型正在判断' : '正在预筛'} ${pr.done}/${pr.total || '…'}</div>
         <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
-        <div class="plan-empty-hint" style="margin-top:10px">${batchLine} · 已等 ${waited} 秒${waited > 90 ? '（单批最长 120 秒，超时会自动重试一次）' : ''}</div>
-        <div class="plan-empty-hint">中途停止会保留已拿到的建议，并据此生成计划。</div>
+        <div class="plan-empty-hint" style="margin-top:10px">${batchLine}${slowHint}</div>
+        <div class="plan-empty-hint">已处理 ${pr.done}/${pr.total || '…'} 条，整轮已用 ${waited} 秒。中途停止会保留已拿到的建议。</div>
         <button class="btn btn-line btn-sm" data-stop-plan style="margin-top:10px">停止生成</button>
       </div>
     </div>`;
@@ -2958,7 +2964,8 @@ onBroadcast((msg) => {
   if (msg.type === 'organize:progress') {
     S.planProgress = {
       stage: msg.stage, done: msg.done, total: msg.total,
-      batch: msg.batch || 0, batches: msg.batches || 0, at: msg.at || Date.now(),
+      batch: msg.batch || 0, batches: msg.batches || 0, batchSize: msg.batchSize || 0, at: msg.at || Date.now(),
+      batchAt: msg.batch ? (msg.at || Date.now()) : (S.planProgress && S.planProgress.batchAt) || 0,
     };
     if (msg.at) S.planStartedAt = S.planStartedAt || msg.at;
     renderInspector();

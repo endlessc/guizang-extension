@@ -734,6 +734,24 @@ async function handle(msg) {
   }
 
   if (type === 'organize:plan') {
+    // 预览用：?demo=progress —— 模拟模型分 9 批慢慢跑，方便看进度文案
+    if (typeof location !== 'undefined' && location.search.includes('demo=progress')) {
+      const total = 193;
+      const batches = 9;
+      emit({ type: 'organize:start' });
+      for (let b = 1; b <= batches; b += 1) {
+        emit({
+          type: 'organize:progress', stage: 'model', batch: b, batches, batchSize: 24,
+          done: Math.min(total, (b - 1) * 24), total, at: Date.now(),
+        });
+        await new Promise((r) => setTimeout(r, 1200));
+        emit({
+          type: 'organize:progress', stage: 'model', batch: b, batches, batchSize: 24,
+          done: Math.min(total, b * 24), total, at: Date.now(),
+        });
+        await new Promise((r) => setTimeout(r, 300));
+      }
+    }
     const st = stateLoad();
     const scope = msg.scope || 'inbox';
     const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
@@ -1013,7 +1031,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.10.2-mock' }),
+      getManifest: () => ({ version: '0.10.3-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },
