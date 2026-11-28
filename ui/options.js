@@ -514,13 +514,18 @@ async function previewScheme(id, schemes = []) {
           <button type="button" class="btn btn-primary btn-md" id="btnInstall"${
             plan.conflict.length ? ' disabled' : ''
           }>安装并启用</button>
+          <button type="button" class="btn btn-line btn-sm" id="btnTrimScheme">按我的收藏裁剪</button>
           ${meta && meta.custom ? `
             <button type="button" class="btn btn-line btn-sm" id="btnExportScheme">导出此方案 JSON</button>
             <button type="button" class="btn btn-danger-ghost btn-sm" id="btnDeleteScheme">删除方案</button>
           ` : ''}
         </div>
+        <div class="hint" style="margin-top:6px">「安装并启用」把方案里 ${
+          s.missing + s.exists
+        } 个类目原样建全；「按我的收藏裁剪」先用本地规则把你的收藏铺进这套编码，只留下真有收藏的类目，做成草稿等你审定。</div>
       </div>`;
     $('#btnInstall')?.addEventListener('click', () => installScheme(id));
+    $('#btnTrimScheme')?.addEventListener('click', () => trimScheme(id));
     $('#btnExportScheme')?.addEventListener('click', () => {
       download(`guizang-scheme-${meta.id}.json`, JSON.stringify(meta, null, 2));
       toast('已导出自定义方案');
@@ -583,6 +588,18 @@ function wireCustomSchemes() {
       toast('导入失败：' + e.message);
     }
   });
+}
+
+async function trimScheme(id) {
+  try {
+    const draft = await send('taxonomy:fromScheme', { schemeId: id });
+    await renderTaxonomy();
+    $('#txStatus')?.closest('.card')?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const removed = (draft.removed || []).length;
+    toast(`已生成草稿：留下 ${draft.nodes.length} 个类目${removed ? `，剪掉 ${removed} 个空类目` : ''}；审定后点「落成目录」才建文件夹`);
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 async function installScheme(id) {

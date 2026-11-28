@@ -23,7 +23,7 @@ import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js'
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
-  approveTaxonomy, toScheme, planExtend, applyExtend, acceptProposals, coverageOf,
+  approveTaxonomy, toScheme, planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme,
 } from './lib/taxonomy.js';
 import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
 import { buildOmniboxSuggestions } from './lib/search.js';
@@ -1100,6 +1100,39 @@ const handlers = {
     broadcast({ type: 'taxonomy:done', draft: installed });
     broadcast({ type: 'state:changed' });
     return { installed: true, created: made, reused: plan.exists.length, schemeId: scheme.id, dropped: sw.dropped };
+  },
+
+  /**
+   * 按选定方案 + 真实收藏生草稿：类名与编码来自方案，只保留真有收藏的类目。
+   * 纯本地规则，不调模型；产出仍是草稿，要继续审定 → 落成才会建目录。
+   */
+  'taxonomy:fromScheme': async ({ schemeId = '' } = {}) => {
+    const settings = await readSettings();
+    const scheme = getScheme(schemeId || settings.schemeId, settings.customSchemes || []);
+    if (!scheme) throw new Error('没有这个方案');
+    const state = await loadState();
+    const items = state.items || [];
+    if (!items.length) throw new Error('还没有收藏可以归类');
+    const nodes = nodesFromScheme(scheme);
+    if (!nodes.length) throw new Error('这个方案里没有可用的类目');
+
+    const { map, unmatched } = assignByRules(items, nodes);
+    const draft = createTaxonomy({
+      name: `${scheme.name} · 按收藏裁剪`,
+      parentSchemeId: scheme.id,
+      nodes: nodes.map((n) => ({ ...n, members: map[n.code] || [] })),
+      params: { minPerCategory: 1 },
+      source: { items: items.length, sampled: 0, unmatched: unmatched.length },
+    });
+
+    // 阈值 1：只剪掉一个成员都没有的类目——目录该不该存在，由你的收藏决定
+    const pruned = pruneTaxonomy(draft, { minPerCategory: 1, maxDepth: draft.params.maxDepth });
+    const final = { ...pruned.taxonomy, removed: pruned.removed, dropped: pruned.dropped.length, status: 'draft' };
+    final.source = { ...final.source, unmatched: coverageOf(final, items).uncovered };
+
+    await chrome.storage.local.set({ [TAXONOMY_KEY]: final });
+    broadcast({ type: 'taxonomy:done', draft: final });
+    return final;
   },
 
   /**

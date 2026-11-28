@@ -12,7 +12,7 @@ import {
   normalizeName, normalizeNames, toScheme, computeStats, groupMembers, validateTaxonomy,
   sampleForSkeleton, buildTaxonomyFromSkeleton, assignByRules, TOP_LIMIT,
   renameNodes, removeNodes, approveTaxonomy,
-  planExtend, applyExtend, acceptProposals, coverageOf, siteLabel,
+  planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme, siteLabel,
 } from '../lib/taxonomy.js';
 
 let failed = 0;
@@ -332,6 +332,40 @@ console.log('覆盖率：全流程一个口径');
   eq('总数只算有 url 的', cov.items, 3);
   eq('重复成员只算一次、不在书签里的成员不算', cov.covered, 2);
   eq('未覆盖 = 总数 - 已覆盖', cov.uncovered, 1);
+}
+
+console.log('按方案裁剪：目录由收藏决定，不由方案决定');
+{
+  const scheme = {
+    id: 'trim',
+    folders: [
+      { code: '000', name: '综合与工具', hint: '' },
+      { code: '100', name: '编程与后端', hint: '编程 后端' },
+      { code: '110', name: 'Java', parent: '100', hint: 'java' },
+      { code: '200', name: '数据与中间件', hint: '数据库' },
+    ],
+  };
+  const nodes = nodesFromScheme(scheme);
+  eq('原样保留方案编码', nodes.map((n) => n.code), ['000', '100', '110', '200']);
+  eq('保留父子关系', nodes.find((n) => n.code === '110').parent, '100');
+  eq('成员初始为空', nodes.every((n) => n.members.length === 0), true);
+  eq('缺字段的类目被跳过', nodesFromScheme({ folders: [{ code: '', name: 'x' }, { code: '300' }] }), []);
+
+  const items = [
+    { id: 'j1', title: 'Java 并发', url: 'https://a.com/1' },
+    { id: 'p1', title: '编程入门', url: 'https://b.com/2' },
+  ];
+  const { map } = assignByRules(items, nodes);
+  const draft = createTaxonomy({
+    name: 'trim',
+    nodes: nodes.map((n) => ({ ...n, members: map[n.code] || [] })),
+    params: { minPerCategory: 1 },
+  });
+  const pruned = pruneTaxonomy(draft, { minPerCategory: 1, maxDepth: 2 });
+  eq('没有收藏的类目被剪掉', pruned.taxonomy.nodes.map((n) => n.code).sort(), ['100', '110']);
+  eq('命中的类目留下成员', pruned.taxonomy.nodes.find((n) => n.code === '110').members, ['j1']);
+  eq('剪掉的是空类目', pruned.removed.sort(), ['000', '200']);
+  eq('不会凭空造出方案外的类目', pruned.taxonomy.nodes.some((n) => n.code === '999'), false);
 }
 
 console.log('增量扩展：不动结构，只归类 + 出建议');

@@ -16,7 +16,7 @@ import { runAccept } from '../lib/pending.js';
 import { DEWEY_HINTS } from '../lib/schemes.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme,
-  planExtend, applyExtend, acceptProposals, coverageOf,
+  planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme,
 } from '../lib/taxonomy.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
@@ -625,6 +625,27 @@ async function handle(msg) {
   }
   if (type === 'taxonomy:load') return { draft: taxoDraft, running: false };
 
+  if (type === 'taxonomy:fromScheme') {
+    const scheme = getScheme(msg.schemeId || settings.schemeId, settings.customSchemes || []);
+    if (!scheme) throw new Error('没有这个方案');
+    const st = stateLoad();
+    const nodes = nodesFromScheme(scheme);
+    if (!nodes.length) throw new Error('这个方案里没有可用的类目');
+    const { map, unmatched } = assignByRules(st.items, nodes);
+    const draft = createTaxonomy({
+      name: `${scheme.name} · 按收藏裁剪`,
+      parentSchemeId: scheme.id,
+      nodes: nodes.map((n) => ({ ...n, members: map[n.code] || [] })),
+      params: { minPerCategory: 1 },
+      source: { items: st.items.length, sampled: 0, unmatched: unmatched.length },
+    });
+    const pruned = pruneTaxonomy(draft, { minPerCategory: 1, maxDepth: draft.params.maxDepth });
+    taxoDraft = { ...pruned.taxonomy, removed: pruned.removed, dropped: pruned.dropped.length, status: 'draft' };
+    taxoDraft.source = { ...taxoDraft.source, unmatched: coverageOf(taxoDraft, st.items).uncovered };
+    emit({ type: 'taxonomy:done', draft: taxoDraft });
+    return taxoDraft;
+  }
+
   if (type === 'taxonomy:extend') {
     if (!taxoDraft) throw new Error('还没有分类法草稿');
     const st = stateLoad();
@@ -931,7 +952,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.7.0-mock' }),
+      getManifest: () => ({ version: '0.8.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },
