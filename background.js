@@ -396,7 +396,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
     if (scope === 'scheme' && !full) throw new Error('还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成');
     if (!scheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
     const targets = full
-      ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '' }))
+      ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null }))
       : scheme;
 
     const { candidates: picked } = preselect(items, {

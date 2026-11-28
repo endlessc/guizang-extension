@@ -120,6 +120,31 @@ console.log('按方案建档：缺的目录标出来，执行时再建');
   eq('重复 code 只展开一次', foldersForCodes(['110', '111', '110'], tree).map((f) => f.code), ['100', '110', '111']);
   eq('方案里没有的 code 兜底用 code 当名字', foldersForCodes(['999'], tree), [{ code: '999', name: '999', parent: null }]);
 
+  // 二级：目标只有子类时，「将新建」也要把父级算进去
+  const layered = [
+    { code: '100', name: '编程与后端', parent: null },
+    { code: '110', name: 'Java', parent: '100' },
+  ];
+  const twoLevel = buildPlan({
+    items: [item('z', '')],
+    scheme: layered,
+    scope: 'all',
+    suggestions: { z: { code: '110', conf: 0.9, source: 'model' } },
+    blocked: new Set(),
+    existing: new Set(),
+    now: 11,
+  });
+  eq('二级目标会连父级一起计入新建', twoLevel.created.map((f) => f.code), ['100', '110']);
+  eq('父级已存在时只报子级', buildPlan({
+    items: [item('y', '')],
+    scheme: layered,
+    scope: 'all',
+    suggestions: { y: { code: '110', conf: 0.9, source: 'model' } },
+    blocked: new Set(),
+    existing: new Set(['100']),
+    now: 12,
+  }).created.map((f) => f.code), ['110']);
+
   const plain = buildPlan({ items, scheme, scope: 'all', suggestions, blocked: new Set(), now: 9 });
   eq('不传 existing 时视为都已存在', plain.created.length, 0);
 

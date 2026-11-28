@@ -2,6 +2,7 @@
 
 import { $, esc, icon, mark, send, toast, openManager, THEMES, getTheme, setThemeAnimated } from './shared.js';
 import { toMarkdown, toNetscapeHtml } from '../lib/export.js';
+import { parseSchemeLines } from '../lib/schemes.js';
 
 import { ensureEnv } from './env.js';
 await ensureEnv();
@@ -554,15 +555,7 @@ function wireCustomSchemes() {
   $('#btnSaveCustom')?.addEventListener('click', async () => {
     const name = $('#customSchemeName').value.trim();
     const desc = $('#customSchemeDesc').value.trim();
-    const rawLines = $('#customSchemeLines').value.split('\n');
-    const folders = [];
-    for (const line of rawLines) {
-      const t = line.trim();
-      if (!t) continue;
-      const [head, hint = ''] = t.split('|');
-      const m = /^([A-Za-z]{1,3}|\d{1,3})\s+(.+)$/.exec(head.trim());
-      if (m) folders.push({ code: m[1], name: m[2].trim(), hint: hint.trim() });
-    }
+    const folders = parseSchemeLines($('#customSchemeLines').value);
     try {
       await send('scheme:saveCustom', { scheme: { name, desc, folders } });
       editor.hidden = true;

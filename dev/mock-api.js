@@ -161,8 +161,9 @@ if (typeof location !== 'undefined' && location.search.includes('custom=')) {
     desc: '预览用：只定义类目，书签栏里没有对应目录',
     custom: true,
     folders: [
-      { code: '701', name: '前端工程', hint: 'angular angularjs react native 前端 框架' },
-      { code: '702', name: '后端工程', hint: 'java spring servlet 后端 服务' },
+      { code: '950', name: '技术', hint: '技术 综合' },
+      { code: '960', name: '前端工程', hint: 'angular angularjs react native 前端 框架', parent: '950' },
+      { code: '970', name: '后端工程', hint: 'java spring servlet 后端 服务', parent: '950' },
     ],
   };
   settings = { ...settings, customSchemes: [demo], schemeId: 'custom-demo' };
@@ -756,7 +757,7 @@ async function handle(msg) {
     const scope = msg.scope || 'inbox';
     const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
     if (scope === 'scheme' && !full) throw new Error('先在设置里选一套方案，再按方案建档');
-    const targets = full ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '' })) : st.scheme;
+    const targets = full ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null })) : st.scheme;
     const allScope = scope === 'all' || scope === 'scheme';
     const picked = allScope ? st.items : st.items.filter((it) => !it.code);
     emit({ type: 'organize:start' });
@@ -805,7 +806,8 @@ async function handle(msg) {
     let failed = 0;
     for (const op of ops) {
       const node = findNode(op.id);
-      const target = [...findNode('1').children].find((c) => !c.url && String(c.title).startsWith(op.to.code + ' '));
+      // 目标可能在二级：按 code 全树查找，不能只看书签栏直接子项
+      const target = findFolder(op.to.code);
       if (!node || !target) { failed += 1; continue; }
       const fromFolderId = node.parentId;
       const fromIndex = node.index || 0;
@@ -1031,7 +1033,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.10.4-mock' }),
+      getManifest: () => ({ version: '0.11.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

@@ -10,7 +10,7 @@ import { pinyinInitials, parseQuery, filterAndScore, buildOmniboxSuggestions } f
 import { toMarkdown, toSelectionMarkdown, toNetscapeHtml } from '../lib/export.js';
 import { normalizeMeta, collectAllTags, recordOverride, matchLearned, pickSerendipity, analyzeUsage } from '../lib/meta.js';
 import { parseHeadHtml, isWeakTitle, cleanTitleLocal } from '../lib/head.js';
-import { sanitizeCustomScheme, getScheme, parseOptsOf } from '../lib/schemes.js';
+import { sanitizeCustomScheme, getScheme, parseOptsOf, parseSchemeLines } from '../lib/schemes.js';
 import { classifyHeuristic, classifyWithModel } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 
@@ -172,6 +172,49 @@ test('中图法与 PARA 不再错配杜威编码', () => {
   assert.equal(custom.kind, 'letter');
   const opts = parseOptsOf(custom.id, [custom]);
   assert.ok(opts.letterSet.has('A'));
+});
+
+console.log('6b. 自定义方案支持二级（缩进语法）');
+test('缩进行挂在上一条一级类目下', () => {
+  const rows = parseSchemeLines('100 工程 | 后端\n  110 Java | JVM\n  120 数据库\n200 资讯');
+  assert.deepEqual(rows.map((r) => [r.code, r.parent || '']), [['100', ''], ['110', '100'], ['120', '100'], ['200', '']]);
+});
+test('二级只挂最近的一级，缩进三级会被拒', () => {
+  const clean = sanitizeCustomScheme({
+    name: '两层',
+    folders: [
+      { code: '100', name: '工程' },
+      { code: '110', name: 'Java', parent: '100' },
+      { code: '111', name: 'JVM', parent: '110' },
+    ],
+  });
+  assert.deepEqual(clean.folders.map((f) => [f.code, f.parent || '']), [['100', ''], ['110', '100']]);
+});
+test('编码不符合「父首位 + 10n」的子类被丢掉', () => {
+  const clean = sanitizeCustomScheme({
+    name: 'x',
+    folders: [{ code: '100', name: '工程' }, { code: '210', name: '错位', parent: '100' }],
+  });
+  assert.deepEqual(clean.folders.map((f) => f.code), ['100']);
+});
+test('父类不存在时子类被丢掉', () => {
+  const clean = sanitizeCustomScheme({
+    name: 'x',
+    folders: [{ code: '100', name: '工程' }, { code: '110', name: '孤儿', parent: '999' }],
+  });
+  assert.deepEqual(clean.folders.map((f) => f.code), ['100']);
+});
+test('字母编码不支持二级', () => {
+  const clean = sanitizeCustomScheme({
+    name: 'x', folders: [{ code: 'B', name: '哲学' }, { code: 'B10', name: '子', parent: 'B' }],
+  });
+  assert.deepEqual(clean.folders.map((f) => f.code), ['B']);
+});
+test('每个父类最多 9 个二级', () => {
+  const rows = [{ code: '100', name: '工程' }];
+  for (let i = 1; i <= 10; i += 1) rows.push({ code: '1' + String(i * 10).padStart(2, '0'), name: '子' + i, parent: '100' });
+  const clean = sanitizeCustomScheme({ name: 'x', folders: rows });
+  assert.equal(clean.folders.filter((f) => f.parent).length, 9);
 });
 
 console.log('7. 快照恢复树重建（lib/backup.js）');
