@@ -2251,6 +2251,24 @@ async function overrideSuggestion(id, code) {
   toast(`已归入 ${code} ${folderName(code)}（已记住此域名偏好）`);
 }
 
+let aiTick = null;
+function stopAiTick() { if (aiTick) { clearInterval(aiTick); aiTick = null; } }
+function startAiTick() {
+  if (aiTick) return;
+  aiTick = setInterval(async () => {
+    if (!S.aiBusy) { stopAiTick(); return; }
+    const r = await send('ai:load').catch(() => null);
+    if (r && !r.running) {
+      // 后台已经不在跑但没收到 done：多半是 service worker 被回收
+      S.aiBusy = false;
+      S.aiProgress = null;
+      stopAiTick();
+      toast('AI 归类中断了：后台已不在运行，已完成的结果已保留');
+      await load();
+    }
+  }, 5000);
+}
+
 async function runAi(ids) {
   if (S.aiBusy) return;
   const scope = ids;
@@ -2258,21 +2276,15 @@ async function runAi(ids) {
   S.aiBusy = true;
   S.aiProgress = { done: 0, total: scope.length };
   renderInspector();
+  startAiTick();
   try {
-    const r = await send('ai:run', { ids: scope });
-    await load();
-    const failed = (r && r.failed) || [];
-    if (failed.length) {
-      // 部分批次没走通：已经生成的建议照常留下，别让用户以为全废了
-      toast(`已生成 ${((r && r.suggestions) || []).length} 条建议；${failed.length} 批没走通：${failed[0].error}`);
-    } else {
-      toast(`${S.aiReady ? '模型' : '本地规则'}给出了 ${Object.keys(S.pending).length} 条建议`);
-    }
+    // 长任务立即返回，结果通过 ai:done / ai:error 广播回来
+    await send('ai:run', { ids: scope });
   } catch (e) {
-    toast(e.message);
-  } finally {
     S.aiBusy = false;
     S.aiProgress = null;
+    stopAiTick();
+    toast(e.message);
     renderInspector();
   }
 }
@@ -3011,6 +3023,27 @@ onBroadcast((msg) => {
   if (msg.type === 'ai:start') {
     S.aiBusy = true;
     S.aiProgress = { done: 0, total: msg.total };
+    renderInspector();
+    return;
+  }
+  if (msg.type === 'ai:done') {
+    S.aiBusy = false;
+    S.aiProgress = null;
+    stopAiTick();
+    const failed = msg.failed || [];
+    if (failed.length) {
+      toast(`已生成 ${msg.count || 0} 条建议；${failed.length} 批没走通：${failed[0].error}`);
+    } else {
+      toast(`${msg.source === 'model' ? '模型' : '本地规则'}给出了 ${msg.count || 0} 条建议`);
+    }
+    load().catch(() => {});
+    return;
+  }
+  if (msg.type === 'ai:error') {
+    S.aiBusy = false;
+    S.aiProgress = null;
+    stopAiTick();
+    toast(msg.message || 'AI 归类失败');
     renderInspector();
     return;
   }

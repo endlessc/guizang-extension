@@ -507,13 +507,19 @@ async function handle(msg) {
     const set = new Set(msg.ids);
     const targets = st.items.filter((it) => set.has(it.id));
     emit({ type: 'ai:start', total: targets.length });
-    const list = await classify(targets, st.scheme, settings);
-    await new Promise((r) => setTimeout(r, 420));
-    list.forEach((s) => { pending[s.id] = { ...s, at: Date.now() }; });
-    emit({ type: 'ai:progress', done: targets.length, total: targets.length });
-    emit({ type: 'state:changed' });
-    return { suggestions: list, source: 'heuristic' };
+    // 与真机一致：立即返回，结果走广播
+    (async () => {
+      const list = await classify(targets, st.scheme, settings);
+      await new Promise((r) => setTimeout(r, 420));
+      list.forEach((s) => { pending[s.id] = { ...s, at: Date.now() }; });
+      emit({ type: 'ai:progress', done: targets.length, total: targets.length });
+      emit({ type: 'state:changed' });
+      emit({ type: 'ai:done', total: targets.length, count: list.length, failed: [], source: 'heuristic' });
+    })();
+    return { started: true };
   }
+
+  if (type === 'ai:load') return { running: false, pending: Object.keys(pending).length };
 
   if (type === 'ai:stop') return { stopping: true };
 
@@ -1073,7 +1079,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.16.1-mock' }),
+      getManifest: () => ({ version: '0.16.2-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

@@ -707,6 +707,63 @@ async function openManagerTab({ view, drawer, id, hash, q } = {}) {
 
 /* ── 消息路由 ─────────────────────────────────── */
 
+
+/** AI 归类：本地规则先跑，只把没把握的送模型；全程广播进度，结果落盘后广播 ai:done */
+async function runAi(ids) {
+  aiCtl = { running: true, stop: false };
+  broadcast({ type: 'ai:start', total: (ids || []).length });
+  try {
+    const state = await loadState();
+    const { items, scheme, settings, learned } = state;
+    const wanted = new Set(ids);
+    const targets = items.filter((it) => wanted.has(it.id));
+    if (!scheme.length) throw new Error('没找到可用分类。先在书签栏建几个类目文件夹（例如「500 人工智能」）。');
+    if (!targets.length) { broadcast({ type: 'ai:done', total: 0, count: 0 }); return; }
+
+    // 1) 本地关键词 + 历史偏好：零成本，先定一批
+    const base = classifyHeuristic(targets, scheme, { schemeId: settings.schemeId, learned });
+    const merged = new Map(base.map((s) => [s.id, s]));
+    const lowConf = targets.filter((it) => ((merged.get(it.id) || {}).conf || 0) < 0.55);
+
+    // 2) 只把没把握的送模型（没有模型就纯本地）
+    const stats = {};
+    let list = base;
+    if (hasModel(settings) && lowConf.length) {
+      const pageMeta = await enrichWeakHeads(lowConf, settings);
+      const refined = await classify(
+        lowConf,
+        scheme,
+        settings,
+        (done, total) => broadcast({ type: 'ai:progress', done, total }),
+        { learned, pageMeta, stats, shouldStop: () => aiCtl.stop },
+      );
+      for (const s of refined) merged.set(s.id, s);
+      list = [...merged.values()];
+    }
+
+    const byId = new Map(targets.map((it) => [it.id, it]));
+    list = list.filter((s) => (byId.get(s.id) || {}).code !== s.code);
+    const failed = stats.failed || [];
+
+    if (list.length) {
+      const pending = { ...state.pending };
+      const at = Date.now();
+      for (const s of list) pending[s.id] = { ...s, at };
+      await chrome.storage.local.set({ pending });
+      broadcast({ type: 'state:changed' });
+    }
+    broadcast({
+      type: 'ai:done',
+      total: targets.length,
+      count: list.length,
+      failed,
+      source: hasModel(settings) ? 'model' : 'heuristic',
+    });
+  } finally {
+    aiCtl = { running: false, stop: false };
+  }
+}
+
 const handlers = {
   ping: async () => ({
     proto: PROTO,
@@ -957,55 +1014,18 @@ const handlers = {
   },
 
   'ai:run': async ({ ids }) => {
-    const state = await loadState();
-    const { items, scheme, settings, learned } = state;
-    const wanted = new Set(ids);
-    // 不再截成 80 条：选中多少判多少。本地规则先跑，只有没把握的才送模型。
-    const targets = items.filter((it) => wanted.has(it.id));
-    if (!scheme.length) throw new Error('没找到可用分类。先在书签栏建几个类目文件夹（例如「500 人工智能」）。');
-    if (!targets.length) return { suggestions: [] };
-
-    aiCtl = { stop: false };
-    broadcast({ type: 'ai:start', total: targets.length });
-
-    // 1) 本地关键词 + 历史偏好：零成本，先定一批
-    const base = classifyHeuristic(targets, scheme, { schemeId: settings.schemeId, learned });
-    const merged = new Map(base.map((s) => [s.id, s]));
-    const lowConf = targets.filter((it) => ((merged.get(it.id) || {}).conf || 0) < 0.55);
-
-    // 2) 只把没把握的送模型（可选：没有模型就纯本地）
-    const stats = {};
-    let list = base;
-    if (hasModel(settings) && lowConf.length) {
-      const pageMeta = await enrichWeakHeads(lowConf, settings);
-      const refined = await classify(
-        lowConf,
-        scheme,
-        settings,
-        (done, total) => broadcast({ type: 'ai:progress', done, total }),
-        { learned, pageMeta, stats, shouldStop: () => aiCtl.stop },
-      );
-      for (const s of refined) merged.set(s.id, s);
-      list = [...merged.values()];
-    }
-    // 建议目标=当前分类的不产生动作，丢掉（与 classify() 里的过滤保持一致）
-    const byId = new Map(targets.map((it) => [it.id, it]));
-    list = list.filter((s) => (byId.get(s.id) || {}).code !== s.code);
-    const failed = stats.failed || [];
-
-    // 有失败批次也先把成功的写进去：别让「跑了一半」变成「什么都没留下」
-    if (list.length) {
-      const pending = { ...state.pending };
-      const at = Date.now();
-      for (const s of list) pending[s.id] = { ...s, at };
-      await chrome.storage.local.set({ pending });
-      broadcast({ type: 'state:changed' });
-    }
-    if (!list.length && failed.length) throw new Error('模型没走通：' + failed[0].error);
-    return { suggestions: list, failed, source: hasModel(settings) ? 'model' : 'heuristic' };
+    if (aiCtl.running) throw new Error('上一次 AI 归类还没结束');
+    // 长任务不再让页面 await 到底：立即返回，进度与结果都走广播（与整理一致）
+    runAi(ids).catch((e) => broadcast({ type: 'ai:error', message: String((e && e.message) || e) }));
+    return { started: true };
   },
 
   'ai:stop': async () => { aiCtl.stop = true; return { stopping: true }; },
+
+  'ai:load': async () => {
+    const { pending } = await chrome.storage.local.get('pending');
+    return { running: aiCtl.running, pending: Object.keys(pending || {}).length };
+  },
 
   'ai:cleanTitles': async ({ ids = [] }) => {
     const state = await loadState();
