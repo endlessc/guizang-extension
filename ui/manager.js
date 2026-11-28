@@ -1513,15 +1513,20 @@ function renderList() {
   } else {
     // 用全量算组头总数，只渲染前 400 行；否则「左栏 65 / 组头 9」会像丢数据
     const shownIds = new Set(shown.map((it) => it.id));
-    const groups = groupByCodeShown(rows, hasSubs ? treeOrder(S.folderScheme, S.parentOf) : S.folderScheme, shownIds);
+    // 组头永远列出（空组也留），让列表能当完整索引用；没有已显示行的组只报总数
+    const groups = groupByCodeShown(rows, hasSubs ? treeOrder(S.folderScheme, S.parentOf) : S.folderScheme, shownIds, { keepEmpty: true });
     body = groups.map((g) => {
       const bad = g.rows.filter((it) => PROBLEM.has((S.health[it.id] || {}).status)).length;
-      const partial = g.rows.length < g.total;
-      return `<div class="group-head">
+      const partial = g.rows.length > 0 && g.rows.length < g.total;
+      const pending = g.rows.length === 0;
+      return `<div class="group-head${pending ? ' is-pending' : ''}">
         <span class="group-num">${esc(g.code)}</span>
         <span class="group-name">${esc(g.name)}</span>
-        <span class="group-count"${partial ? ` title="本组共 ${g.total} 条，当前显示 ${g.rows.length} 条；点下方「加载更多」继续"` : ''}>${
-          partial ? `${g.rows.length} / 共 ${g.total} 条` : `${g.total} 条`
+        <span class="group-count"${pending || partial ? ` title="${
+          pending ? `本组共 ${g.total} 条，都还没显示；点下方「加载更多」继续`
+            : `本组共 ${g.total} 条，当前显示 ${g.rows.length} 条；点下方「加载更多」继续`
+        }"` : ''}>${
+          pending ? `共 ${g.total} 条 · 尚未显示` : partial ? `${g.rows.length} / 共 ${g.total} 条` : `${g.total} 条`
         }</span>
         <span class="group-rule"></span>
         ${bad ? `<span class="group-bad">${bad} 条失效</span>` : ''}

@@ -409,7 +409,7 @@ console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
   console.log('  ✓ 解析失败也记进 stats');
   assert.equal(stats2.batches, 2);
   console.log('  ✓ stats 记录总批数');
-  passed += 14;
+  passed += 16;
 }
 
 console.log('9. 建议血缘：模型与提示词版本（lib/llm.js）');
@@ -486,8 +486,19 @@ console.log('10. 拆二级后的父子关系与展示顺序（lib/tree.js）');
   const g2 = groupByCodeShown(all, scheme, new Set(all.map((it) => it.id)));
   assert.deepEqual(g2.map((g) => g.total), [65, 3], '全部显示时两组都在');
   console.log('  ✓ 全部显示时不丢组');
-  assert.deepEqual(groupByCodeShown(all, scheme, new Set()).length, 0, '一行都没显示时不画空组');
-  console.log('  ✓ 不画空组');
+  assert.deepEqual(groupByCodeShown(all, scheme, new Set()).length, 0, '默认不画空组');
+  console.log('  ✓ 默认不画空组');
+
+  // keepEmpty：列表当索引用时，组头要始终在，没显示的行只报总数
+  const keep = groupByCodeShown(all, scheme, truncated, { keepEmpty: true });
+  assert.deepEqual(keep.map((g) => [g.code, g.rows.length, g.total]), [['010', 9, 65], ['020', 0, 3]], '空组保留并报总数');
+  console.log('  ✓ keepEmpty 时保留空组');
+  assert.deepEqual(
+    groupByCodeShown(all, scheme, new Set(), { keepEmpty: true }).map((g) => [g.code, g.rows.length]),
+    [['010', 0], ['020', 0]],
+    '一行未显示时两组都在',
+  );
+  console.log('  ✓ 一行未显示时组头仍在');
 
   // 安全恢复会建「归藏恢复 …」容器；里面的副本不该再被当成第二套类目
   const withRestore = [{
