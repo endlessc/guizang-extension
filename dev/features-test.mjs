@@ -11,6 +11,7 @@ import { toMarkdown, toSelectionMarkdown, toNetscapeHtml } from '../lib/export.j
 import { normalizeMeta, collectAllTags, recordOverride, matchLearned, pickSerendipity, analyzeUsage } from '../lib/meta.js';
 import { parseHeadHtml, isWeakTitle, cleanTitleLocal } from '../lib/head.js';
 import { sanitizeCustomScheme, getScheme, parseOptsOf, parseSchemeLines } from '../lib/schemes.js';
+import { normalizeBase } from '../lib/llm.js';
 import { classifyHeuristic, classifyWithModel } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 
@@ -172,6 +173,17 @@ test('中图法与 PARA 不再错配杜威编码', () => {
   assert.equal(custom.kind, 'letter');
   const opts = parseOptsOf(custom.id, [custom]);
   assert.ok(opts.letterSet.has('A'));
+});
+
+console.log('6a. Base URL 归一化');
+test('只给域名时自动补 /v1', () => {
+  assert.equal(normalizeBase('https://api.siliconflow.cn'), 'https://api.siliconflow.cn/v1');
+  assert.equal(normalizeBase('https://api.siliconflow.cn/'), 'https://api.siliconflow.cn/v1');
+  assert.equal(normalizeBase('http://localhost:11434'), 'http://localhost:11434/v1');
+});
+test('已带路径的不要动', () => {
+  assert.equal(normalizeBase('https://api.deepseek.com/v1'), 'https://api.deepseek.com/v1');
+  assert.equal(normalizeBase('https://x.com/openai/v1/'), 'https://x.com/openai/v1');
 });
 
 console.log('6b. 自定义方案支持二级（缩进语法）');

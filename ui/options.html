@@ -18,7 +18,7 @@
         <p class="hint">任何兼容 OpenAI 规范的 <code>/chat/completions</code> 均可使用：DeepSeek、通义千问、Kimi 或本地 Ollama（<code>http://localhost:11434/v1</code>）。不配置 Key 亦可离线使用，系统将自动退回按当前方案适配的本地关键词规则。</p>
         <div class="grid">
           <label class="field wide"><span>接口地址 (Base URL)</span>
-            <input name="baseUrl" spellcheck="false" placeholder="https://api.deepseek.com/v1" /></label>
+            <input name="baseUrl" spellcheck="false" placeholder="https://api.deepseek.com/v1（多数服务需要 /v1 结尾，只填域名会自动补）" /></label>
           <label class="field wide"><span>鉴权秘钥 (API Key)</span>
             <input name="apiKey" type="password" spellcheck="false" placeholder="sk-…" autocomplete="off" /></label>
           <label class="field"><span>模型标识 (Model)</span>
