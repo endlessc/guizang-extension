@@ -18,7 +18,7 @@ import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme,
   planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme,
 } from '../lib/taxonomy.js';
-import { buildPlan, dropOp, overrideOp, readyOps, foldersForCodes } from '../lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, foldersForCodes, applySubs } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
 import {
   normalizeMeta, emptyLearned, recordOverride, removeLearnedDomain,
@@ -796,7 +796,13 @@ async function handle(msg) {
       walk(root, (n) => { if (!hit && !n.url && n.title && String(n.title).startsWith(code + ' ')) hit = n; });
       return hit;
     };
-    for (const f of foldersForCodes([...new Set(ops.map((o) => o.to.code))], plan.scheme)) {
+    const folderTree = [
+      ...(plan.scheme || []),
+      ...Object.entries(plan.subs || {}).flatMap(([top, list]) =>
+        (list || []).map((x) => ({ code: x.code, name: x.name, parent: top }))),
+    ];
+    const targetCodeOf = (op) => (op.to && op.to.sub ? op.to.sub.code : op.to.code);
+    for (const f of foldersForCodes([...new Set(ops.map(targetCodeOf))], folderTree)) {
       if (findFolder(f.code)) continue;
       const parent = f.parent ? findFolder(f.parent) : bar;
       const host = parent || bar;
@@ -809,14 +815,14 @@ async function handle(msg) {
     for (const op of ops) {
       const node = findNode(op.id);
       // 目标可能在二级：按 code 全树查找，不能只看书签栏直接子项
-      const target = findFolder(op.to.code);
+      const target = findFolder(targetCodeOf(op));
       if (!node || !target) { failed += 1; continue; }
       const fromFolderId = node.parentId;
       const fromIndex = node.index || 0;
       detach(node);
       node.parentId = target.id;
       target.children.push(node);
-      done.push({ id: op.id, fromFolderId, fromIndex, toFolderId: target.id, code: op.to.code });
+      done.push({ id: op.id, fromFolderId, fromIndex, toFolderId: target.id, code: targetCodeOf(op) });
     }
     const entry = {
       id: 'j' + Date.now().toString(36), at: Date.now(), planId: plan.id,
@@ -828,6 +834,38 @@ async function handle(msg) {
     emit({ type: 'organize:done', plan: null });
     emit({ type: 'state:changed' });
     return { applied: done.length, failed, journalId: entry.id };
+  }
+
+  if (type === 'organize:split') {
+    if (!plan) throw new Error('还没有整理计划');
+    const groups = new Map();
+    for (const op of plan.ops) {
+      if (!op.to || !op.to.code) continue;
+      if (op.status !== 'ready' && op.status !== 'unsure') continue;
+      if (!groups.has(op.to.code)) groups.set(op.to.code, []);
+      groups.get(op.to.code).push(op);
+    }
+    // 预览数据每类都很少，门槛降到 3 才看得到树；真机仍是 6
+    const todo = [...groups.entries()].filter(([, ops]) => ops.length >= 3);
+    if (!todo.length) throw new Error('没有可拆分的类目：每个一级至少 3 条才拆（预览）');
+    emit({ type: 'organize:split-start', total: todo.length });
+    const mapping = {};
+    let done = 0;
+    for (const [code, ops] of todo) {
+      // 预览层不调模型：按域名聚成两个子类，够看树形与执行
+      const hostOf = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return 'other'; } };
+      const hosts = [...new Set(ops.map((o) => hostOf(o.url)))].slice(0, 2);
+      while (hosts.length < 2) hosts.push(hosts.length ? 'misc.' + hosts.length : 'mine');
+      const subs = hosts.map((h) => ({ name: h.split('.').slice(-2)[0].slice(0, 8), hint: h }));
+      const assign = {};
+      for (const o of ops) assign[o.id] = Math.max(0, hosts.indexOf(hostOf(o.url)));
+      mapping[code] = { subs, assign };
+      done += 1;
+      emit({ type: 'organize:split-progress', done, total: todo.length });
+    }
+    plan = applySubs(plan, mapping);
+    emit({ type: 'organize:done', plan });
+    return plan;
   }
 
   if (type === 'organize:stop') return { stopping: true };
@@ -1035,7 +1073,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.14.0-mock' }),
+      getManifest: () => ({ version: '0.15.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

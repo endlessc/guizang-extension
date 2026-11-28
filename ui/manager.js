@@ -64,7 +64,9 @@ const S = {
   orgScope: 'inbox',       // 'inbox' | 'all'
   orgTab: 'plan',          // 'plan' | 'clean'
   orgLimit: '200',
-  orgIncludeUnsure: false,         // 每轮条数：'200' | '500' | '1000' | 'all'
+  orgIncludeUnsure: false,
+  splitBusy: false,
+  splitProgress: null,         // 每轮条数：'200' | '500' | '1000' | 'all'
   cleanList: null,         // AI 标题洗白建议列表
   cleanBusy: false,
   serendipityOpen: false,
@@ -1825,15 +1827,29 @@ function organizePanel() {
     </div>`;
   }
 
-  const groups = groupOps(plan).map((g) => `
+  const groups = groupOps(plan).map((g) => {
+    // 有二级就按二级分组渲染小标题，没有就平铺
+    const sorted = [...g.ops].sort((a, b) => String((a.to && a.to.sub) ? a.to.sub.code : '')
+      .localeCompare(String((b.to && b.to.sub) ? b.to.sub.code : '')));
+    let last = null;
+    const rows = sorted.map((op) => {
+      const sub = op.to && op.to.sub ? op.to.sub : null;
+      const head = sub && (!last || last.code !== sub.code)
+        ? `<div class="plan-sub-head"><span>${esc(sub.code)}</span> ${esc(sub.name)}</div>`
+        : '';
+      if (sub) last = sub;
+      return head + planRow(op, plan);
+    }).join('');
+    return `
     <div class="plan-group">
       <div class="plan-group-head">
         <span class="plan-group-code">${esc(g.code)}</span>
         <span class="plan-group-name">${esc(g.name)}</span>
         <span class="plan-group-n">${g.ops.length}</span>
       </div>
-      ${g.ops.map((op) => planRow(op, plan)).join('')}
-    </div>`).join('');
+      ${rows}
+    </div>`;
+  }).join('');
 
   const s = plan.stats;
   return head + `
@@ -1862,6 +1878,9 @@ function organizePanel() {
       </div>
       <div class="plan-foot-actions">
         <button class="btn btn-primary btn-sm" data-apply ${(s.ready || (S.orgIncludeUnsure && s.unsure)) ? '' : 'disabled'}>执行 ${S.orgIncludeUnsure ? s.ready + s.unsure : s.ready} 条</button>
+        <button class="btn btn-line btn-sm" data-split ${S.splitBusy ? 'disabled' : ''}>${
+          S.splitBusy ? `拆分中 ${S.splitProgress ? `${S.splitProgress.done}/${S.splitProgress.total}` : '…'}` : '再拆一层二级'
+        }</button>
         <button class="btn btn-line btn-sm" data-gen>重新生成</button>
         <button class="btn btn-ghost btn-sm" data-clear>清空</button>
       </div>
@@ -1985,6 +2004,18 @@ function wireOrganize() {
   box.querySelector('[data-include-unsure]')?.addEventListener('change', (e) => {
     S.orgIncludeUnsure = Boolean(e.target.checked);
     renderInspector();
+  });
+  box.querySelector('[data-split]')?.addEventListener('click', async () => {
+    S.splitBusy = true;
+    S.splitProgress = { done: 0, total: 0 };
+    renderInspector();
+    await send('organize:split').catch((err) => {
+      toast(err.message);
+    }).finally(() => {
+      S.splitBusy = false;
+      S.splitProgress = null;
+      renderInspector();
+    });
   });
   box.querySelector('[data-clear]')?.addEventListener('click', async () => {
     await send('organize:cancel');
@@ -2991,6 +3022,17 @@ onBroadcast((msg) => {
       batchAt: msg.batch ? (msg.at || Date.now()) : (S.planProgress && S.planProgress.batchAt) || 0,
     };
     if (msg.at) S.planStartedAt = S.planStartedAt || msg.at;
+    renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:split-start') {
+    S.splitBusy = true;
+    S.splitProgress = { done: 0, total: msg.total || 0 };
+    renderInspector();
+    return;
+  }
+  if (msg.type === 'organize:split-progress') {
+    S.splitProgress = { done: msg.done || 0, total: msg.total || 0 };
     renderInspector();
     return;
   }

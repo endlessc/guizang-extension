@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "归藏 — 收藏夹管理",
   "short_name": "归藏",
-  "version": "0.14.0",
+  "version": "0.15.0",
   "description": "看得清、归得位、救得回：地址栏秒搜、AI 归类逐条确认、去重体检与时光机抢救。",
   "minimum_chrome_version": "116",
   "permissions": ["bookmarks", "storage", "tabs", "sidePanel", "favicon", "contextMenus"],

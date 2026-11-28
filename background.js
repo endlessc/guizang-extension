@@ -16,9 +16,10 @@ import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
 import {
   classify, classifyHeuristic, classifyWithModel, designSkeleton, cleanTitles,
+  callModel, buildSubSplitMessages, parseSubSplit,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, applySubs, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
@@ -210,8 +211,14 @@ async function runApply({ includeUnsure = false } = {}) {
   let { scheme } = parseTree(tree, parseOptsFor(settings));
   let folderOf = new Map(scheme.map((f) => [f.code, f.id]));
 
-  // 计划里出现但目录还不存在的（「按方案建档」会这样）：连祖先把目录建出来再搬
-  const wanted = foldersForCodes([...new Set(ops.map((o) => o.to.code))], plan.scheme)
+  // 计划里出现但目录还不存在的：连祖先把目录建出来再搬（二级挂到对应一级下）
+  const folderTree = [
+    ...(plan.scheme || []),
+    ...Object.entries(plan.subs || {}).flatMap(([top, list]) =>
+      (list || []).map((x) => ({ code: x.code, name: x.name, parent: top }))),
+  ];
+  const targetCodeOf = (op) => (op.to && op.to.sub ? op.to.sub.code : op.to.code);
+  const wanted = foldersForCodes([...new Set(ops.map(targetCodeOf))], folderTree)
     .filter((f) => !folderOf.has(f.code));
   if (wanted.length) {
     const folders = wanted.map((f) => ({ code: f.code, name: f.name, parent: f.parent }));
@@ -236,12 +243,13 @@ async function runApply({ includeUnsure = false } = {}) {
   for (let i = 0; i < ops.length; i += 1) {
     if (applyCtl.stop) { stopped = true; break; }
     const op = ops[i];
-    const target = folderOf.get(op.to.code);
+    const targetCode = targetCodeOf(op);
+    const target = folderOf.get(targetCode);
     if (!target) { failed += 1; continue; }
     try {
       const [node] = await chrome.bookmarks.get(op.id);
       await chrome.bookmarks.move(op.id, { parentId: target });
-      done.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code: op.to.code });
+      done.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code: targetCode });
     } catch {
       failed += 1;
     }
@@ -1281,6 +1289,41 @@ const handlers = {
       broadcast({ type: 'organize:error', message: String((e && e.message) || e) });
     });
     return { started: true };
+  },
+
+  /** 把整理结果再拆一层二级：按一级分组，逐组问模型要 2–5 个子类并分配条目 */
+  'organize:split': async ({ minPerTop = 6 } = {}) => {
+    const plan = await readPlan();
+    const settings = await readSettings();
+    if (!hasModel(settings)) throw new Error('拆分二级需要模型：先在设置里配好 API Key');
+    const groups = new Map();
+    for (const op of plan.ops) {
+      if (!op.to || !op.to.code) continue;
+      if (op.status !== 'ready' && op.status !== 'unsure') continue;
+      if (!groups.has(op.to.code)) groups.set(op.to.code, []);
+      groups.get(op.to.code).push(op);
+    }
+    const todo = [...groups.entries()].filter(([, ops]) => ops.length >= minPerTop);
+    if (!todo.length) throw new Error(`没有可拆分的类目：每个一级至少 ${minPerTop} 条才拆`);
+    broadcast({ type: 'organize:split-start', total: todo.length });
+    const mapping = {};
+    let done = 0;
+    for (const [code, ops] of todo) {
+      try {
+        const name = (plan.scheme.find((f) => f.code === code) || {}).name || code;
+        const content = await callModel(settings, buildSubSplitMessages(name, ops), { maxTokens: 1600 });
+        const got = parseSubSplit(content, ops);
+        if (got.subs.length >= 2) mapping[code] = got;
+      } catch (e) {
+        broadcast({ type: 'organize:warn', message: `「${code}」拆二级没走通：${(e && e.message) || e}` });
+      }
+      done += 1;
+      broadcast({ type: 'organize:split-progress', done, total: todo.length });
+    }
+    if (!Object.keys(mapping).length) throw new Error('没有任何类目拆分成功');
+    const next = applySubs(plan, mapping);
+    await writePlan(next);
+    return next;
   },
 
   'organize:stop': async () => {

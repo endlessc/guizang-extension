@@ -1683,3 +1683,8 @@ body.is-col-resizing{cursor:col-resize !important;user-select:none !important;}
 .plan-limit{ display:flex; align-items:center; gap:6px; margin:12px 0 6px; flex-wrap:wrap; }
 .plan-limit-label{ font-size:11px; color:var(--ink-3); letter-spacing:.04em; }
 .plan-limit .seg-tab{ padding:4px 10px; font-size:11.5px; }
+
+/* 整理计划：二级小标题 */
+.plan-sub-head{ display:flex; gap:8px; align-items:baseline; margin:10px 0 4px; padding-left:10px;
+  font-size:11.5px; color:var(--ink-3); border-left:2px solid var(--rule); }
+.plan-sub-head span{ font-variant-numeric:tabular-nums; color:var(--ink-4); }

@@ -10,6 +10,7 @@
 
 import {
   preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes, readyOps,
+  subCodeFor, applySubs,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -167,6 +168,26 @@ console.log('按方案建档：缺的目录标出来，执行时再建');
   eq('改判后新建清单跟着变', fixed.created.map((f) => f.code).sort(), ['100', '500']);
   const dropped = dropOp(fixed, 'a');
   eq('剔除后新建清单少一个', dropped.created.map((f) => f.code), ['500']);
+}
+
+console.log('二级拆分：写回计划并参与建目录');
+{
+  eq('二级编码 = 父首位 + 10n', [subCodeFor('100', 0), subCodeFor('100', 2), subCodeFor('000', 1)], ['110', '130', '020']);
+  const items = [item('a', ''), item('b', ''), item('c', '')];
+  const suggestions = {
+    a: { code: '100', conf: 0.9, source: 'model' },
+    b: { code: '100', conf: 0.9, source: 'model' },
+    c: { code: '100', conf: 0.9, source: 'model' },
+  };
+  const plan = buildPlan({ items, scheme, scope: 'all', suggestions, blocked: new Set(), existing: new Set(), now: 30 });
+  eq('拆分前没有二级', plan.subs, undefined);
+  const split = applySubs(plan, {
+    '100': { subs: [{ name: 'Java' }, { name: '数据库' }], assign: { a: 0, b: 0, c: 1 } },
+  });
+  eq('一级下记下两个二级', split.subs['100'].map((x) => [x.code, x.name]), [['110', 'Java'], ['120', '数据库']]);
+  eq('条目挂到二级', split.ops.map((o) => (o.to.sub ? o.to.sub.code : '')).sort(), ['110', '110', '120']);
+  eq('将新建含一级与二级', split.created.map((f) => f.code), ['100', '110', '120']);
+  eq('改判/剔除后二级编码不变', applySubs(plan, { '100': { subs: [{ name: 'X' }], assign: {} } }).subs['100'][0].code, '110');
 }
 
 console.log('执行集合：可选择连「拿不准」一起');
