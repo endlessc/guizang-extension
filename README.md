@@ -30,6 +30,26 @@ chrome://extensions → 打开「开发者模式」→「加载已解压的扩�
 | 侧边栏 | 右键图标 → 在侧边栏中打开 | 边浏览边整理，看最近收藏与失效提醒 |
 | 书库 | 弹窗底部「打开书库」，或右键图标 → 选项页旁边 | 全屏三栏：书架 / 列表 / 检查器 |
 
+## 术语表（代码与界面共用）
+
+这一版统一了词汇，避免同一个词指两种东西：
+
+| 词 | 含义 | 代码里 |
+| --- | --- | --- |
+| **分类法 / scheme** | 一套受控的类目 + 编码规则（杜威、中图法、自定义、归纳草稿） | `getScheme()` → `scheme.folders` |
+| **类目 / category** | 分类法里的一条，含 `code`、`name`、`hint` | `scheme.folders[i]` |
+| **目录 / folder** | 书签树里真实存在的文件夹，标题是「编码 名称」 | `parseTree().folderScheme`（旧名 `scheme` 保留一版） |
+| **分类 / classify** | 把书签判到某个类目，产出建议 | `classify / classifyHeuristic / classifyWithModel` |
+| **拒判 / unsure** | 置信度低于阈值，不自动执行 | `conf < 0.55` → `status: 'unsure'` |
+| **计划 / plan** | 一份待确认的改动清单 | `buildPlan()` → `PLAN_KEY` |
+| **提交 / commit** | 备份闸门 → 校验 → 动树 → 写日志 | `organize:apply`、`taxonomy:install`、`organize:splitFolder` |
+| **建议 / suggestion** | 带来源的判定结果 | `{ id, code, conf, reason, source }`，`source ∈ model/heuristic/user` |
+
+两条约束写在这里，避免以后再绕回去：
+
+- **书签树是单父树**：一个书签只能在一个目录里。多主题只能靠标签（`meta.tags`）这个分面表达，不要试图靠目录。
+- **目录是分类法的投影，不是分类法本身**：方案可以存在而目录尚未建；改了方案，目录不会自动跟着变，要落成/建档。
+
 ## 分类体系：它读你的文件夹，不强迫你换
 
 标题形如 `000 综合与工具` 的文件夹，会被识别成一个类目，前三位数字即编号：
@@ -293,7 +313,7 @@ python3 -m http.server 4312
 ```
 manifest.json          MV3 清单
 background.js          service worker：消息路由、移动、批量检测、调模型
-lib/tree.js            书签树 → 扁平列表；识别数字/字母编码的类目
+lib/tree.js            书签树 → 扁平列表；输出 folderScheme（现存目录投影）与 items
 lib/schemes.js         预置方案：杜威 / 精简五类 / PARA / 中图法 12·22
 lib/scheme-install.js  方案安装计划：复用 / 新建 / 撞车
 lib/organize.js        整理计划：预筛、状态判定、分组、剔除与改判

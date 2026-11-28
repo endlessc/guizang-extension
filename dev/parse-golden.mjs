@@ -48,7 +48,9 @@ function runFixtures() {
   const out = {};
   for (const name of FIXTURES) {
     const tree = JSON.parse(readFileSync(join(HERE, 'fixtures', `${name}.json`), 'utf8'));
-    out[name] = parseTree(tree);
+    // folderScheme 是 scheme 的别名（术语改名引入），不进基线：基线只描述原有语义
+    const { folderScheme, ...rest } = parseTree(tree);
+    out[name] = rest;
   }
   return out;
 }
@@ -97,10 +99,10 @@ function realReport(tree) {
   const byCode = {};
   for (const it of r.items) byCode[it.code || 'inbox'] = (byCode[it.code || 'inbox'] || 0) + 1;
   return {
-    digest: digest(r),
+    digest: digest({ items: r.items, folders: r.folders, scheme: r.scheme, inboxId: r.inboxId }),
     items: r.items.length,
     folders: r.folders.length,
-    scheme: r.scheme.map((f) => f.code),
+    scheme: r.folderScheme.map((f) => f.code),
     inboxId: r.inboxId,
     byCode,
   };
@@ -125,7 +127,7 @@ if (args.includes('--write')) {
   console.log('已写入基线 dev/fixtures/parse-baseline.json');
   for (const name of FIXTURES) {
     const r = out[name];
-    console.log(`  ${name}: ${r.items.length} 条书签 / ${r.scheme.length} 个类目 / scheme=${r.scheme.map((f) => f.code).join(',') || '(空)'}`);
+    console.log(`  ${name}: ${r.items.length} 条书签 / ${r.folderScheme.length} 个类目 / scheme=${r.folderScheme.map((f) => f.code).join(',') || '(空)'}`);
   }
   process.exit(0);
 }

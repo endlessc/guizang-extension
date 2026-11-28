@@ -264,7 +264,7 @@ function stateLoad() {
     if (!p || !p.code || !codes.has(p.code)) { delete pending[id]; pendingDropped += 1; }
   }
   return {
-    items, folders, scheme, inboxId,
+    items, folders, folderScheme: scheme, inboxId,
     health: JSON.parse(JSON.stringify(health)),
     pending: JSON.parse(JSON.stringify(pending)),
     pendingDropped,
@@ -278,7 +278,7 @@ function stateLoad() {
 }
 
 function summaryLoad() {
-  const { items, scheme, inboxId } = parseTree(
+  const { items, folderScheme: scheme, inboxId } = parseTree(
     [JSON.parse(JSON.stringify(root))],
     parseOptsOf(settings.schemeId, settings.customSchemes || []),
   );
@@ -514,7 +514,7 @@ async function handle(msg) {
     emit({ type: 'ai:start', total: targets.length });
     // 与真机一致：立即返回，结果走广播
     (async () => {
-      const list = await classify(targets, st.scheme, settings);
+      const list = await classify(targets, st.folderScheme, settings);
       await new Promise((r) => setTimeout(r, 420));
       list.forEach((s) => { pending[s.id] = { ...s, at: Date.now() }; });
       emit({ type: 'ai:progress', done: targets.length, total: targets.length });
@@ -557,9 +557,9 @@ async function handle(msg) {
       host: (() => { try { return new URL(msg.url).host.replace(/^www\./, ''); } catch { return ''; } })(),
       code: '',
     }];
-    const list = await classify(fake, st.scheme, settings);
+    const list = await classify(fake, st.folderScheme, settings);
     const s = list[0] || { code: '', conf: 0, reason: '没有可用的分类', source: 'heuristic' };
-    const f = st.scheme.find((x) => x.code === s.code);
+    const f = st.folderScheme.find((x) => x.code === s.code);
     return { ...s, folderId: f ? f.id : null };
   }
 
@@ -620,7 +620,7 @@ async function handle(msg) {
   if (type === 'taxonomy:design') {
     // 预览层不调模型：直接拿现有方案当骨架，验证「抽样→铺全量→剪枝」这条链路
     const st = stateLoad();
-    const skeleton = st.scheme.map((f) => ({ name: f.name, hint: f.hint || DEWEY_HINTS[f.code] || '', children: [] }));
+    const skeleton = st.folderScheme.map((f) => ({ name: f.name, hint: f.hint || DEWEY_HINTS[f.code] || '', children: [] }));
     const built = buildTaxonomyFromSkeleton(skeleton, {});
     const { map, unmatched } = assignByRules(st.items, built.nodes);
     const nodes = built.nodes.map((n) => ({ ...n, members: map[n.code] || [] }));
@@ -770,7 +770,7 @@ async function handle(msg) {
     const scope = msg.scope || 'inbox';
     const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
     if (scope === 'scheme' && !full) throw new Error('先在设置里选一套方案，再按方案建档');
-    const targets = full ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null })) : st.scheme;
+    const targets = full ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null })) : st.folderScheme;
     const allScope = scope === 'all' || scope === 'scheme';
     const picked = allScope ? st.items : st.items.filter((it) => !it.code);
     emit({ type: 'organize:start' });
@@ -782,7 +782,7 @@ async function handle(msg) {
       scope,
       folderCode: msg.folderCode || '',
       suggestions,
-      existing: new Set(st.scheme.map((f) => f.code)),
+      existing: new Set(st.folderScheme.map((f) => f.code)),
       limit: msg.limit === 'all' ? 'all' : (Number(msg.limit) || 200),
     });
     emit({ type: 'organize:progress', stage: 'preselect', done: picked.length, total: picked.length });
@@ -967,7 +967,7 @@ async function handle(msg) {
   }
   if (type === 'organize:override') {
     if (!plan) throw new Error('还没有整理计划');
-    const exists = new Set(stateLoad().scheme.map((f) => f.code));
+    const exists = new Set(stateLoad().folderScheme.map((f) => f.code));
     plan = overrideOp(plan, msg.id, msg.code, { existing: exists });
     emit({ type: 'organize:done', plan });
     return plan;
@@ -1133,7 +1133,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.18.0-mock' }),
+      getManifest: () => ({ version: '0.19.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

@@ -15,6 +15,7 @@ import { normalizeBase } from '../lib/llm.js';
 import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { sampleOps } from '../lib/organize.js';
+import { parseTree } from '../lib/tree.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -174,6 +175,15 @@ test('中图法与 PARA 不再错配杜威编码', () => {
   assert.equal(custom.kind, 'letter');
   const opts = parseOptsOf(custom.id, [custom]);
   assert.ok(opts.letterSet.has('A'));
+});
+
+console.log('0. 术语对齐：parseTree 的目录投影叫 folderScheme');
+test('parseTree 同时提供 folderScheme 与兼容别名', () => {
+  const bar = { id: '1', title: '书签栏', children: [{ id: 'f1', title: '100 编程与后端', children: [] }] };
+  const tree = [{ id: '0', title: '', children: [bar] }];
+  const r = parseTree(tree, {});
+  assert.deepEqual(r.folderScheme.map((f) => f.code), ['100']);
+  assert.equal(r.scheme, r.folderScheme);
 });
 
 console.log('6a. Base URL 归一化');

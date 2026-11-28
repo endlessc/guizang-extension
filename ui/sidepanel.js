@@ -62,7 +62,7 @@ async function reload(initial) {
     const chk = await send('bookmark:check', { url: tab.url }).catch(() => ({ exists: false, items: [] }));
     if (chk && chk.exists && chk.items[0]) {
       S.existing = chk.items[0];
-      S.existingFolder = summary.scheme.find((f) => f.id === S.existing.parentId) || null;
+      S.existingFolder = summary.folderScheme.find((f) => f.id === S.existing.parentId) || null;
     } else {
       S.existing = null;
       S.existingFolder = null;
@@ -154,7 +154,7 @@ function renderCurrent() {
     </div>
     ${s && s.code && (!S.chosen || S.chosen.code !== s.code) ? `<button class="pp-sug" id="useSug">
         ${icon('sparkle', 11)}
-        <span>建议 <b class="tnum">${esc(s.code)}</b> ${esc((S.summary.scheme.find((x) => x.code === s.code) || {}).name || '')}</span>
+        <span>建议 <b class="tnum">${esc(s.code)}</b> ${esc((S.summary.folderScheme.find((x) => x.code === s.code) || {}).name || '')}</span>
         <span class="pp-sug-go">采用</span></button>` : ''}
     ${s && s.reason ? `<div class="pp-note">${esc(s.reason)}</div>` : ''}
     <div id="pickerHost"></div>
@@ -167,7 +167,7 @@ function renderCurrent() {
     box.innerHTML = `<div class="pp-folders pp-folders-inline">
       <button class="pp-folder${S.chosen && !S.chosen.code ? ' is-on' : ''}" data-inbox="1">
         <span class="tnum">—</span><span>待归类</span></button>
-      ${S.summary.scheme.map((f) => `<button class="pp-folder${S.chosen && S.chosen.code === f.code ? ' is-on' : ''}" data-code="${esc(f.code)}" data-id="${esc(f.id)}">
+      ${S.summary.folderScheme.map((f) => `<button class="pp-folder${S.chosen && S.chosen.code === f.code ? ' is-on' : ''}" data-code="${esc(f.code)}" data-id="${esc(f.id)}">
         <span class="tnum">${esc(f.code)}</span><span>${esc(f.name)}</span></button>`).join('')}
       </div>`;
     box.querySelectorAll('[data-code],[data-inbox]').forEach((el) => {
@@ -175,7 +175,7 @@ function renderCurrent() {
         if (el.dataset.inbox) {
           S.chosen = inboxChoice();
         } else {
-          const f = S.summary.scheme.find((x) => x.code === el.dataset.code);
+          const f = S.summary.folderScheme.find((x) => x.code === el.dataset.code);
           S.chosen = f ? { code: f.code, name: f.name, folderId: f.id } : null;
         }
         renderCurrent();
@@ -186,7 +186,7 @@ function renderCurrent() {
   const use = $('#useSug');
   if (use) {
     use.addEventListener('click', () => {
-      const f = S.summary.scheme.find((x) => x.code === S.suggestion.code);
+      const f = S.summary.folderScheme.find((x) => x.code === S.suggestion.code);
       if (f) { S.chosen = { code: f.code, name: f.name, folderId: f.id }; renderCurrent(); }
     });
   }
@@ -342,7 +342,7 @@ function bind() {
     }
     const st = await send('state:load').catch(() => null);
     if (st) {
-      S.results = filterAndScore(st.items, q, { health: st.health, meta: st.meta, scheme: st.scheme })
+      S.results = filterAndScore(st.items, q, { health: st.health, meta: st.meta, scheme: st.folderScheme })
         .sort((a, b) => b.score - a.score)
         .slice(0, 14)
         .map(({ item }) => ({ ...item, health: st.health[item.id] || null }));

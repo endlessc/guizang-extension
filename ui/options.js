@@ -46,7 +46,7 @@ async function boot() {
   currentSettings = summary.settings || {};
   fill(currentSettings);
   renderThemes();
-  renderScheme(summary.scheme);
+  renderScheme(summary.folderScheme);
   await renderPicker().catch(() => {});
   await renderPermissions().catch(() => {});
   await renderLearned().catch(() => {});
@@ -77,7 +77,7 @@ async function boot() {
 async function exportMarkdown() {
   try {
     const st = await send('state:load');
-    const md = toMarkdown(st.items, st.scheme, { health: st.health, meta: st.meta, excludeDead: true });
+    const md = toMarkdown(st.items, st.folderScheme, { health: st.health, meta: st.meta, excludeDead: true });
     download(`guizang-library-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
     toast('已导出 Obsidian / Markdown 书目');
   } catch (e) {
@@ -88,7 +88,7 @@ async function exportMarkdown() {
 async function exportHtml() {
   try {
     const st = await send('state:load');
-    const html = toNetscapeHtml(st.items, st.scheme);
+    const html = toNetscapeHtml(st.items, st.folderScheme);
     download(`guizang-bookmarks-${new Date().toISOString().slice(0, 10)}.html`, html, 'text/html;charset=utf-8');
     toast('已导出标准 HTML 书签文件');
   } catch (e) {
@@ -342,7 +342,7 @@ async function installTx() {
     txConflict = [];
     toast(`已落成目录：新建 ${r.created} 个，复用 ${r.reused} 个`);
     const summary = await send('summary:load');
-    renderScheme(summary.scheme);
+    renderScheme(summary.folderScheme);
     await renderPicker();
     await renderTaxonomy();
   } catch (err) {
@@ -619,7 +619,7 @@ async function installScheme(id) {
     toast(r.dropped ? `${base}；换了方案，${r.dropped} 条旧建议已作废` : base);
     $('#schemePreview').innerHTML = '';
     const summary = await send('summary:load');
-    renderScheme(summary.scheme);
+    renderScheme(summary.folderScheme);
     await renderPicker();
   } catch (err) {
     toast(err.message);

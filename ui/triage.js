@@ -194,7 +194,7 @@ export function createTriageController({ getState, folderName, onReload }) {
 
     const sug = suggestions[it.id] || S.pending[it.id] || null;
     const m = S.meta[it.id] || {};
-    const dockSchemes = S.scheme.slice(0, 10);
+    const dockSchemes = S.folderScheme.slice(0, 10);
 
     el.innerHTML = `
       <div class="triage-top">
@@ -298,7 +298,7 @@ export function createTriageController({ getState, folderName, onReload }) {
       return true;
     }
     if (/^[0-9]$/.test(e.key)) {
-      const target = S.scheme[Number(e.key)];
+      const target = S.folderScheme[Number(e.key)];
       if (target) {
         e.preventDefault();
         assignToCode(target.code);

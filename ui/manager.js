@@ -29,7 +29,7 @@ function readLocal(key, fallback) {
 const S = {
   loaded: false,
   items: [],
-  scheme: [],
+  folderScheme: [],
   health: {},
   pending: {},
   meta: {},
@@ -88,7 +88,7 @@ const MINERAL_PALETTE = [
 
 function colorOfCode(code) {
   if (!code || code === 'none') return '#9C927F';
-  const idx = S.scheme.findIndex((f) => f.code === code);
+  const idx = S.folderScheme.findIndex((f) => f.code === code);
   if (idx >= 0) return MINERAL_PALETTE[idx % MINERAL_PALETTE.length];
   let hash = 0;
   for (const ch of String(code)) hash = (hash * 31 + ch.charCodeAt(0)) >>> 0;
@@ -220,7 +220,7 @@ function counts() {
 }
 
 function folderName(code) {
-  const f = S.scheme.find((x) => x.code === code);
+  const f = S.folderScheme.find((x) => x.code === code);
   return f ? f.name : code;
 }
 
@@ -253,7 +253,7 @@ function visible() {
     const scored = filterAndScore(rows, S.q, {
       health: S.health,
       meta: S.meta,
-      scheme: S.scheme,
+      scheme: S.folderScheme,
       dupIds,
     });
     return scored
@@ -643,8 +643,8 @@ function renderRail() {
     active: S.view.kind === 'usage',
   }));
 
-  if (S.scheme.length) parts.push('<div class="section-label">分类<span class="section-aside">可拖入</span></div>');
-  for (const f of S.scheme) {
+  if (S.folderScheme.length) parts.push('<div class="section-label">分类<span class="section-aside">可拖入</span></div>');
+  for (const f of S.folderScheme) {
     parts.push(railItem({
       code: f.code, name: f.name, count: byCode[f.code] || 0,
       bad: badByCode[f.code] || 0, view: f.code,
@@ -726,7 +726,7 @@ function spectrumHtml() {
     else byCode.set(it.code, (byCode.get(it.code) || 0) + 1);
   }
   const segs = [];
-  for (const f of S.scheme) {
+  for (const f of S.folderScheme) {
     const n = byCode.get(f.code) || 0;
     if (!n) continue;
     segs.push({ code: f.code, name: `${f.code} ${f.name}`, count: n, color: colorOfCode(f.code), view: f.code });
@@ -1183,7 +1183,7 @@ function renderList() {
   } else if (flat) {
     body = wrapItems(shown.map((it) => itemRenderer(it, { showCat })).join(''));
   } else {
-    const groups = groupByCode(shown, S.scheme);
+    const groups = groupByCode(shown, S.folderScheme);
     body = groups.map((g) => {
       const bad = g.rows.filter((it) => PROBLEM.has((S.health[it.id] || {}).status)).length;
       return `<div class="group-head">
@@ -1434,7 +1434,7 @@ function openContextMenu(e, id) {
   const multi = targetIds.length > 1;
   const m = S.meta[id] || {};
   const recentMoves = S.recentCodes
-    .map((c) => S.scheme.find((f) => f.code === c))
+    .map((c) => S.folderScheme.find((f) => f.code === c))
     .filter(Boolean)
     .slice(0, 3);
 
@@ -1564,7 +1564,7 @@ function renderSelBar() {
     }
     if (act === 'share') {
       const chosen = ids.map((id) => S.items.find((x) => x.id === id)).filter(Boolean);
-      const md = toSelectionMarkdown(chosen, S.scheme, { meta: S.meta });
+      const md = toSelectionMarkdown(chosen, S.folderScheme, { meta: S.meta });
       try {
         await navigator.clipboard.writeText(md);
         toast(`已复制 ${chosen.length} 条精选书单到剪贴板`);
@@ -1823,10 +1823,10 @@ function organizePanel() {
   }
 
   if (!plan) {
-    const ready = S.scheme.length > 0;
+    const ready = S.folderScheme.length > 0;
     return head + `<div class="insp-body">
       <div class="plan-empty">
-        <div class="plan-empty-line">当前方案：${ready ? `${S.scheme.length} 个类目` : '还没有可用的分类目录'}</div>
+        <div class="plan-empty-line">当前方案：${ready ? `${S.folderScheme.length} 个类目` : '还没有可用的分类目录'}</div>
         <div class="seg-tabs">
           <button type="button" class="seg-tab${S.orgScope === 'inbox' ? ' is-active' : ''}" data-org-scope="inbox">仅待归类</button>
           <button type="button" class="seg-tab${S.orgScope === 'all' ? ' is-active' : ''}" data-org-scope="all">全库巡检错放</button>
@@ -1914,7 +1914,7 @@ function organizePanel() {
 }
 
 function planRow(op, plan) {
-  const pickList = (plan && plan.scheme && plan.scheme.length) ? plan.scheme : S.scheme;
+  const pickList = (plan && plan.scheme && plan.scheme.length) ? plan.scheme : S.folderScheme;
   const tone = op.status === 'ready' ? '' : op.status === 'unsure' ? ' tone-warn' : op.status === 'blocked' ? ' tone-dead' : ' tone-ink';
   const fromPrefix = op.from && op.from.code ? `${esc(op.from.code)} ` : '';
   const tag = op.status === 'ready' ? `${fromPrefix}→ ${esc(op.to.code)} ${esc(op.to.name)}${op.to.missing ? '（新建目录）' : ''}`
@@ -2156,7 +2156,7 @@ function suggestionCard(p) {
       ${p.source === 'learned' ? '<span class="sg-unsure-tag" style="color:var(--ok);background:var(--ok-wash)">历史偏好</span>' : ''}
     </div>
     <p class="sg-why">${esc(p.reason || '模型没有给出理由')}</p>
-    ${picking ? `<div class="sg-picker">${S.scheme.map((f) => `
+    ${picking ? `<div class="sg-picker">${S.folderScheme.map((f) => `
         <button class="sg-pick${f.code === p.code ? ' is-on' : ''}" data-override="${esc(p.id)}" data-code="${esc(f.code)}">
           <span class="sg-pick-num">${esc(f.code)}</span>${esc(f.name)}</button>`).join('')}</div>`
       : `<div class="sg-actions">
@@ -2659,12 +2659,12 @@ function buildCommands() {
       toast(r.saved ? `已收进 ${r.saved} 个标签页` : '本窗标签页都已在收藏夹中');
     } },
     { id: 'export-md', name: '导出 Obsidian / Markdown 书目', desc: '按分类分卷导出干净 .md 文件（自动剔除失效链接）', ico: 'download', run: () => {
-      const md = toMarkdown(S.items, S.scheme, { health: S.health, meta: S.meta, excludeDead: true });
+      const md = toMarkdown(S.items, S.folderScheme, { health: S.health, meta: S.meta, excludeDead: true });
       downloadFile(`guizang-library-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
       toast('已导出 Obsidian Markdown 书目');
     } },
     { id: 'export-html', name: '导出标准 HTML 书签文件', desc: '标准 Netscape 格式，可直接导入任意浏览器', ico: 'download', run: () => {
-      const html = toNetscapeHtml(S.items, S.scheme);
+      const html = toNetscapeHtml(S.items, S.folderScheme);
       downloadFile(`guizang-bookmarks-${new Date().toISOString().slice(0, 10)}.html`, html, 'text/html;charset=utf-8');
       toast('已导出标准 HTML 书签');
     } },
@@ -2783,19 +2783,19 @@ function openExportModal() {
   $('#modal').hidden = false;
   $('#btnCloseExport')?.addEventListener('click', () => { $('#modal').hidden = true; });
   $('#expMdClean')?.addEventListener('click', () => {
-    const md = toMarkdown(S.items, S.scheme, { health: S.health, meta: S.meta, excludeDead: true });
+    const md = toMarkdown(S.items, S.folderScheme, { health: S.health, meta: S.meta, excludeDead: true });
     downloadFile(`guizang-library-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
     $('#modal').hidden = true;
     toast('已导出全库 Obsidian Markdown 书目');
   });
   $('#expMdView')?.addEventListener('click', () => {
-    const md = toMarkdown(rows, S.scheme, { health: S.health, meta: S.meta, excludeDead: false, title: `归藏 · ${viewMeta().label}` });
+    const md = toMarkdown(rows, S.folderScheme, { health: S.health, meta: S.meta, excludeDead: false, title: `归藏 · ${viewMeta().label}` });
     downloadFile(`guizang-view-${new Date().toISOString().slice(0, 10)}.md`, md, 'text/markdown;charset=utf-8');
     $('#modal').hidden = true;
     toast(`已导出当前视图 ${rows.length} 条 Markdown`);
   });
   $('#expHtmlAll')?.addEventListener('click', () => {
-    const html = toNetscapeHtml(S.items, S.scheme);
+    const html = toNetscapeHtml(S.items, S.folderScheme);
     downloadFile(`guizang-bookmarks-${new Date().toISOString().slice(0, 10)}.html`, html, 'text/html;charset=utf-8');
     $('#modal').hidden = true;
     toast('已导出标准 HTML 书签');
@@ -2817,7 +2817,7 @@ function pickFolder(title, sub, onPick) {
       <div class="sheet-sub">${esc(sub)}</div>
     </div>
     <div class="sheet-body">
-      ${S.scheme.map((f) => `<button class="fold-row" data-code="${esc(f.code)}">
+      ${S.folderScheme.map((f) => `<button class="fold-row" data-code="${esc(f.code)}">
         <span class="fold-code">${esc(f.code)}</span>
         <span class="fold-name">${esc(f.name)}</span>
         <span class="fold-path">${esc(f.path)}</span>
@@ -2974,7 +2974,7 @@ async function checkHealthProtocol() {
 async function load() {
   const st = await send('state:load');
   S.items = st.items;
-  S.scheme = st.scheme;
+  S.folderScheme = st.folderScheme;
   S.health = st.health || {};
   S.pending = st.pending || {};
   S.meta = st.meta || {};

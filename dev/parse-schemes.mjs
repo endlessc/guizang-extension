@@ -32,27 +32,27 @@ const dewey = read('tree-dewey');
 const clc12 = getScheme('clc12');
 
 console.log('未安装字母方案（默认 opts）');
-eq('字母前缀不被当成类目', parseTree(letters).scheme.map((f) => f.code), ['F1', 'F2', 'F3', 'F4', 'F5']);
+eq('字母前缀不被当成类目', parseTree(letters).folderScheme.map((f) => f.code), ['F1', 'F2', 'F3', 'F4', 'F5']);
 
 console.log('已安装 clc12');
 const r12 = parseTree(letters, parseOptsOf('clc12'));
-eq('只认白名单内的字母，按方案顺序排', r12.scheme.map((f) => f.code), ['B', 'T']);
-eq('hint 取自方案', r12.scheme.find((f) => f.code === 'T').hint, clc12.folders.find((f) => f.code === 'T').hint);
-eq('二级 TP 不在白名单 → 不算类目', r12.scheme.some((f) => f.code === 'TP'), false);
+eq('只认白名单内的字母，按方案顺序排', r12.folderScheme.map((f) => f.code), ['B', 'T']);
+eq('hint 取自方案', r12.folderScheme.find((f) => f.code === 'T').hint, clc12.folders.find((f) => f.code === 'T').hint);
+eq('二级 TP 不在白名单 → 不算类目', r12.folderScheme.some((f) => f.code === 'TP'), false);
 eq('TP 里的书签继承父类 T', r12.items.find((i) => i.id === '1011').code, 'T');
-eq('「AI 工具」不被误判', r12.scheme.some((f) => f.name === 'AI 工具'), false);
+eq('「AI 工具」不被误判', r12.folderScheme.some((f) => f.name === 'AI 工具'), false);
 eq('「AI 工具」里的书签仍是待归类', r12.items.find((i) => i.id === '1201').code, '');
-eq('「PDF 手册」不被误判', r12.scheme.some((f) => f.name === 'PDF 手册'), false);
+eq('「PDF 手册」不被误判', r12.folderScheme.some((f) => f.name === 'PDF 手册'), false);
 
 console.log('已知代价（写进断言，防止误以为修复）');
 const rMix = parseTree(dewey, parseOptsOf('clc12'));
-eq('装了字母方案后「B 站」会被认成 B', rMix.scheme.find((f) => f.code === 'B').name, '站');
-eq('方案外编码排在方案内之后', rMix.scheme.map((f) => f.code), ['B', '000', '100']);
+eq('装了字母方案后「B 站」会被认成 B', rMix.folderScheme.find((f) => f.code === 'B').name, '站');
+eq('方案外编码排在方案内之后', rMix.folderScheme.map((f) => f.code), ['B', '000', '100']);
 
 console.log('数字方案不受影响');
 eq('dewey opts 与默认结果一致',
-  parseTree(dewey, parseOptsOf('dewey')).scheme.map((f) => f.code),
-  parseTree(dewey).scheme.map((f) => f.code));
+  parseTree(dewey, parseOptsOf('dewey')).folderScheme.map((f) => f.code),
+  parseTree(dewey).folderScheme.map((f) => f.code));
 eq('未装任何方案（parseOptsOf(undefined)）返回空 opts', parseOptsOf(undefined), {});
 
 if (failed) {

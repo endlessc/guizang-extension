@@ -86,7 +86,7 @@ async function loadState() {
   const store = await chrome.storage.local.get(KEYS);
   const settings = { ...DEFAULT_SETTINGS, ...(store.settings || {}) };
   const tree = await chrome.bookmarks.getTree();
-  const { items, folders, scheme, inboxId } = parseTree(tree, parseOptsFor(settings));
+  const { items, folders, folderScheme, inboxId } = parseTree(tree, parseOptsFor(settings));
   const health = store.health || {};
   const pending = store.pending || {};
   const rawMeta = store.meta || {};
@@ -103,7 +103,7 @@ async function loadState() {
     if (!alive.has(id)) { delete pending[id]; dirty = true; }
   }
   // 目标编码已经不存在（换了方案，或文件夹被改名/删掉）→ 建议作废，别让它一直挂着
-  const codes = new Set(scheme.map((f) => f.code));
+  const codes = new Set(folderScheme.map((f) => f.code));
   const stale = prunePending(pending, codes);
   if (stale.dropped) {
     for (const id of Object.keys(pending)) {
@@ -119,7 +119,7 @@ async function loadState() {
   return {
     items,
     folders,
-    scheme,
+    folderScheme,
     inboxId,
     health,
     pending,
@@ -240,8 +240,8 @@ async function runApply({ includeUnsure = false } = {}) {
 
   const settings = await readSettings();
   let tree = await chrome.bookmarks.getTree();
-  let { scheme } = parseTree(tree, parseOptsFor(settings));
-  let folderOf = new Map(scheme.map((f) => [f.code, f.id]));
+  let { folderScheme } = parseTree(tree, parseOptsFor(settings));
+  let folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
 
   // 计划里出现但目录还不存在的：连祖先把目录建出来再搬（二级挂到对应一级下）
   const folderTree = [
@@ -262,8 +262,8 @@ async function runApply({ includeUnsure = false } = {}) {
     }
     await createFolders(inst);
     tree = await chrome.bookmarks.getTree();
-    ({ scheme } = parseTree(tree, parseOptsFor(settings)));
-    folderOf = new Map(scheme.map((f) => [f.code, f.id]));
+    ({ folderScheme } = parseTree(tree, parseOptsFor(settings)));
+    folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
   }
 
   applyCtl = { running: true, stop: false };
@@ -431,14 +431,14 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
   broadcast({ type: 'organize:start' });
   try {
     const state = await loadState();
-    const { items, scheme, settings, learned } = state;
+    const { items, folderScheme, settings, learned } = state;
     // 按方案建档：判定用方案定义的完整类目（不只书签栏里已建的那几个）
     const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
     if (scope === 'scheme' && !full) throw new Error('还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成');
-    if (!scheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
+    if (!folderScheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
     const targets = full
       ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '', parent: f.parent || null }))
-      : scheme;
+      : folderScheme;   // 没选方案时，退回"现存目录"当判定依据
 
     const { candidates: picked } = preselect(items, {
       scope,
@@ -524,7 +524,7 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
       folderCode,
       suggestions,
       blocked: collectManagedIds(tree),
-      existing: new Set(scheme.map((f) => f.code)),
+      existing: new Set(folderScheme.map((f) => f.code)),
       limit,
     });
     if (orgCtl.stop) broadcast({ type: 'organize:warn', message: '已停止生成，计划按已拿到的建议出' });
@@ -538,8 +538,8 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
 async function moveToCode(ids, code, { learn = false } = {}) {
   const settings = await readSettings();
   const tree = await chrome.bookmarks.getTree();
-  const { items, scheme } = parseTree(tree, parseOptsFor(settings));
-  const target = scheme.find((f) => f.code === code);
+  const { items, folderScheme } = parseTree(tree, parseOptsFor(settings));
+  const target = folderScheme.find((f) => f.code === code);
   if (!target) throw new Error(`找不到类目 ${code}，可能分类文件夹被改名或删除了`);
   const byId = new Map(items.map((x) => [x.id, x]));
   let learned = learn ? await readLearned() : null;
@@ -746,10 +746,10 @@ async function runAi(ids) {
   broadcast({ type: 'ai:start', total: (ids || []).length });
   try {
     const state = await loadState();
-    const { items, scheme, settings, learned } = state;
+    const { items, folderScheme, settings, learned } = state;
     const wanted = new Set(ids);
     const targets = items.filter((it) => wanted.has(it.id));
-    if (!scheme.length) throw new Error('没找到可用分类。先在书签栏建几个类目文件夹（例如「500 人工智能」）。');
+    if (!folderScheme.length) throw new Error('没找到可用分类。先在书签栏建几个类目文件夹（例如「500 人工智能」）。');
     if (!targets.length) { broadcast({ type: 'ai:done', total: 0, count: 0 }); return; }
 
     // 1) 本地关键词 + 历史偏好：零成本，先定一批
@@ -764,7 +764,7 @@ async function runAi(ids) {
       const pageMeta = await enrichWeakHeads(lowConf, settings);
       const refined = await classify(
         lowConf,
-        scheme,
+        folderScheme,
         settings,
         (done, total) => broadcast({ type: 'ai:progress', done, total }),
         { learned, pageMeta, stats, shouldStop: () => aiCtl.stop },
@@ -818,7 +818,7 @@ const handlers = {
   'summary:load': async () => {
     const settings = await readSettings();
     const { parsed, inboxId } = await ensureInbox(undefined, settings);
-    const { items, scheme } = parsed;
+    const { items, folderScheme } = parsed;
     const { health = {}, pending = {}, meta = {} } = await chrome.storage.local.get(['health', 'pending', 'meta']);
     let dead = 0;
     let susp = 0;
@@ -838,7 +838,7 @@ const handlers = {
       .map((it) => ({ id: it.id, title: it.title, url: it.url, host: it.host, code: it.code, added: it.added }));
 
     return {
-      scheme,
+      folderScheme,
       inboxId,
       settings,
       meta,
@@ -1118,16 +1118,16 @@ const handlers = {
     const settings = await readSettings();
     const learned = await readLearned();
     const tree = await chrome.bookmarks.getTree();
-    const { scheme } = parseTree(tree, parseOptsFor(settings));
+    const { folderScheme } = parseTree(tree, parseOptsFor(settings));
     const fake = [{ id: 'tmp', title: title || url, url, host: hostOf(url), code: '' }];
-    const folderFor = (code) => (scheme.find((f) => f.code === code) || {}).id || null;
+    const folderFor = (code) => (folderScheme.find((f) => f.code === code) || {}).id || null;
 
     if (!fast && hasModel(settings)) {
       try {
         const pageMeta = settings.fetchHeadOnAi && isWeakTitle(title, url)
           ? { tmp: await fetchPageHead(url, { timeout: 4000 }) }
           : {};
-        const [s] = await classify(fake, scheme, settings, undefined, { learned, pageMeta });
+        const [s] = await classify(fake, folderScheme, settings, undefined, { learned, pageMeta });
         if (s) return { code: s.code, conf: s.conf, reason: s.reason, source: s.source || 'model', folderId: folderFor(s.code) };
       } catch (e) {
         const [s] = classifyHeuristic(fake, scheme, { schemeId: settings.schemeId, learned });
@@ -1354,7 +1354,7 @@ const handlers = {
     if (items.length < 6) throw new Error(`这个目录只有 ${items.length} 条，少于 6 条不必拆`);
 
     const parsed = parseTree(await chrome.bookmarks.getTree(), parseOptsFor(settings));
-    const folder = parsed.scheme.find((f) => f.code === codeKey);
+    const folder = parsed.folderScheme.find((f) => f.code === codeKey);
     if (!folder) throw new Error('找不到这个类目文件夹（可能已被改名或删除）');
 
     broadcast({ type: 'organize:split-start', total: 1 });
@@ -1393,7 +1393,7 @@ const handlers = {
       scope: 'folder',
       scheme: [{ code: codeKey, name: folder.name, parent: null }],
       subs: { [codeKey]: subs.map((x) => ({ code: x.code, name: x.name, hint: x.hint })) },
-      existing: parsed.scheme.map((f) => f.code),
+      existing: parsed.folderScheme.map((f) => f.code),
       ops,
     });
     await writePlan(plan);
@@ -1477,7 +1477,7 @@ const handlers = {
     const op = plan.ops.find((o) => o.id === id);
     const settings = await readSettings();
     const tree = await chrome.bookmarks.getTree();
-    const exists = new Set(parseTree(tree, parseOptsFor(settings)).scheme.map((f) => f.code));
+    const exists = new Set(parseTree(tree, parseOptsFor(settings)).folderScheme.map((f) => f.code));
     if (op && op.url) {
       const learned = recordOverride(await readLearned(), { host: hostOf(op.url) }, code);
       await chrome.storage.local.set({ learned });
@@ -1644,7 +1644,7 @@ if (chrome.omnibox) {
       const list = buildOmniboxSuggestions(
         state.items,
         text,
-        { health: state.health, meta: state.meta, scheme: state.scheme, dupIds },
+        { health: state.health, meta: state.meta, scheme: state.folderScheme, dupIds },
         6,
       );
       suggest(list);

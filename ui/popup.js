@@ -39,7 +39,7 @@ async function init() {
     const chk = await send('bookmark:check', { url: S.tab.url }).catch(() => ({ exists: false, items: [] }));
     if (chk && chk.exists && chk.items[0]) {
       S.existing = chk.items[0];
-      S.existingFolder = summary.scheme.find((f) => f.id === S.existing.parentId) || null;
+      S.existingFolder = summary.folderScheme.find((f) => f.id === S.existing.parentId) || null;
       const m = (summary.meta && summary.meta[S.existing.id]) || {};
       S.star = Boolean(m.star);
       S.note = m.note || '';
@@ -76,7 +76,7 @@ async function askModel() {
   try {
     const s = await send('ai:suggestOne', { url: S.tab.url, title: S.tab.title, fast: false });
     S.suggestion = s;
-    const match = S.summary.scheme.find((f) => f.code === s.code);
+    const match = S.summary.folderScheme.find((f) => f.code === s.code);
     if (match) S.chosen = { code: match.code, name: match.name, folderId: match.id };
     if (s.error) toast('模型不可用，已退回本地规则');
   } catch (e) {
@@ -140,7 +140,7 @@ function renderNow() {
       <div class="pp-folders" id="folders" ${S.pickerOpen ? '' : 'hidden'}>
         <button class="pp-folder${S.chosen && !S.chosen.code ? ' is-on' : ''}" data-inbox="1">
           <span class="tnum">—</span>待归类</button>
-        ${S.summary.scheme.map((f) => `<button class="pp-folder${S.chosen && S.chosen.code === f.code ? ' is-on' : ''}"
+        ${S.summary.folderScheme.map((f) => `<button class="pp-folder${S.chosen && S.chosen.code === f.code ? ' is-on' : ''}"
           data-code="${esc(f.code)}" data-id="${esc(f.id)}">
           <span class="tnum">${esc(f.code)}</span><span>${esc(f.name)}</span></button>`).join('')
           || '<div class="pp-empty">还没有分类文件夹</div>'}
@@ -155,7 +155,7 @@ function renderNow() {
     ${S.existing ? `<button class="btn btn-danger-ghost btn-sm btn-block pp-remove-btn" id="btnRemoveBookmark">${icon('trash', 12)}<span>移出书签</span></button>` : ''}
     ${s && s.code && (!S.chosen || S.chosen.code !== s.code) ? `<button class="pp-sug" id="useSug">
         ${icon('sparkle', 11)}
-        <span>建议 <b class="tnum">${esc(s.code)}</b> ${esc((S.summary.scheme.find((x) => x.code === s.code) || {}).name || '')}</span>
+        <span>建议 <b class="tnum">${esc(s.code)}</b> ${esc((S.summary.folderScheme.find((x) => x.code === s.code) || {}).name || '')}</span>
         <span class="pp-sug-go">采用</span></button>` : ''}
     ${s && s.reason ? `<div class="pp-note">${esc(s.reason)}${s.conf ? ` · 把握 ${s.conf.toFixed(2)}` : ''}</div>` : ''}
     ${s && s.source !== 'model' && S.summary.aiReady ? `<div class="pp-note"><button class="pp-link" id="askModel">让模型再判一次</button></div>` : ''}`;
@@ -195,7 +195,7 @@ function renderNow() {
       if (el.dataset.inbox) {
         S.chosen = inboxChoice();
       } else {
-        const f = S.summary.scheme.find((x) => x.code === el.dataset.code);
+        const f = S.summary.folderScheme.find((x) => x.code === el.dataset.code);
         S.chosen = f ? { code: f.code, name: f.name, folderId: f.id } : null;
       }
       S.pickerOpen = false;
@@ -206,7 +206,7 @@ function renderNow() {
   const use = $('#useSug');
   if (use) {
     use.addEventListener('click', () => {
-      const f = S.summary.scheme.find((x) => x.code === S.suggestion.code);
+      const f = S.summary.folderScheme.find((x) => x.code === S.suggestion.code);
       if (f) { S.chosen = { code: f.code, name: f.name, folderId: f.id }; renderNow(); }
     });
   }
