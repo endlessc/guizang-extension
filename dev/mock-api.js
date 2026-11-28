@@ -108,6 +108,17 @@ const ROWS = [
   ['Excalidraw 白板（旧链重复）', 'http://www.excalidraw.com/#board', null, '2025-04-02', 'ok'],
 ];
 
+/**
+ * 归纳完成之后才存进来的几条收藏（预览用，?new=1 时注入）。
+ * 标题里带现有类目的中文词元，扩展阶段规则能命中，用来验证「归入 > 0 且未覆盖同步下降」。
+ */
+const LATE_ROWS = [
+  ['编程语言内存模型清单', 'https://rust-book.example.org/memory-model', '2026-11-20'],
+  ['网络抓包排障手记', 'https://net.example.net/tcpdump-notes', '2026-11-21'],
+  ['人工智能模型微调笔记', 'https://llm.example.dev/finetune', '2026-11-22'],
+  ['前端构建工具踩坑记录', 'https://fe.example.dev/build-notes', '2026-11-23'],
+];
+
 const STATUS = {
   ok: { status: 'ok', code: '200' },
   301: { status: 'moved', code: '301' },
@@ -174,6 +185,22 @@ function buildTree() {
       if (finalUrl) health[id].finalUrl = finalUrl;
     }
   });
+}
+
+/** ?new=1 用：把「归纳之后才存的」几条塞进待归类，模拟用户又存了新链接 */
+let lateInjected = false;
+function injectLateRows() {
+  const inbox = findNode('finbox');
+  if (!inbox) return 0;
+  LATE_ROWS.forEach(([title, url, added], i) => {
+    const id = 'bl' + String(i + 1).padStart(2, '0');
+    inbox.children.push({
+      id, title, url, parentId: inbox.id, dateAdded: Date.parse(added + 'T09:00:00'),
+    });
+    health[id] = { status: 'ok', code: '200', at: Date.parse('2026-11-22T10:00:00'), ms: 150 + i * 9 };
+  });
+  lateInjected = true;
+  return LATE_ROWS.length;
 }
 
 function walk(node, fn) {
@@ -571,6 +598,12 @@ async function handle(msg) {
     const pruned = pruneTaxonomy(draft, { minPerCategory: 2 });
     taxoDraft = { ...pruned.taxonomy, status: 'draft' };
     taxoDraft.source = { ...taxoDraft.source, unmatched: coverageOf(taxoDraft, st.items).uncovered };
+    // 预览专用：?new=1 时归纳完再存几条新收藏，扩展阶段才有东西可归
+    if (!lateInjected && typeof location !== 'undefined' && location.search.includes('new')) {
+      injectLateRows();
+      const cov = coverageOf(taxoDraft, stateLoad().items);
+      taxoDraft.source = { ...taxoDraft.source, items: cov.items, unmatched: cov.uncovered };
+    }
     // 预览专用：?props=1 时挂一条假建议，用来检查建议清单的渲染
     if (typeof location !== 'undefined' && location.search.includes('props')) {
       const top = taxoDraft.nodes.find((n) => !n.parent);

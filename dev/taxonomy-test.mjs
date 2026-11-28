@@ -371,6 +371,7 @@ console.log('增量扩展：不动结构，只归类 + 出建议');
 
   const after = applyExtend(base, plan.assign);
   eq('归类后 100 多了一条', after.nodes.find((n) => n.code === '100').members.length, 2);
+  eq('未覆盖数跟着归入数下降', coverageOf(after, items).uncovered, plan.pending);
   eq('没命中的节点不动', after.nodes.find((n) => n.code === '110').members.length, 1);
   eq('结构没变（节点数相同）', after.nodes.length, base.nodes.length);
   eq('原对象未被修改', base.nodes.find((n) => n.code === '110').members.length, 1);
