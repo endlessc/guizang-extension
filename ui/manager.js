@@ -31,6 +31,8 @@ const S = {
   items: [],
   folderScheme: [],
   parentOf: {},            // code → 父 code（拆出来的二级靠它挂回一级）
+  schemes: [],             // 可选方案列表（含各自的类目数）
+  schemeId: '',            // 当前选用的方案
   health: {},
   pending: {},
   meta: {},
@@ -668,6 +670,24 @@ function wireSubChips(root) {
       renderAll();
     });
   });
+}
+
+/**
+ * 整理面板顶部的一行：按方案建档判定用的是「方案定义」，不是书签栏里已建的目录。
+ * 这两个数经常不一样（比如装了 10 类的杜威、又手工拆出 5 个二级 → 定义 10、已建 15），
+ * 分开写清楚，别让人以为拆出来的二级会被当成方案类目。
+ */
+function schemeLine() {
+  const cur = (S.schemes || []).find((x) => x.id === S.schemeId) || null;
+  if (!cur) {
+    return S.folderScheme.length
+      ? `<div class="plan-empty-line">判定类目：现存目录（还没选用方案）</div>`
+      : `<div class="plan-empty-line">还没有可用的分类目录</div>`;
+  }
+  const subs = (cur.folders || []).filter((f) => f.parent).length;
+  return `<div class="plan-empty-line">判定类目：<b>${(cur.codes || []).length}</b> 个（${esc(cur.name)}${
+    subs ? `，含 ${subs} 个二级` : ''
+  }）</div>`;
 }
 
 function renderRail() {
@@ -1910,7 +1930,8 @@ function organizePanel() {
   }
 
   if (!plan) {
-    const ready = S.folderScheme.length > 0;
+    // 按方案建档不需要先建目录（执行时才建），判定依据是「选没选方案」
+    const ready = S.orgScope === 'scheme' ? Boolean(S.schemeId) : S.folderScheme.length > 0;
     return head + `<div class="insp-body">
       <div class="plan-empty">
         ${S.wal && S.wal.count ? `<div class="scheme-warn">
@@ -1918,7 +1939,10 @@ function organizePanel() {
           <button type="button" class="btn btn-line btn-sm" data-wal-rollback style="margin-top:8px">按记录回滚</button>
           <button type="button" class="btn btn-ghost btn-sm" data-wal-clear style="margin-top:8px">就这样，清掉记录</button>
         </div>` : ''}
-        <div class="plan-empty-line">当前方案：${ready ? `${S.folderScheme.length} 个类目` : '还没有可用的分类目录'}</div>
+        ${schemeLine()}
+        <div class="plan-empty-line" style="margin-top:2px">已建目录：<b>${S.folderScheme.length}</b> 个${
+          Object.keys(S.parentOf).length ? `（其中 ${Object.keys(S.parentOf).length} 个二级）` : ''
+        }</div>
         <div class="seg-tabs">
           <button type="button" class="seg-tab${S.orgScope === 'inbox' ? ' is-active' : ''}" data-org-scope="inbox">仅待归类</button>
           <button type="button" class="seg-tab${S.orgScope === 'all' ? ' is-active' : ''}" data-org-scope="all">全库巡检错放</button>
@@ -3096,6 +3120,11 @@ async function load() {
   S.items = st.items;
   S.folderScheme = st.folderScheme;
   S.parentOf = st.parentOf || {};
+  const sl = await send('schemes:list').catch(() => null);
+  if (sl) {
+    S.schemes = sl.schemes || [];
+    S.schemeId = sl.current || '';
+  }
   S.health = st.health || {};
   S.pending = st.pending || {};
   S.meta = st.meta || {};
