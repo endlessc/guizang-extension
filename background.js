@@ -15,12 +15,15 @@ import {
 import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
 import {
-  classify, classifyHeuristic, classifyWithModel, cleanTitles,
+  classify, classifyHeuristic, classifyWithModel, designSkeleton, cleanTitles,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
 import { buildPlan, dropOp, overrideOp, readyOps, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
+import {
+  createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
+} from './lib/taxonomy.js';
 import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
 import { buildOmniboxSuggestions } from './lib/search.js';
 import {
@@ -32,6 +35,8 @@ import { fetchPageHead, isWeakTitle, lookupWayback } from './lib/head.js';
 const KEYS = ['settings', 'health', 'pending', 'meta', 'learned', 'usageCache'];
 const PLAN_KEY = 'plan';
 const JOURNAL_KEY = 'journal';
+const TAXONOMY_KEY = 'taxonomyDraft';
+let taxo = { running: false, stage: '', done: 0, total: 0 };
 const WEEKLY_ALARM = 'guizang-weekly-check';
 
 /** 整理计划的生成进度（只在内存里，页面靠广播） */
@@ -269,6 +274,53 @@ async function runUndo(journalId) {
   await chrome.storage.local.set({ [JOURNAL_KEY]: next });
   broadcast({ type: 'state:changed' });
   return { restored, total: (entry.ops || []).length };
+}
+
+/** 分类法设计流水线：只读语料 + 一次模型调用，不碰书签 */
+async function runDesign({ parentSchemeId = '', sampleSize = 200 }) {
+  if (taxo.running) throw new Error('上一次归纳还没结束');
+  taxo = { running: true, stage: 'sample', done: 0, total: 0 };
+  broadcast({ type: 'taxonomy:start' });
+  try {
+    const state = await loadState();
+    const { items, settings } = state;
+    if (!hasModel(settings)) throw new Error('归纳分类法需要模型，先在设置里填 API Key');
+    if (items.length < 30) throw new Error('书签太少，先攒够 30 条再归纳');
+
+    const sample = sampleForSkeleton(items, sampleSize);
+    taxo = { running: true, stage: 'model', done: 0, total: sample.length };
+    broadcast({ type: 'taxonomy:progress', stage: 'model', done: 0, total: sample.length });
+
+    const skeleton = await designSkeleton(sample, settings, { maxTop: 10, maxPerTop: 4 });
+
+    taxo = { running: true, stage: 'assign', done: 0, total: items.length };
+    broadcast({ type: 'taxonomy:progress', stage: 'assign', done: 0, total: items.length });
+
+    const built = buildTaxonomyFromSkeleton(skeleton, { parentSchemeId });
+    const { map, unmatched } = assignByRules(items, built.nodes);
+    const nodes = built.nodes.map((n) => ({ ...n, members: map[n.code] || [] }));
+
+    const draft = createTaxonomy({
+      name: parentSchemeId ? `基于 ${parentSchemeId} 的归纳` : '语料归纳',
+      parentSchemeId,
+      nodes,
+      params: built.params,
+      source: { items: items.length, sampled: sample.length, unmatched: unmatched.length },
+    });
+
+    // 用全量成员数剪枝：样本里 5 条 ≈ 全量 80 条，拿样本数当阈值会剪错
+    const pruned = pruneTaxonomy(draft, {
+      minPerCategory: draft.params.minPerCategory,
+      maxDepth: draft.params.maxDepth,
+    });
+    const final = { ...pruned.taxonomy, removed: pruned.removed, dropped: pruned.dropped.length, status: 'draft' };
+
+    await chrome.storage.local.set({ [TAXONOMY_KEY]: final });
+    broadcast({ type: 'taxonomy:done', draft: final });
+    return final;
+  } finally {
+    taxo = { running: false, stage: '', done: 0, total: 0 };
+  }
 }
 
 async function readPlan() {
@@ -964,6 +1016,24 @@ const handlers = {
     if (!scheme) throw new Error('没有这个方案');
     const tree = await chrome.bookmarks.getTree();
     return planInstall(tree, scheme);
+  },
+
+  /** 分类法设计：抽样 → 归纳骨架 → 规则铺全量 → 剪枝，只产出 draft */
+  'taxonomy:design': async ({ parentSchemeId = '', sampleSize = 200 } = {}) => {
+    runDesign({ parentSchemeId, sampleSize })
+      .catch((e) => broadcast({ type: 'taxonomy:error', message: String((e && e.message) || e) }));
+    return { started: true };
+  },
+
+  'taxonomy:load': async () => {
+    const { [TAXONOMY_KEY]: draft } = await chrome.storage.local.get(TAXONOMY_KEY);
+    return { draft: draft || null, running: taxo.running };
+  },
+
+  'taxonomy:cancel': async () => {
+    await chrome.storage.local.remove(TAXONOMY_KEY);
+    broadcast({ type: 'taxonomy:done', draft: null });
+    return { ok: true };
   },
 
   'organize:plan': async ({ scope = 'inbox', folderCode = '' } = {}) => {

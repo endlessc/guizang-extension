@@ -13,6 +13,7 @@ import { flattenTree, checkBackupReady, validateSnapshot, rebuildSubtree } from 
 import { PROTO } from '../lib/version.js';
 import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS } from '../lib/llm.js';
 import { runAccept } from '../lib/pending.js';
+import { createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules } from '../lib/taxonomy.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
 import {
@@ -131,6 +132,7 @@ let learned = {
 let usageCache = null;
 let mockTheme = 'system';
 let settings = { ...DEFAULT_SETTINGS };
+let taxoDraft = null;      // 分类法草稿（本地预览内存态）
 let plan = null;           // 整理计划（本地预览内存态）
 let journal = [];          // 整理日志
 let backups = [];          // 只存索引（本地预览用，刷新即重置）
@@ -547,6 +549,32 @@ async function handle(msg) {
     }
     emit({ type: 'state:changed' });
     return { restored: (msg.items || []).length };
+  }
+
+  if (type === 'taxonomy:design') {
+    // 预览层不调模型：直接拿现有方案当骨架，验证「抽样→铺全量→剪枝」这条链路
+    const st = stateLoad();
+    const skeleton = st.scheme.slice(0, 6).map((f) => ({ name: f.name, hint: f.hint || '', children: [] }));
+    const built = buildTaxonomyFromSkeleton(skeleton, {});
+    const { map, unmatched } = assignByRules(st.items, built.nodes);
+    const nodes = built.nodes.map((n) => ({ ...n, members: map[n.code] || [] }));
+    const draft = createTaxonomy({
+      name: 'mock 归纳',
+      nodes,
+      params: built.params,
+      source: { items: st.items.length, sampled: 0, unmatched: unmatched.length },
+    });
+    const pruned = pruneTaxonomy(draft, { minPerCategory: 3 });
+    taxoDraft = { ...pruned.taxonomy, status: 'draft' };
+    emit({ type: 'taxonomy:start' });
+    emit({ type: 'taxonomy:done', draft: taxoDraft });
+    return { started: true };
+  }
+  if (type === 'taxonomy:load') return { draft: taxoDraft, running: false };
+  if (type === 'taxonomy:cancel') {
+    taxoDraft = null;
+    emit({ type: 'taxonomy:done', draft: null });
+    return { ok: true };
   }
 
   if (type === 'organize:plan') {

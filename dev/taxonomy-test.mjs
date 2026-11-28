@@ -10,6 +10,7 @@
 import {
   createTaxonomy, recount, pruneTaxonomy, limitTop, foldOverflow,
   normalizeName, normalizeNames, toScheme, computeStats, groupMembers, validateTaxonomy,
+  sampleForSkeleton, buildTaxonomyFromSkeleton, assignByRules, TOP_LIMIT,
 } from '../lib/taxonomy.js';
 
 let failed = 0;
@@ -165,6 +166,101 @@ console.log('预览用分组');
   const rows = groupMembers(tx);
   eq('按编码排序', rows[0].code, '000');
   eq('带上总数', rows.find((r) => r.code === '000').total, 12);
+}
+
+console.log('抽样');
+{
+  const items = [];
+  for (let h = 0; h < 3; h += 1) {
+    for (let i = 0; i < 10; i += 1) {
+      items.push({ id: `h${h}_${i}`, title: 'T', host: `host${h}.com`, url: `https://host${h}.com/${i}`, added: i });
+    }
+  }
+  const got = sampleForSkeleton(items, 12);
+  eq('抽到指定条数', got.length, 12);
+  const perHost = {};
+  got.forEach((it) => { perHost[it.host] = (perHost[it.host] || 0) + 1; });
+  eq('三个域名都被覆盖', Object.keys(perHost).sort(), ['host0.com', 'host1.com', 'host2.com']);
+  eq('不偏袒任何域名', Object.values(perHost), [4, 4, 4]);
+  eq('结果可复现', sampleForSkeleton(items, 12).map((x) => x.id), got.map((x) => x.id));
+  eq('跳过没有网址的条目', sampleForSkeleton([{ id: 'x', title: 'T' }], 5).length, 0);
+  eq('条目不够就全给', sampleForSkeleton(items, 999).length, 30);
+}
+
+console.log('骨架建码');
+{
+  const skeleton = [
+    { name: '综合与工具', hint: '工具箱', children: [{ name: '开发工具' }, { name: '网盘与下载' }] },
+    { name: '编程与后端', children: [{ name: 'Java' }] },
+  ];
+  const built = buildTaxonomyFromSkeleton(skeleton, { parentSchemeId: 'dewey' });
+  eq('顶层编码', built.nodes.filter((n) => !n.parent).map((n) => n.code), ['000', '100']);
+  eq('子类编码按父首位 + 10n', built.nodes.filter((n) => n.parent).map((n) => n.code), ['010', '020', '110']);
+  eq('父指向正确', built.nodes.find((n) => n.code === '110').parent, '100');
+  eq('父方案记下来', built.parentSchemeId, 'dewey');
+  eq('参数合并默认值', built.params.maxDepth, 2);
+
+  const many = Array.from({ length: 13 }, (_, i) => ({ name: '类' + i, children: Array.from({ length: 12 }, (_, j) => ({ name: '子' + j })) }));
+  const capped = buildTaxonomyFromSkeleton(many);
+  eq('顶层封顶 10', capped.nodes.filter((n) => !n.parent).length, TOP_LIMIT);
+  eq('每父封顶 9 个孩子', capped.nodes.filter((n) => n.parent === '000').length, 9);
+  eq('空名字被丢掉', buildTaxonomyFromSkeleton([{ name: '' }, { name: '有名字' }]).nodes.length, 1);
+}
+
+console.log('规则铺全量');
+{
+  const nodes = [
+    { code: '400', name: '系统与运维', hint: '部署 运维' },
+    { code: '410', name: '容器', parent: '400', hint: 'docker kubernetes' },
+    { code: '800', name: '资讯', hint: '新闻 社区' },
+  ];
+  const items = [
+    { id: 'a', title: 'Docker 入门教程', host: 'x.com', url: 'https://x.com/docker' },
+    { id: 'b', title: '今日新闻速递', host: 'news.example.com', url: 'https://news.example.com/' },
+    { id: 'c', title: 'zzz', host: 'q.io', url: 'https://q.io/x' },
+    // 已知边界：中文类目名对英文标题没有词元重合，这类会落进 unmatched，交给模型兜底
+    { id: 'd', title: 'Hacker News', host: 'news.ycombinator.com', url: 'https://news.ycombinator.com/' },
+  ];
+  const r = assignByRules(items, nodes);
+  eq('标题命中落到子类', r.map['410'], ['a']);
+  eq('资讯类命中', r.map['800'], ['b']);
+  eq('落不进去的进 unmatched', r.unmatched, ['c', 'd']);
+
+  const tie = assignByRules(
+    [{ id: 't', title: 'Docker', host: 'x.com', url: 'https://x.com/' }],
+    [
+      { code: '900', name: 'Docker', hint: '' },
+      { code: '910', name: 'Docker 实践', parent: '900', hint: '' },
+    ],
+  );
+  eq('同分时取更深的节点', Object.keys(tie.map), ['910']);
+}
+
+console.log('流水线串起来（假骨架，不调模型）');
+{
+  const items = [];
+  for (let i = 0; i < 12; i += 1) items.push({ id: 'e' + i, title: '编辑器 vim 配置', host: 'a.com', url: 'https://a.com/' + i, added: i });
+  for (let i = 0; i < 12; i += 1) items.push({ id: 'n' + i, title: '新闻 日报', host: 'b.com', url: 'https://b.com/' + i, added: i });
+  for (let i = 0; i < 6; i += 1) items.push({ id: 'z' + i, title: 'zzz', host: 'c.com', url: 'https://c.com/' + i, added: i });
+
+  const sample = sampleForSkeleton(items, 20);
+  eq('抽样 20 条', sample.length, 20);
+
+  const built = buildTaxonomyFromSkeleton([
+    { name: '开发工具', hint: '编辑器 命令行', children: [{ name: '编辑器' }] },
+    { name: '资讯', hint: '新闻 社区' },
+  ]);
+  const { map, unmatched } = assignByRules(items, built.nodes);
+  eq('编辑器落进二级', map['010'].length, 12);
+  // 第二个顶层编码是 100（000 已被开发工具占用）
+  eq('资讯落进一级', map['100'].length, 12);
+  eq('无词元重合的进 unmatched', unmatched.length, 6);
+
+  const nodes = built.nodes.map((n) => ({ ...n, members: map[n.code] || [] }));
+  const pruned = pruneTaxonomy(createTaxonomy({ id: 'pipe', nodes }), { minPerCategory: 5 });
+  eq('剪枝后三个类目都留下', pruned.taxonomy.nodes.map((n) => n.code).sort(), ['000', '010', '100']);
+  eq('剪枝后成员不丢', pruned.taxonomy.stats.members, 24);
+  eq('可以直接折成方案', toScheme(pruned.taxonomy).folders.map((f) => f.name), ['开发工具', '编辑器', '资讯']);
 }
 
 if (failed) {
