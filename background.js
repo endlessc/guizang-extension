@@ -21,6 +21,7 @@ import {
 } from './lib/llm.js';
 import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, sampleOps, subCodeFor, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
+import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal } from './lib/wal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
@@ -36,6 +37,7 @@ import { fetchPageHead, isWeakTitle, lookupWayback } from './lib/head.js';
 
 const KEYS = ['settings', 'health', 'pending', 'meta', 'learned', 'usageCache'];
 const PLAN_KEY = 'plan';
+const WAL_KEY = 'organizeWal';
 const JOURNAL_KEY = 'journal';
 const TAXONOMY_KEY = 'taxonomyDraft';
 let taxo = { running: false, stage: '', done: 0, total: 0 };
@@ -181,6 +183,17 @@ function collectManagedIds(tree) {
   return set;
 }
 
+async function readWal() {
+  const { [WAL_KEY]: wal } = await chrome.storage.local.get(WAL_KEY);
+  return wal || null;
+}
+
+async function writeWal(wal) {
+  if (!wal) { await chrome.storage.local.remove(WAL_KEY); return null; }
+  await chrome.storage.local.set({ [WAL_KEY]: wal });
+  return wal;
+}
+
 async function readJournal() {
   const { journal } = await chrome.storage.local.get(JOURNAL_KEY);
   return Array.isArray(journal) ? journal : [];
@@ -269,28 +282,46 @@ async function commitOps({
   }
 
   // commit：搬条目（没有 ops 时只建目录，如 taxonomy:install）
+  // 真 WAL：每批 25 条，先把「从哪到哪」的意图落盘，再动手；崩在中间可以按意图回滚
   let moved = 0;
   let failed = 0;
   let stopped = false;
   const done = [];
+  let wal = null;
   if (ops.length) {
     applyCtl = { running: true, stop: false };
+    wal = await writeWal(createWal({ planId, scope, total: ops.length }));
     if (progress) broadcast({ type: 'organize:apply-start', total: ops.length });
-    for (let i = 0; i < ops.length; i += 1) {
+
+    const BATCH_MOVE = 25;
+    for (let i = 0; i < ops.length; i += BATCH_MOVE) {
       if (applyCtl.stop) { stopped = true; break; }
-      const op = ops[i];
-      const code = op.to && op.to.sub ? op.to.sub.code : op.to && op.to.code;
-      const target = folderOf.get(code);
-      if (!target) { failed += 1; continue; }
-      try {
-        const [node] = await chrome.bookmarks.get(op.id);
-        await chrome.bookmarks.move(op.id, { parentId: target });
-        done.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code });
-        moved += 1;
-      } catch {
-        failed += 1;
+      const chunk = ops.slice(i, i + BATCH_MOVE);
+      const steps = [];
+      for (const op of chunk) {
+        const code = op.to && op.to.sub ? op.to.sub.code : op.to && op.to.code;
+        const target = folderOf.get(code);
+        if (!target) { failed += 1; continue; }
+        try {
+          const [node] = await chrome.bookmarks.get(op.id);
+          steps.push({ id: op.id, fromFolderId: node.parentId, fromIndex: node.index, toFolderId: target, code });
+        } catch {
+          failed += 1;
+        }
       }
-      if (progress && i % 25 === 24) {
+      if (!steps.length) continue;
+
+      wal = await writeWal(appendSteps(wal, steps));   // ← 动手之前先落盘
+      for (const step of steps) {
+        try {
+          await chrome.bookmarks.move(step.id, { parentId: step.toFolderId });
+          done.push(step);
+          moved += 1;
+        } catch {
+          failed += 1;
+        }
+      }
+      if (progress) {
         broadcast({ type: 'organize:apply-progress', done: moved + failed, total: ops.length });
         await new Promise((r) => setTimeout(r, 0));
       }
@@ -298,18 +329,12 @@ async function commitOps({
     applyCtl = { running: false, stop: false };
   }
 
-  // 记录：只有真的动过条目才写撤销日志
+  // 记录：只有真的动过条目才写撤销日志；写完才算 committed，WAL 清理掉
   let journalId = '';
   if (journal && done.length) {
-    const entry = {
-      id: 'j' + Date.now().toString(36),
-      at: Date.now(),
-      planId,
-      scope,
-      applied: done.length,
-      failed,
-      ops: done,
-    };
+    const entry = walToJournal({ ...wal, steps: done }, {
+      id: 'j' + Date.now().toString(36), at: Date.now(), failed, stopped,
+    });
     const list = pushEntry(await readJournal(), entry);
     await chrome.storage.local.set({ [JOURNAL_KEY]: list });
     journalId = entry.id;
@@ -321,6 +346,7 @@ async function commitOps({
       });
     }
   }
+  if (wal) await writeWal(null);
 
   return { conflict: [], created, reused, moved, failed, stopped, journalId, total: ops.length };
 }
@@ -1499,7 +1525,36 @@ const handlers = {
     return {
       latest: latestEntry(list),
       list: list.map(({ ops, ...rest }) => ({ ...rest, count: (ops || []).length })),
+      wal: walSummary(await readWal()),
     };
+  },
+
+  /** 上次提交中断了：按预写日志把记录过的步骤反序搬回去 */
+  'organize:walRollback': async () => {
+    const wal = await readWal();
+    if (!wal) return { restored: 0, none: true };
+    if (applyCtl.running) throw new Error('还有提交在进行，先等它结束');
+    let restored = 0;
+    for (const step of rollbackSteps(wal)) {
+      try {
+        await chrome.bookmarks.move(step.id, { parentId: step.fromFolderId, index: step.fromIndex });
+        restored += 1;
+      } catch {
+        try {
+          await chrome.bookmarks.move(step.id, { parentId: step.fromFolderId });
+          restored += 1;
+        } catch {}
+      }
+    }
+    await writeWal(null);
+    broadcast({ type: 'state:changed' });
+    return { restored, total: walSummary(wal).count };
+  },
+
+  /** 用户确认「就这样吧」：只清掉意图，不回滚 */
+  'organize:walClear': async () => {
+    await writeWal(null);
+    return { cleared: true };
   },
 
   'organize:cancel': async () => {

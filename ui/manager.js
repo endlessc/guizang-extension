@@ -60,6 +60,7 @@ const S = {
   applyBusy: false,
   applyProgress: null,
   journal: null,           // 最近一次可撤销的整理
+  wal: null,               // 上次提交的预写日志摘要（中断恢复用）
   journals: [],            // 最近 3 次整理日志
   orgScope: 'inbox',       // 'inbox' | 'all'
   orgTab: 'plan',          // 'plan' | 'clean'
@@ -1826,6 +1827,11 @@ function organizePanel() {
     const ready = S.folderScheme.length > 0;
     return head + `<div class="insp-body">
       <div class="plan-empty">
+        ${S.wal && S.wal.count ? `<div class="scheme-warn">
+          上次提交中断了：意图里记录了 ${S.wal.count} 条移动，但没有写完撤销日志。<br>
+          <button type="button" class="btn btn-line btn-sm" data-wal-rollback style="margin-top:8px">按记录回滚</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-wal-clear style="margin-top:8px">就这样，清掉记录</button>
+        </div>` : ''}
         <div class="plan-empty-line">当前方案：${ready ? `${S.folderScheme.length} 个类目` : '还没有可用的分类目录'}</div>
         <div class="seg-tabs">
           <button type="button" class="seg-tab${S.orgScope === 'inbox' ? ' is-active' : ''}" data-org-scope="inbox">仅待归类</button>
@@ -1852,6 +1858,12 @@ function organizePanel() {
       </div>
     </div>`;
   }
+
+  const walBanner = S.wal && S.wal.count ? `<div class="scheme-warn" style="margin:8px 0">
+    上次提交中断了：意图里记录了 ${S.wal.count} 条移动，但没有写完撤销日志。<br>
+    <button type="button" class="btn btn-line btn-sm" data-wal-rollback style="margin-top:8px">按记录回滚</button>
+    <button type="button" class="btn btn-ghost btn-sm" data-wal-clear style="margin-top:8px">就这样，清掉记录</button>
+  </div>` : '';
 
   const groups = groupOps(plan).map((g) => {
     // 有二级就按二级分组渲染小标题，没有就平铺
@@ -1880,6 +1892,7 @@ function organizePanel() {
   const s = plan.stats;
   return head + `
     <div class="insp-body">
+      ${walBanner}
       <div class="plan-stats">
         <span>范围 <b>${plan.scope === 'scheme' ? '按方案建档' : plan.scope === 'all' ? '全库' : '待归类'}</b></span>
         ${(plan.scope === 'all' || plan.scope === 'scheme') && plan.outside ? `<span>方案外 <b>${plan.outside}</b></span>` : ''}
@@ -2042,6 +2055,17 @@ function wireOrganize(root) {
       S.splitProgress = null;
       renderOrgArea();
     });
+  });
+  box.querySelector('[data-wal-rollback]')?.addEventListener('click', async () => {
+    const r = await send('organize:walRollback').catch((err) => ({ error: err.message }));
+    if (r.error) return toast(r.error);
+    toast(`已按记录回滚 ${r.restored || 0} 条`);
+    await load();
+  });
+  box.querySelector('[data-wal-clear]')?.addEventListener('click', async () => {
+    await send('organize:walClear').catch(() => {});
+    toast('已清掉中断记录');
+    await load();
   });
   box.querySelector('[data-clear]')?.addEventListener('click', async () => {
     await send('organize:cancel');
@@ -2994,6 +3018,7 @@ async function load() {
   if (jr) {
     S.journal = jr.latest;
     S.journals = jr.list || [];
+    S.wal = jr.wal || null;
   }
   S.loaded = true;
   renderAll();

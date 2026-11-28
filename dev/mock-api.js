@@ -952,8 +952,12 @@ async function handle(msg) {
     return {
       latest: journal.find((e) => !e.undoneAt) || null,
       list: journal.map(({ ops, ...rest }) => ({ ...rest, count: (ops || []).length })),
+      wal: null,   // 预览层不模拟中断恢复
     };
   }
+
+  if (type === 'organize:walRollback') return { restored: 0, none: true };
+  if (type === 'organize:walClear') return { cleared: true };
   if (type === 'organize:cancel') {
     plan = null;
     emit({ type: 'organize:done', plan: null });
@@ -1133,7 +1137,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.20.0-mock' }),
+      getManifest: () => ({ version: '0.21.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },
