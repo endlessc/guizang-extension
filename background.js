@@ -1262,11 +1262,14 @@ const handlers = {
   'organize:override': async ({ id, code }) => {
     const plan = await readPlan();
     const op = plan.ops.find((o) => o.id === id);
+    const settings = await readSettings();
+    const tree = await chrome.bookmarks.getTree();
+    const exists = new Set(parseTree(tree, parseOptsFor(settings)).scheme.map((f) => f.code));
     if (op && op.url) {
       const learned = recordOverride(await readLearned(), { host: hostOf(op.url) }, code);
       await chrome.storage.local.set({ learned });
     }
-    const next = overrideOp(plan, id, code);
+    const next = overrideOp(plan, id, code, { existing: exists });
     await writePlan(next);
     return next;
   },

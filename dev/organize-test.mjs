@@ -97,6 +97,26 @@ console.log('按方案建档：缺的目录标出来，执行时再建');
   ]);
   const plain = buildPlan({ items, scheme, scope: 'all', suggestions, blocked: new Set(), now: 9 });
   eq('不传 existing 时视为都已存在', plain.created.length, 0);
+
+  // 只有会执行的条目才计入「将要新建」；拿不准的不算，改判后才算
+  const mixed = buildPlan({
+    items,
+    scheme,
+    scope: 'all',
+    suggestions: {
+      a: { code: '100', conf: 0.9, source: 'model' },   // 可移，缺目录
+      b: { code: '000', conf: 0.9, source: 'model' },   // 可移，目录已存在
+      c: { code: '100', conf: 0.2, source: 'heuristic' }, // 拿不准，不算新建
+    },
+    blocked: new Set(),
+    existing: new Set(['000']),
+    now: 10,
+  });
+  eq('拿不准的不计入新建', mixed.created.map((f) => f.code), ['100']);
+  const fixed = overrideOp(mixed, 'c', '500', { existing: new Set(['000']) });
+  eq('改判后新建清单跟着变', fixed.created.map((f) => f.code).sort(), ['100', '500']);
+  const dropped = dropOp(fixed, 'a');
+  eq('剔除后新建清单少一个', dropped.created.map((f) => f.code), ['500']);
 }
 
 console.log('分组与排序');
@@ -132,7 +152,7 @@ console.log('剔除与改判');
 
   const changed = overrideOp(plan, '2', '500');
   const op = changed.ops.find((o) => o.id === '2');
-  eq('改判目标', op.to, { code: '500', name: '人工智能' });
+  eq('改判目标', op.to, { code: '500', name: '人工智能', missing: false });
   eq('改判后变成 ready 且来源是 user', [op.status, op.source, op.conf], ['ready', 'user', 1]);
   eq('改判后统计重算', [changed.stats.total, changed.stats.ready], [2, 2]);
 }

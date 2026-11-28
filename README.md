@@ -258,7 +258,7 @@ dev/skeleton-run.mjs   用你自己的 Key 真跑一次归纳，只打印报告�
 跑通的部分（有证据，不是「应该能行」）：
 
 - **静态校验**：`node dev/validate.mjs` — 37 个 JS、4 个 HTML、10 处清单引用全部对得上；没有内联脚本/内联事件/eval；用到的 `chrome.*` API 都有对应权限；mock 层没有被静态引入生产路径。
-- **十套断言**（`node dev/xxx-test.mjs`，全部可在 Node 里直接跑，不需要浏览器，合计 271 项）：
+- **十套断言**（`node dev/xxx-test.mjs`，全部可在 Node 里直接跑，不需要浏览器，合计 274 项）：
   - `parse-golden` —— 解析基线：三个 fixture 的 `parseTree` 输出必须逐字节不变，识别层泛化没有改变现有行为（真实 3384 节点摘要也核对过）
   - `parse-schemes` —— 字母编码只在装了方案后生效；`AI 工具`/`PDF 手册` 不被误判；`B 站` 被认成 B 这一已知代价写成断言（12 项）
   - `scheme-install-test` —— 方案安装的复用/新建/撞车三分清单（24 项）
