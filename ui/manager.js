@@ -858,7 +858,13 @@ function renderHead() {
     btn.innerHTML = `${icon('folder', 13)}<span>正在拆分…</span>`;
     try {
       const r = await send('organize:splitFolder', { code });
-      toast(`已拆成 ${r.subs} 个二级目录，移动 ${r.ops} 条；可在「整理」里撤销`);
+      // 只有「真建了目录或真搬了条目」才算成功；两者都 0 时别宣布完成
+      if (!r.created && !r.moved) {
+        throw new Error('没拆成：一个子目录都没建出来，条目也没动。先确认模型给出了子类名，再试一次');
+      }
+      toast(`已拆成 ${r.created} 个二级目录，移动 ${r.moved} 条${
+        r.failed ? `，${r.failed} 条没搬成` : ''
+      }；可在「整理」里撤销`);
       await load();
     } catch (err) {
       toast(err.message);

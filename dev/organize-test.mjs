@@ -10,7 +10,7 @@
 
 import {
   preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes, readyOps,
-  subCodeFor, applySubs, planFolders,
+  subCodeFor, splitSubs, applySubs, planFolders,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -254,6 +254,19 @@ console.log('剔除与改判');
   eq('改判目标', op.to, { code: '500', name: '人工智能', missing: false });
   eq('改判后变成 ready 且来源是 user', [op.status, op.source, op.conf], ['ready', 'user', 1]);
   eq('改判后统计重算', [changed.stats.total, changed.stats.ready], [2, 2]);
+}
+
+console.log('拆二级：子类编码');
+{
+  const subs = splitSubs('000', [{ name: '系统工具' }, { name: '浏览器', hint: '常驻' }]);
+  eq('编码是父首位 + 10n', subs.map((s) => s.code), ['010', '020']);
+  eq('类名与 hint 保留', [subs[0].name, subs[1].hint], ['系统工具', '常驻']);
+
+  // 曾经的 bug：把类目名当父编码传进来，算出「综10」，目录建了但认不出、条目一条都搬不动
+  eq('拿类目名当父编码 → 不给编码', splitSubs('综合与工具', [{ name: '系统工具' }]), []);
+  eq('字母编码不支持二级', splitSubs('T', [{ name: '前端' }]), []);
+  eq('最多 9 个二级', splitSubs('100', Array.from({ length: 12 }, (_, i) => ({ name: '子' + i }))).length, 9);
+  eq('没名字的丢掉、编码不重排', splitSubs('100', [{ name: '  ' }, { name: '真' }]).map((s) => s.code), ['120']);
 }
 
 if (failed) {

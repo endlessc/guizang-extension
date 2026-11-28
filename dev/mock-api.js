@@ -881,9 +881,11 @@ async function handle(msg) {
       code: code[0] + String((i + 1) * 10).padStart(2, '0'),
       name: h.split('.').slice(-2)[0].slice(0, 8), hint: h,
     }));
+    let created = 0;
     for (const sub of subs) {
       if (findFolder(sub.code)) continue;
       folder.children.push({ id: 'f' + sub.code, title: `${sub.code} ${sub.name}`, parentId: folder.id, children: [] });
+      created += 1;
     }
     let moved = 0;
     const ops = [];
@@ -907,7 +909,7 @@ async function handle(msg) {
     emit({ type: 'organize:done', plan: null });
     emit({ type: 'organize:applied', entry: { ...entry, ops: undefined, count: moved }, failed: 0, total: moved, stopped: false });
     emit({ type: 'state:changed' });
-    return { started: true, subs: subs.length, ops: moved };
+    return { started: true, subs: subs.length, created, moved, failed: items.length - moved };
   }
 
   if (type === 'organize:split') {
@@ -1143,7 +1145,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.22.0-mock' }),
+      getManifest: () => ({ version: '0.22.1-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

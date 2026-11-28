@@ -19,7 +19,7 @@ import {
   callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, sampleOps, subCodeFor, recount, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, planFolders, applySubs, sampleOps, splitSubs, recount, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { createWal, appendSteps, walSummary, rollbackSteps, walToJournal } from './lib/wal.js';
 import { migratePending, prunePending, runAccept } from './lib/pending.js';
@@ -216,7 +216,8 @@ async function ensureBackupFor(plan) {
  * 两段式拆二级：① 抽样定 2–5 个子类名；② 按 40 条一块对号入座。
  * 每块输出都很小，一二百条的大类目也不会撞 max_tokens。
  */
-async function splitByModel(topName, items, settings, { chunk = 40, sampleSize = 60 } = {}) {
+async function splitByModel(parent, items, settings, { chunk = 40, sampleSize = 60 } = {}) {
+  const topName = String((parent && parent.name) || '');
   const sample = sampleOps(items, sampleSize);
   const names = parseSubNames(
     await callModel(settings, buildSubNamesMessages(topName, sample), { maxTokens: 800 }),
@@ -237,7 +238,7 @@ async function splitByModel(topName, items, settings, { chunk = 40, sampleSize =
     }
   }
   return {
-    subs: names.map((n, i) => ({ ...n, code: subCodeFor(topName, i) })),
+    subs: splitSubs(parent && parent.code, names),
     assign,
     badChunks,
   };
@@ -268,7 +269,9 @@ async function commitOps({
   let reused = folderScheme.length;
   if (wanted.length) {
     const kind = wanted.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
-    const inst = planInstall(tree, { id: 'adhoc', kind, folders: wanted });
+    // 必须交整份 folders：wanted 只剩「要新建的」，父目录不在 exists 里，
+    // createFolders 找不到 parentId 会把子目录全部跳过（拆二级当年就是这么建不出东西的）
+    const inst = planInstall(tree, { id: 'adhoc', kind, folders });
     if (inst.conflict.length) {
       return {
         conflict: inst.conflict,
@@ -391,6 +394,12 @@ async function runApply({ includeUnsure = false } = {}) {
     progress: true,
   });
 
+  // 同码异名：prepare 阶段一个目录都不建、一条都不搬。别当成「成功执行 0 条」悄悄收场
+  if (res.conflict.length) {
+    const codes = res.conflict.map((c) => `${c.code}（现名「${c.got}」，计划里叫「${c.want}」）`).join('、');
+    throw new Error(`目标目录对不上：${codes}。多半是计划生成后目录被改名了，重新生成计划再执行`);
+  }
+
   await chrome.storage.local.remove(PLAN_KEY);
   broadcast({ type: 'organize:done', plan: null });
   broadcast({ type: 'state:changed' });
@@ -471,22 +480,37 @@ async function runDesign({ parentSchemeId = '', sampleSize = 200 }) {
   }
 }
 
-/** 按 plan 建目录：父先子后，已有的按 code 复用 */
+/**
+ * 按 plan 建目录：父先子后，已有的按 code 复用。
+ *
+ * 多轮扫描而不是一趟：调用方给的顺序不保证父在前（拆二级时子编码排在父编码前面），
+ * 一轮建不出来的先留着，等它的父这一轮建好了下一轮再建。跑不动了就收工，
+ * 剩下的算跳过——不会死循环，也不会静默丢掉。
+ */
 async function createFolders(plan) {
   const existing = new Map((plan.exists || []).map((e) => [e.code, e.folderId]));
   const created = new Map();
+  const pending = [...(plan.missing || [])];
   let made = 0;
-  for (const f of plan.missing || []) {
-    let parentId = plan.barId;
-    if (f.parent) {
-      parentId = created.get(f.parent) || existing.get(f.parent) || null;
-      if (!parentId) continue; // 父类没建出来，子类跳过，下一轮 install 会补
+  for (let round = 0; round < 8 && pending.length; round += 1) {
+    let progress = false;
+    for (let i = 0; i < pending.length; i += 1) {
+      const f = pending[i];
+      let parentId = plan.barId;
+      if (f.parent) {
+        parentId = created.get(f.parent) || existing.get(f.parent) || null;
+        if (!parentId) continue; // 父还没建出来，留到下一轮
+      }
+      const node = await chrome.bookmarks.create({ parentId, title: `${f.code} ${f.name}` });
+      created.set(f.code, node.id);
+      made += 1;
+      progress = true;
+      pending.splice(i, 1);
+      i -= 1;
     }
-    const node = await chrome.bookmarks.create({ parentId, title: `${f.code} ${f.name}` });
-    created.set(f.code, node.id);
-    made += 1;
+    if (!progress) break;
   }
-  return { made, created };
+  return { made, created, skipped: pending.map((f) => f.code) };
 }
 
 async function readTaxonomy() {
@@ -1441,6 +1465,9 @@ const handlers = {
     const items = state.items.filter((it) => String(it.code || '') === codeKey);
     if (items.length < 6) throw new Error(`这个目录只有 ${items.length} 条，少于 6 条不必拆`);
 
+    // 二级编码是「父首位 + 10n」，字母方案算出来的 T10 这种 parseTree 认不出，先挡掉
+    if (!/^\d{1,3}$/.test(codeKey)) throw new Error('字母编码的类目还不支持拆二级：换成数字方案，或手工建子目录');
+
     const parsed = parseTree(await chrome.bookmarks.getTree(), parseOptsFor(settings));
     const folder = parsed.folderScheme.find((f) => f.code === codeKey);
     if (!folder) throw new Error('找不到这个类目文件夹（可能已被改名或删除）');
@@ -1448,12 +1475,14 @@ const handlers = {
     broadcast({ type: 'organize:split-start', total: 1 });
     let got;
     try {
-      got = await splitByModel(folder.name, items, settings);
+      got = await splitByModel(folder, items, settings);
     } finally {
       broadcast({ type: 'organize:split-progress', done: 1, total: 1 });
     }
     const { subs, assign } = got;
-    if (!subs || subs.length < 2) throw new Error('模型给出的子类少于 2 个，换个模型或稍后重试');
+    // 拿到子类名却算不出编码，说明父编码不对——不报「子类少于 2 个」，那会误导排查方向
+    if (!subs.length) throw new Error('子类编码没生成出来：这个类目的编码不是数字，暂时不能拆二级');
+    if (subs.length < 2) throw new Error('模型给出的子类少于 2 个，换个模型或稍后重试');
 
     const byId = new Map(items.map((it) => [it.id, it]));
     const ops = Object.entries(assign)
@@ -1486,8 +1515,15 @@ const handlers = {
     });
     await writePlan(plan);
     // 立即执行：建子目录 → 搬条目；备份与撤销都在 runApply 里
-    await runApply();
-    return { started: true, subs: subs.length, ops: ops.length };
+    const done = await runApply();
+    // 如实报账：建了几个目录、真搬了几条、几条没搬成——以前只报「打算搬几条」，会撒谎
+    return {
+      started: true,
+      subs: subs.length,
+      created: done.created || 0,
+      moved: done.applied || 0,
+      failed: done.failed || 0,
+    };
   },
 
   /** 把整理结果再拆一层二级：按一级分组，逐组问模型要 2–5 个子类并分配条目 */
@@ -1509,8 +1545,14 @@ const handlers = {
     let done = 0;
     for (const [code, ops] of todo) {
       const name = (plan.scheme.find((f) => f.code === code) || {}).name || code;
+      if (!/^\d{1,3}$/.test(code)) {
+        broadcast({ type: 'organize:warn', message: `「${name}」是字母编码，暂时不支持拆二级` });
+        done += 1;
+        broadcast({ type: 'organize:split-progress', done, total: todo.length });
+        continue;
+      }
       try {
-        const { subs: names, assign, badChunks } = await splitByModel(name, ops, settings);
+        const { subs: names, assign, badChunks } = await splitByModel({ code, name }, ops, settings);
         if (names.length < 2) throw new Error('模型给出的子类少于 2 个');
         if (Object.keys(assign).length) mapping[code] = { subs: names, assign };
         if (badChunks) {

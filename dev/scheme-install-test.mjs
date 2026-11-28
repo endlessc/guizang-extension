@@ -153,6 +153,33 @@ console.log('两级方案：同名复用、异名拦下');
   eq('有冲突时其余仍照常算', bad.missing.map((f) => f.code), ['100']);
 }
 
+console.log('拆二级：父目录必须在 exists 里，否则子目录一条都建不出来');
+{
+  const tree = [{
+    id: '0', title: '', children: [{
+      id: '1', title: '书签栏', children: [
+        { id: '10', title: '000 综合与工具', children: [] },
+      ],
+    }],
+  }];
+  const all = planInstall(tree, {
+    id: 'adhoc', kind: 'digit',
+    folders: [
+      { code: '000', name: '综合与工具', parent: null },
+      { code: '010', name: '系统工具', parent: '000' },
+    ],
+  });
+  eq('整份交进来：父目录落进 exists', all.exists.map((f) => f.code), ['000']);
+  eq('只缺子目录、parent 指向 000', all.missing.map((f) => [f.code, f.parent]), [['010', '000']]);
+
+  const onlyChild = planInstall(tree, {
+    id: 'adhoc', kind: 'digit',
+    folders: [{ code: '010', name: '系统工具', parent: '000' }],
+  });
+  eq('只交要新建的：父目录不在 exists（createFolders 找不到 parentId → 跳过）', onlyChild.exists, []);
+  eq('子目录仍算缺', onlyChild.missing.map((f) => f.code), ['010']);
+}
+
 if (failed) {
   console.error(`\n❌ ${failed} 项断言失败`);
   process.exit(1);
