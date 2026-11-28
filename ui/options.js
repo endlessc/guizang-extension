@@ -1,6 +1,6 @@
 /* 设置页 */
 
-import { $, esc, icon, mark, send, toast, openManager, THEMES, getTheme, setThemeAnimated } from './shared.js';
+import { $, esc, icon, mark, send, toast, openManager, THEMES, getTheme, setThemeAnimated, confirmDialog, choiceDialog } from './shared.js';
 import { toMarkdown, toNetscapeHtml } from '../lib/export.js';
 import { parseSchemeLines } from '../lib/schemes.js';
 import { treeOrder } from '../lib/tree.js';
@@ -714,6 +714,7 @@ async function renderBackups() {
         <span class="backup-acts">
           <span class="backup-tag">${b.planId ? '整理前' : '手动'}</span>
           <button type="button" class="btn btn-line btn-sm" data-restore-backup="${esc(b.id)}">安全恢复</button>
+          <button type="button" class="btn btn-ghost btn-sm" data-replace-backup="${esc(b.id)}">替换恢复</button>
         </span>
       </div>`;
     })
@@ -721,11 +722,38 @@ async function renderBackups() {
 
   box.querySelectorAll('[data-restore-backup]').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      if (!window.confirm('将此快照安全恢复到书签栏新建的「归藏恢复」目录中？（会先自动备份当前树，不会覆盖现有书签）')) return;
+      const ok = await confirmDialog({
+        title: '安全恢复（副本）',
+        message: '把这份快照还原到书签栏新建的「归藏恢复 时间」目录里，现有书签一条都不动。\n恢复前会自动备份当前树。',
+        okText: '恢复为副本',
+      });
+      if (!ok) return;
       try {
-        const r = await send('backup:restore', { id: btn.dataset.restoreBackup });
+        const r = await send('backup:restore', { id: btn.dataset.restoreBackup, mode: 'safe' });
         await renderBackups();
         toast(`已安全恢复 ${r.bookmarks} 条书签到「${r.label}」`);
+      } catch (e) {
+        toast(e.message);
+      }
+    });
+  });
+
+  box.querySelectorAll('[data-replace-backup]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const ok = await confirmDialog({
+        title: '替换恢复（会用快照覆盖现有书签）',
+        message: '先自动备份当前树，再清空书签栏与「其他书签」下的内容，然后把快照原样写回去。\n'
+          + '受管书签删不掉，会被跳过并计数；恢复后可用刚生成的那份备份再回退。',
+        okText: '替换并恢复',
+        danger: true,
+      });
+      if (!ok) return;
+      try {
+        const r = await send('backup:restore', { id: btn.dataset.replaceBackup, mode: 'replace' });
+        await renderBackups();
+        toast(`已替换恢复：清掉 ${r.removed} 项，写回 ${r.folders} 个目录 / ${r.bookmarks} 条书签${
+          r.stuck ? `（${r.stuck} 项删不掉，已跳过）` : ''
+        }`);
       } catch (e) {
         toast(e.message);
       }
@@ -769,18 +797,33 @@ function wireBackup() {
     const f = fileInput.files && fileInput.files[0];
     fileInput.value = '';
     if (!f) return;
-    if (!window.confirm(`从「${f.name}」安全恢复？会先备份当前书签，并在书签栏新建独立恢复目录，不覆盖现有书签。`)) return;
+    const how = await choiceDialog({
+      title: '导入 JSON 备份',
+      message: `从「${f.name}」恢复。两种方式都会先自动备份当前树。`,
+      actions: [
+        { id: 'safe', label: '恢复为副本' },
+        { id: 'replace', label: '替换现有书签', primary: true, danger: true },
+      ],
+    });
+    if (!how) return;
     try {
-      const r = await send('backup:restore', { snapshotJson: await f.text() });
+      const r = await send('backup:restore', { snapshotJson: await f.text(), mode: how === 'replace' ? 'replace' : 'safe' });
       await renderBackups();
-      say(`已安全恢复 ${r.bookmarks} 条书签到「${r.label}」`);
+      say(how === 'replace'
+        ? `已替换恢复：写回 ${r.folders} 个目录 / ${r.bookmarks} 条书签${r.stuck ? `（${r.stuck} 项删不掉）` : ''}`
+        : `已安全恢复 ${r.bookmarks} 条书签到「${r.label}」`);
     } catch (err) {
       say(err.message, false);
     }
   });
 
   $('#clearBackup')?.addEventListener('click', async () => {
-    if (!window.confirm('删除全部书签树备份？删掉之后，整理就没有退路了。')) return;
+    if (!await confirmDialog({
+      title: '删除全部备份',
+      message: '删掉之后整理就没有退路了。这一步不可撤销。',
+      okText: '全部删除',
+      danger: true,
+    })) return;
     try {
       const r = await send('backup:clear', {});
       say(`已删除 ${r.removed} 份备份`);

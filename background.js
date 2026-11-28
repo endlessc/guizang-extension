@@ -267,6 +267,7 @@ async function commitOps({
   // prepare：缺的目录按「父在前」建；同码异名一律拦下，一个都不建
   const wanted = folders.filter((f) => f && f.code && !folderOf.has(f.code));
   let created = 0;
+  let createdFolders = [];          // 本次真建出来的目录：撤销时把空的一并拆掉
   let reused = folderScheme.length;
   if (wanted.length) {
     const kind = wanted.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
@@ -279,7 +280,9 @@ async function commitOps({
         created: 0, reused, moved: 0, failed: 0, stopped: false, journalId: '',
       };
     }
-    ({ made: created } = await createFolders(inst));
+    const made = await createFolders(inst);
+    created = made.made;
+    createdFolders = [...made.created.entries()].map(([code, id]) => ({ code, id }));
     tree = await chrome.bookmarks.getTree();
     ({ folderScheme } = parseTree(tree, parseOptsFor(settings)));
     folderOf = new Map(folderScheme.map((f) => [f.code, f.id]));
@@ -339,6 +342,7 @@ async function commitOps({
     const entry = walToJournal({ ...wal, steps: done }, {
       id: 'j' + Date.now().toString(36), at: Date.now(), failed, stopped,
     });
+    entry.createdFolders = createdFolders;   // 撤销时据此清掉本次新建的空目录
     const list = pushEntry(await readJournal(), entry);
     await chrome.storage.local.set({ [JOURNAL_KEY]: list });
     journalId = entry.id;
@@ -479,10 +483,23 @@ async function runUndo(journalId) {
       } catch {}
     }
   }
+  // 本次新建的目录：条目都搬走了就应该一并拆掉，否则撤销完还会剩一堆空目录。
+  // 只删「空了」的：这些目录里若被你后来放过别的东西，chrome 会拒绝，跳过即可。
+  let removedCreated = 0;
+  const createdList = [...(entry.createdFolders || [])].reverse();
+  for (let pass = 0; pass < 2 && createdList.length; pass += 1) {
+    for (const f of createdList) {
+      try {
+        await chrome.bookmarks.remove(f.id);
+        removedCreated += 1;
+      } catch {}
+    }
+  }
+
   const next = markUndone(list, entry.id);
   await chrome.storage.local.set({ [JOURNAL_KEY]: next });
   broadcast({ type: 'state:changed' });
-  return { restored, rebuilt, total: (entry.ops || []).length };
+  return { restored, rebuilt, removedCreated, total: (entry.ops || []).length };
 }
 
 /** 分类法设计流水线：只读语料 + 一次模型调用，不碰书签 */
@@ -887,6 +904,22 @@ async function stashWindowTabs({ folderId = '', closeTabs = false } = {}) {
 }
 
 /** 把任意快照安全恢复到一个带时间戳的新目录，绝不覆盖现有书签 */
+/** 把快照节点写成真实的书签树；counters 逐层累加 */
+async function writeSnapshot(nodes, parentId, counters = { folders: 0, bookmarks: 0 }) {
+  for (const node of nodes || []) {
+    if (node.url) {
+      await chrome.bookmarks.create({ parentId, title: node.title || node.url, url: node.url });
+      counters.bookmarks += 1;
+      continue;
+    }
+    const folder = await chrome.bookmarks.create({ parentId, title: node.title || '未命名文件夹' });
+    counters.folders += 1;
+    await writeSnapshot(node.children || [], folder.id, counters);
+  }
+  return counters;
+}
+
+/** 安全恢复：把快照写到书签栏下的「归藏恢复 时间」容器里，现有书签一律不动 */
 async function restoreSnapshotSafe(snapshot) {
   const snap = validateSnapshot(snapshot);
   const settings = await readSettings();
@@ -900,28 +933,54 @@ async function restoreSnapshotSafe(snapshot) {
   const container = await chrome.bookmarks.create({ parentId: bar.id, title: label });
 
   const roots = rebuildSubtree(snap.nodes);
-  let folders = 0;
-  let bookmarks = 0;
+  const counters = { folders: 0, bookmarks: 0 };
+  for (const r of roots) await writeSnapshot([r], container.id, counters);
 
-  async function writeNode(node, parentId) {
-    if (node.url) {
-      await chrome.bookmarks.create({ parentId, title: node.title || node.url, url: node.url });
-      bookmarks += 1;
-      return;
-    }
-    // 跳过最外层 Chrome 内置根外壳，若没有子节点则跳过
-    const folder = await chrome.bookmarks.create({ parentId, title: node.title || '未命名文件夹' });
-    folders += 1;
-    for (const c of node.children || []) {
-      await writeNode(c, folder.id);
-    }
-  }
-
-  for (const r of roots) {
-    await writeNode(r, container.id);
-  }
   broadcast({ type: 'state:changed' });
-  return { folderId: container.id, label, folders, bookmarks };
+  return { mode: 'safe', folderId: container.id, label, folders: counters.folders, bookmarks: counters.bookmarks };
+}
+
+/**
+ * 替换恢复：先备份当前树，再清空书签栏 / 其他书签下的内容，把快照原样写回去。
+ * 这才是「恢复备份」的字面意思；受管书签删不掉，会跳过并计数。
+ */
+async function restoreSnapshotReplace(snapshot) {
+  const snap = validateSnapshot(snapshot);
+  const settings = await readSettings();
+  const currentTree = await chrome.bookmarks.getTree();
+  await saveBackup(currentTree, { planId: 'pre-restore-replace', schemeId: settings.schemeId || '' });
+
+  const root = currentTree[0];
+  const chromeRoots = (root.children || []).filter((n) => !n.url);
+  let removed = 0;
+  let stuck = 0;
+  for (const r of chromeRoots) {
+    for (const child of [...(r.children || [])]) {
+      try {
+        await chrome.bookmarks.removeTree(child.id);
+        removed += 1;
+      } catch {
+        stuck += 1;   // 受管书签 / 系统目录：删不掉就留着
+      }
+    }
+  }
+
+  const roots = rebuildSubtree(snap.nodes || []);
+  const pickRoot = (title) => {
+    const t = String(title || '').trim();
+    return chromeRoots.find((r) => String(r.title || '').trim() === t)
+      || chromeRoots.find((r) => /书签栏/.test(String(r.title || '')))
+      || chromeRoots[0]
+      || root;
+  };
+  const counters = { folders: 0, bookmarks: 0 };
+  for (const r of roots) {
+    const target = pickRoot(r.title);
+    for (const c of r.children || []) await writeSnapshot([c], target.id, counters);
+  }
+
+  broadcast({ type: 'state:changed' });
+  return { mode: 'replace', label: '替换恢复', removed, stuck, folders: counters.folders, bookmarks: counters.bookmarks };
 }
 
 async function openManagerTab({ view, drawer, id, hash, q } = {}) {
@@ -1770,9 +1829,9 @@ const handlers = {
     return exportBackup(target);
   },
 
-  'backup:restore': async ({ id, snapshotJson }) => {
+  'backup:restore': async ({ id, snapshotJson, mode = 'safe' }) => {
     const snap = snapshotJson ? validateSnapshot(snapshotJson) : await readBackup(id);
-    return restoreSnapshotSafe(snap);
+    return mode === 'replace' ? restoreSnapshotReplace(snap) : restoreSnapshotSafe(snap);
   },
 
   'backup:clear': async () => clearBackups(),

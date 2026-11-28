@@ -1796,7 +1796,9 @@ function renderInspector() {
 async function undoJournal(id) {
   const r = await send('organize:undo', { journalId: id }).catch((err) => ({ error: err.message }));
   if (r.error) return toast(r.error);
-  toast(`已撤销 ${r.restored} 条${r.rebuilt ? `，并重建 ${r.rebuilt} 个目录` : ''}`);
+  toast(`已撤销 ${r.restored} 条${r.rebuilt ? `，重建 ${r.rebuilt} 个旧目录` : ''}${
+    r.removedCreated ? `，清掉 ${r.removedCreated} 个新建目录` : ''
+  }`);
   await load();
 }
 

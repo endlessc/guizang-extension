@@ -120,6 +120,49 @@ export function triggerUndo() {
   return false;
 }
 
+/**
+ * 应用内确认 / 多动作弹窗，替代 window.confirm（原生弹窗和界面风格完全不搭）。
+ * actions: [{ id, label, primary?, danger? }]；取消或点遮罩返回 ''。
+ */
+export function choiceDialog({ title = '请确认', message = '', actions = [], cancelText = '取消' } = {}) {
+  return new Promise((resolve) => {
+    const mask = document.createElement('div');
+    mask.className = 'gt-dialog-mask';
+    const body = esc(String(message || '')).replace(/\n/g, '<br>');
+    mask.innerHTML = `<div class="gt-dialog" role="dialog" aria-modal="true">
+      <div class="gt-dialog-title">${esc(title)}</div>
+      <div class="gt-dialog-body">${body}</div>
+      <div class="gt-dialog-actions">
+        <button type="button" class="btn btn-ghost btn-sm" data-act="">${esc(cancelText)}</button>
+        ${actions.map((a) => `<button type="button" class="btn ${a.primary ? 'btn-primary' : 'btn-line'} btn-sm${
+          a.danger ? ' is-danger' : ''
+        }" data-act="${esc(a.id)}">${esc(a.label)}</button>`).join('')}
+      </div>
+    </div>`;
+    const done = (id) => {
+      document.removeEventListener('keydown', onKey, true);
+      mask.remove();
+      resolve(id);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.stopPropagation(); done(''); }
+    };
+    mask.addEventListener('click', (e) => {
+      if (e.target === mask) return done('');
+      const btn = e.target.closest('[data-act]');
+      if (btn) done(btn.dataset.act);
+    });
+    document.addEventListener('keydown', onKey, true);
+    document.body.appendChild(mask);
+    (mask.querySelector('.gt-dialog-actions .btn-primary') || mask.querySelector('.gt-dialog-actions .btn')).focus?.();
+  });
+}
+
+export async function confirmDialog({ title = '请确认', message = '', okText = '确定', cancelText = '取消', danger = false } = {}) {
+  const id = await choiceDialog({ title, message, cancelText, actions: [{ id: 'ok', label: okText, primary: true, danger }] });
+  return id === 'ok';
+}
+
 export function toast(msg, opts = {}) {
   let box = $('#toast');
   if (!box) {

@@ -1016,6 +1016,32 @@ async function handle(msg) {
     const raw = msg.snapshotJson ? validateSnapshot(msg.snapshotJson) : backupNodes[msg.id];
     if (!raw) throw new Error('这份备份不存在');
     const bar = findNode('1');
+    if (msg.mode === 'replace') {
+      // 与真机同义：清空两个根下的内容，再把快照原样写回
+      const bars = root.children.filter((n) => !n.url);
+      let removed = 0;
+      for (const b of bars) { removed += b.children.length; b.children = []; }
+      let folders = 0;
+      let bookmarks = 0;
+      const addInto = (nodes, p) => {
+        for (const node of nodes || []) {
+          if (node.url) {
+            p.children.push({ id: 'rn' + (++bookmarks), title: node.title, url: node.url, parentId: p.id, dateAdded: Date.now() });
+            continue;
+          }
+          const sub = { id: 'rf' + Math.random().toString(36).slice(2, 6), title: node.title || '恢复目录', parentId: p.id, children: [] };
+          p.children.push(sub);
+          folders += 1;
+          addInto(node.children, sub);
+        }
+      };
+      for (const r of rebuildSubtree(raw.nodes)) {
+        const target = bars.find((b) => b.title === r.title) || bars[0];
+        addInto(r.children, target);
+      }
+      emit({ type: 'state:changed' });
+      return { mode: 'replace', label: '替换恢复', removed, stuck: 0, folders, bookmarks };
+    }
     const folder = { id: 'rest' + Date.now().toString(36), title: '归藏恢复快照', parentId: bar.id, children: [] };
     bar.children.push(folder);
     const roots = rebuildSubtree(raw.nodes);
@@ -1150,7 +1176,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.25.2-mock' }),
+      getManifest: () => ({ version: '0.26.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

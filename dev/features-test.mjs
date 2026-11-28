@@ -431,6 +431,22 @@ console.log('10. 拆二级后的父子关系与展示顺序（lib/tree.js）');
   assert.equal(cyc.length, 2, '父子关系成环时也不能漏画');
   console.log('  ✓ 父子关系成环时也不漏画');
 
+  // 安全恢复会建「归藏恢复 …」容器；里面的副本不该再被当成第二套类目
+  const withRestore = [{
+    id: '0', title: '', children: [{
+      id: '1', title: '书签栏', children: [
+        { id: '10', title: '000 综合与工具', children: [{ id: '101', title: 'a', url: 'https://a.com' }] },
+        { id: '20', title: '归藏恢复 2026-11-28 22:53', children: [
+          { id: '21', title: '000 综合与工具', children: [{ id: '211', title: 'b', url: 'https://b.com' }] },
+        ] },
+      ],
+    }],
+  }];
+  const rr = parseTree(withRestore);
+  assert.deepEqual(rr.folderScheme.map((f) => f.code), ['000'], '恢复副本里不认类目');
+  assert.equal(rr.items.length, 1, '恢复副本里的书签不参与统计');
+  console.log('  ✓ 归藏恢复容器被跳过');
+
   // 一级目录的「整枝」：自己 + 全部后代，聚合视图按它筛选
   assert.deepEqual([...familyOf('000', r.parentOf)].sort(), ['000', '010', '020'], '一级目录算上全部子类');
   console.log('  ✓ 一级目录算上全部子类');
@@ -442,7 +458,7 @@ console.log('10. 拆二级后的父子关系与展示顺序（lib/tree.js）');
   console.log('  ✓ 空编码不算类目');
   assert.equal(familyOf('A', { A: 'B', B: 'A' }).size, 2, '成环时不死循环');
   console.log('  ✓ 成环时不死循环');
-  passed += 9;
+  passed += 11;
 }
 
 console.log(`\n✅ 全部通过（${passed} 项断言）`);

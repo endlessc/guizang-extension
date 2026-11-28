@@ -1721,3 +1721,22 @@ body.is-col-resizing{cursor:col-resize !important;user-select:none !important;}
 .organize-view .insp-body{ padding:10px 0 0; }
 .organize-view .plan-empty{ padding:36px 8px; }
 .organize-view .plan-foot{ position:sticky; bottom:0; background:var(--paper-0); border-top:1px solid var(--rule-soft); }
+
+/* 应用内确认 / 多动作弹窗：替代 window.confirm */
+.gt-dialog-mask{
+  position:fixed;inset:0;z-index:300;padding:24px;display:grid;place-items:center;
+  background:color-mix(in srgb, var(--ink) 34%, transparent);
+  backdrop-filter:blur(2px);
+}
+.gt-dialog{
+  width:min(430px,100%);background:var(--paper-0);border:1px solid var(--rule);
+  border-radius:12px;padding:18px 20px 14px;
+  box-shadow:0 20px 60px color-mix(in srgb, var(--ink) 22%, transparent);
+}
+.gt-dialog-title{font-size:14px;font-weight:600;color:var(--ink);margin-bottom:8px;letter-spacing:.01em;}
+.gt-dialog-body{font-size:12.5px;line-height:1.85;color:var(--ink-2);}
+.gt-dialog-actions{display:flex;justify-content:flex-end;gap:8px;margin-top:18px;}
+.gt-dialog-actions .btn.is-danger{
+  background:var(--dead);color:#fff;border-color:var(--dead);
+}
+.gt-dialog-actions .btn.is-danger:hover{background:var(--dead);filter:brightness(1.06);}
