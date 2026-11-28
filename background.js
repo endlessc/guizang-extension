@@ -16,10 +16,10 @@ import { PROTO } from './lib/version.js';
 import { checkMany } from './lib/check.js';
 import {
   classify, classifyHeuristic, classifyWithModel, designSkeleton, cleanTitles,
-  callModel, buildSubSplitMessages, parseSubSplit,
+  callModel, buildSubNamesMessages, parseSubNames, buildSubAssignMessages, parseSubAssign,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, applySubs, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, applySubs, sampleOps, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
@@ -1328,12 +1328,40 @@ const handlers = {
     broadcast({ type: 'organize:split-start', total: todo.length });
     const mapping = {};
     let done = 0;
+    const CHUNK = 40;
     for (const [code, ops] of todo) {
+      const name = (plan.scheme.find((f) => f.code === code) || {}).name || code;
       try {
-        const name = (plan.scheme.find((f) => f.code === code) || {}).name || code;
-        const content = await callModel(settings, buildSubSplitMessages(name, ops), { maxTokens: 1600 });
-        const got = parseSubSplit(content, ops);
-        if (got.subs.length >= 2) mapping[code] = got;
+        // 第一段：抽样定 2–5 个子类名（输出很小，不会截断）
+        const sample = sampleOps(ops, 60);
+        const names = parseSubNames(
+          await callModel(settings, buildSubNamesMessages(name, sample), { maxTokens: 800 }),
+        );
+        if (names.length < 2) throw new Error('模型给出的子类少于 2 个');
+
+        // 第二段：按 40 条一块「对号入座」，每块输出只有块内条目
+        const assign = {};
+        let badChunks = 0;
+        for (let i = 0; i < ops.length; i += CHUNK) {
+          const chunk = ops.slice(i, i + CHUNK);
+          try {
+            const got = parseSubAssign(
+              await callModel(settings, buildSubAssignMessages(name, names, chunk), { maxTokens: 1600 }),
+              chunk,
+              names.length,
+            );
+            Object.assign(assign, got);
+          } catch {
+            badChunks += 1;
+          }
+        }
+        if (Object.keys(assign).length) mapping[code] = { subs: names, assign };
+        if (badChunks) {
+          broadcast({
+            type: 'organize:warn',
+            message: `「${name}」有 ${badChunks} 块没分配成功，那部分条目先留在这一级`,
+          });
+        }
       } catch (e) {
         broadcast({ type: 'organize:warn', message: `「${code}」拆二级没走通：${(e && e.message) || e}` });
       }

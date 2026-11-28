@@ -12,8 +12,9 @@ import { normalizeMeta, collectAllTags, recordOverride, matchLearned, pickSerend
 import { parseHeadHtml, isWeakTitle, cleanTitleLocal } from '../lib/head.js';
 import { sanitizeCustomScheme, getScheme, parseOptsOf, parseSchemeLines } from '../lib/schemes.js';
 import { normalizeBase } from '../lib/llm.js';
-import { classifyHeuristic, classifyWithModel } from '../lib/llm.js';
+import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
+import { sampleOps } from '../lib/organize.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -227,6 +228,36 @@ test('每个父类最多 9 个二级', () => {
   for (let i = 1; i <= 10; i += 1) rows.push({ code: '1' + String(i * 10).padStart(2, '0'), name: '子' + i, parent: '100' });
   const clean = sanitizeCustomScheme({ name: 'x', folders: rows });
   assert.equal(clean.folders.filter((f) => f.parent).length, 9);
+});
+
+console.log('6c. 二级拆分两段式：先定名，再分块对号');
+test('抽样等距且不重复', () => {
+  const ops = Array.from({ length: 175 }, (_, i) => ({ id: 'i' + i }));
+  const sample = sampleOps(ops, 60);
+  assert.equal(sample.length, 60);
+  assert.equal(new Set(sample.map((x) => x.id)).size, 60);
+  assert.equal(sample[0].id, 'i0');
+  assert.deepEqual(sampleOps(ops.slice(0, 10), 60).length, 10);
+});
+test('子类名解析：截断到 5 个、丢掉空名', () => {
+  const names = parseSubNames(JSON.stringify({ subs: [
+    { name: '实时流媒体', hint: 'RTP RTMP' }, { name: '' }, { name: '抓包' },
+    { name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' },
+  ] }));
+  assert.deepEqual(names.map((x) => x.name), ['实时流媒体', '抓包', 'A', 'B', 'C']);
+});
+test('分配解析：越界下标与陌生 id 被丢弃', () => {
+  const ops = [{ id: 'a' }, { id: 'b' }];
+  const assign = parseSubAssign(JSON.stringify({ items: [
+    { id: 'a', sub: 0 }, { id: 'b', sub: 3 }, { id: 'zzz', sub: 1 }, { id: 'b', sub: 1 },
+  ] }), ops, 2);
+  assert.deepEqual(assign, { a: 0, b: 1 });
+});
+test('分配请求只带这一块条目', () => {
+  const ops = [{ id: 'a', title: 't', url: 'https://x/1' }];
+  const msg = buildSubAssignMessages('网络与通信', [{ name: '抓包', hint: 'wireshark' }], ops);
+  assert.match(msg[0].content, /0\. 抓包/);
+  assert.match(msg[1].content, /"id":"a"/);
 });
 
 console.log('7. 快照恢复树重建（lib/backup.js）');
