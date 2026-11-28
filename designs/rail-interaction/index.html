@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>归藏 · 左栏交互改版</title>
+<style>
+  :root{
+    --paper-0:#FAF8F2; --paper-1:#F3EFE4; --paper-2:#E9E2D2;
+    --rail:#EFE9DA; --insp:#F7F2E6;
+    --rule:#DCD4C0; --rule-soft:#EAE3D3;
+    --ink:#1B1812; --ink-2:#463F32; --ink-3:#736B59; --ink-4:#9C927F;
+    --brand:#1E4468; --brand-2:#13324E; --brand-ink:#13324E;
+    --on-brand:#FAF8F2; --brand-wash:#E6EDF5;
+    --dead:#A8341E; --warn:#8C6013; --ok:#346347;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,"Source Han Serif SC","Songti SC",serif;
+    --sans:-apple-system,BlinkMacSystemFont,"PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%}
+  body{
+    background:var(--paper-1); color:var(--ink); font-family:var(--sans);
+    font-size:13px; line-height:1.55; -webkit-font-smoothing:antialiased;
+  }
+  button{font:inherit;color:inherit;background:none;border:0;cursor:pointer}
+
+  /* ── 外框：说明 + 变体切换 + 舞台 ── */
+  .page{max-width:1420px;margin:0 auto;padding:26px 28px 40px}
+  .kicker{font-size:10.5px;letter-spacing:.14em;color:var(--ink-4);text-transform:uppercase}
+  h1{font-family:var(--serif);font-weight:600;font-size:26px;margin:6px 0 8px;letter-spacing:.01em}
+  .lede{max-width:74ch;color:var(--ink-2);margin:0 0 18px}
+  .lede b{color:var(--ink)}
+
+  .tabs{display:flex;gap:8px;flex-wrap:wrap;margin:0 0 14px}
+  .tab{
+    border:1px solid var(--rule); background:var(--paper-0); border-radius:999px;
+    padding:7px 14px; color:var(--ink-2); display:flex; align-items:center; gap:8px;
+  }
+  .tab .idx{font-family:var(--mono);font-size:10.5px;color:var(--ink-4)}
+  .tab[aria-selected="true"]{background:var(--brand);border-color:var(--brand);color:var(--on-brand);box-shadow:0 2px 8px rgba(30,68,104,.22)}
+  .tab[aria-selected="true"] .idx{color:rgba(250,248,242,.66)}
+
+  .why{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin:0 0 16px;
+  }
+  .why-card{background:var(--paper-0);border:1px solid var(--rule);border-radius:10px;padding:12px 14px}
+  .why-card h3{margin:0 0 4px;font-size:12px;letter-spacing:.02em}
+  .why-card p{margin:0;color:var(--ink-3);font-size:12px}
+  .why-card code{font-family:var(--mono);font-size:11px;background:var(--paper-2);padding:1px 4px;border-radius:4px}
+
+  /* ── 应用外壳 ── */
+  .app{
+    display:grid;grid-template-columns:248px minmax(0,1fr) 336px;
+    height:720px;border:1px solid var(--rule);border-radius:14px;overflow:hidden;
+    background:var(--paper-0);box-shadow:0 24px 60px -32px rgba(27,24,18,.4);
+  }
+  .app.no-panel{grid-template-columns:248px minmax(0,1fr)}
+
+  .rail{background:var(--rail);border-right:1px solid var(--rule);display:flex;flex-direction:column;min-height:0}
+  .brand{display:flex;align-items:center;gap:10px;padding:16px 16px 12px}
+  .mark{width:26px;height:26px;border-radius:7px;background:var(--brand);color:var(--on-brand);
+    display:grid;place-items:center;font-family:var(--serif);font-size:15px}
+  .brand-name{font-family:var(--serif);font-size:16px}
+  .brand-sub{font-size:9.5px;letter-spacing:.18em;color:var(--ink-4)}
+
+  .rail-scroll{overflow:auto;padding:4px 10px 12px;flex:1;min-height:0}
+  .group-label{display:flex;justify-content:space-between;align-items:center;
+    font-size:10.5px;letter-spacing:.12em;color:var(--ink-4);padding:14px 6px 6px}
+  .rail-item{
+    width:100%;display:flex;align-items:center;gap:9px;height:34px;padding:0 10px;border-radius:7px;
+    color:var(--ink-2);text-align:left;position:relative;transition:background .14s ease,color .14s ease;
+  }
+  .rail-item + .rail-item{margin-top:2px}
+  .rail-item:hover{background:var(--paper-2);color:var(--ink)}
+  .rail-item .ico{width:20px;display:grid;place-items:center;color:var(--ink-3);flex:none}
+  .rail-item .nm{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .rail-item .ct{font-family:var(--mono);font-size:11px;color:var(--ink-4)}
+  .rail-item.is-active{background:var(--brand);color:var(--on-brand);box-shadow:0 2px 6px rgba(30,68,104,.28)}
+  .rail-item.is-active .ico,.rail-item.is-active .ct{color:rgba(250,248,242,.78)}
+
+  /* 旧的错误做法：工具入口也吃"选中" */
+  .legacy .rail-item.is-tool-active{background:var(--brand);color:var(--on-brand)}
+  .legacy .rail-item.is-tool-open{background:var(--paper-2);box-shadow:inset 3px 0 0 var(--brand)}
+
+  /* B 方案：工具行的"已展开"状态，不同于选中 */
+  .tool-row{display:flex;align-items:center;gap:9px;height:34px;padding:0 10px;border-radius:7px;color:var(--ink-2);width:100%;text-align:left}
+  .tool-row:hover{background:var(--paper-2);color:var(--ink)}
+  .tool-row.is-open{background:rgba(30,68,104,.10);color:var(--brand-ink);box-shadow:inset 3px 0 0 var(--brand)}
+  .tool-row .nm{flex:1}
+  .tool-row .chev{font-family:var(--mono);font-size:10px;color:var(--ink-4)}
+  .tool-row.is-open .chev{color:var(--brand)}
+  .tool-badge{font-size:10px;padding:1px 6px;border-radius:999px;background:var(--brand-wash);color:var(--brand-ink)}
+
+  /* ── 主区 ── */
+  .main{display:flex;flex-direction:column;min-width:0;min-height:0;background:var(--paper-0)}
+  .main-head{padding:16px 20px 12px;border-bottom:1px solid var(--rule-soft)}
+  .crumb{font-size:11px;color:var(--ink-4);display:flex;gap:6px;align-items:center;margin-bottom:4px}
+  .main-title{display:flex;align-items:baseline;gap:10px}
+  .main-title h2{font-family:var(--serif);font-size:22px;margin:0;font-weight:600}
+  .pill{font-family:var(--mono);font-size:11px;color:var(--ink-3);border:1px solid var(--rule);border-radius:999px;padding:2px 8px}
+  .main-sub{margin:6px 0 0;font-size:12px;color:var(--ink-3)}
+
+  .main-body{flex:1;overflow:auto;padding:8px 20px 20px}
+  .row{display:grid;grid-template-columns:20px minmax(0,1fr) 128px 62px;gap:10px;align-items:center;
+    padding:10px 6px;border-bottom:1px solid var(--rule-soft)}
+  .row:hover{background:var(--paper-1)}
+  .row.is-sel{background:var(--brand-wash)}
+  .row .box{width:15px;height:15px;border:1px solid var(--rule);border-radius:4px;background:var(--paper-0)}
+  .row .ttl{display:flex;flex-direction:column;gap:2px;min-width:0}
+  .row .ttl b{font-weight:500;font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .ttl span{font-size:11px;color:var(--ink-4)}
+  .row .to{font-family:var(--mono);font-size:11px;color:var(--ink-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .row .st{font-size:11px;color:var(--ink-4);text-align:right}
+  .row .st.ok{color:var(--ok)} .row .st.warn{color:var(--warn)}
+
+  .subhead{display:flex;align-items:center;gap:8px;margin:14px 0 2px;padding-left:8px;
+    border-left:2px solid var(--rule);font-size:11.5px;color:var(--ink-3)}
+  .subhead .code{font-family:var(--mono);color:var(--ink-4)}
+
+  .empty{padding:56px 12px;text-align:center;color:var(--ink-3)}
+  .empty .glyph{font-family:var(--serif);font-size:30px;color:var(--ink-4);margin-bottom:10px}
+  .empty h3{font-family:var(--serif);font-size:19px;color:var(--ink);margin:0 0 6px;font-weight:600}
+
+  /* 计划工具条：A 方案把动作放在主区内 */
+  .toolbar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;padding:12px 0 6px}
+  .btn{border:1px solid var(--rule);background:var(--paper-0);border-radius:7px;padding:6px 12px;font-size:12px;color:var(--ink-2)}
+  .btn:hover{background:var(--paper-1)}
+  .btn.primary{background:var(--brand);border-color:var(--brand);color:var(--on-brand)}
+  .btn.primary:hover{background:var(--brand-2)}
+  .btn.ghost{border-color:transparent;color:var(--ink-3)}
+
+  /* ── 右侧：只做详情 ── */
+  .panel{background:var(--insp);border-left:1px solid var(--rule);display:flex;flex-direction:column;min-height:0}
+  .panel-head{padding:14px 16px 10px;border-bottom:1px solid var(--rule-soft)}
+  .panel-kicker{font-size:10.5px;letter-spacing:.12em;color:var(--ink-4)}
+  .panel-title{font-family:var(--serif);font-size:17px;margin:2px 0 0}
+  .panel-body{padding:14px 16px;overflow:auto;font-size:12px;color:var(--ink-2)}
+  .panel-body h4{margin:14px 0 4px;font-size:11px;letter-spacing:.08em;color:var(--ink-4)}
+  .kv{display:flex;justify-content:space-between;gap:10px;padding:5px 0;border-bottom:1px dashed var(--rule-soft)}
+  .kv span:first-child{color:var(--ink-4)}
+
+  /* B 方案：浮层面板 */
+  .sheet{position:absolute;inset:0;display:flex;justify-content:flex-end;pointer-events:none}
+  .sheet .scrim{position:absolute;inset:0;background:rgba(27,24,18,.18);opacity:0;transition:opacity .18s ease;pointer-events:none}
+  .sheet .body{
+    position:relative;width:420px;max-width:78%;background:var(--insp);border-left:1px solid var(--rule);
+    transform:translateX(16px);opacity:0;transition:transform .2s ease,opacity .2s ease;pointer-events:none;
+    display:flex;flex-direction:column;box-shadow:-18px 0 40px -24px rgba(27,24,18,.5);
+  }
+  .sheet.open{pointer-events:auto}
+  .sheet.open .scrim{opacity:1;pointer-events:auto}
+  .sheet.open .body{transform:none;opacity:1;pointer-events:auto}
+  .sheet-head{padding:14px 16px 10px;border-bottom:1px solid var(--rule-soft)}
+  .sheet-head .top{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  .sheet-head .title{font-family:var(--serif);font-size:18px;margin:4px 0 0}
+  .scope-chip{display:inline-flex;gap:6px;align-items:center;margin-top:6px;font-size:11px;color:var(--ink-3);
+    background:var(--paper-2);border-radius:999px;padding:3px 9px}
+  .sheet-foot{border-top:1px solid var(--rule-soft);padding:10px 16px;display:flex;gap:8px;justify-content:flex-end}
+
+  /* A 方案：视图切换的说明条 */
+  .modebar{display:flex;align-items:center;gap:10px;padding:8px 20px;border-bottom:1px solid var(--rule-soft);
+    background:var(--brand-wash);color:var(--brand-ink);font-size:11.5px}
+  .modebar .tag{background:var(--brand);color:var(--on-brand);border-radius:4px;padding:1px 6px;font-family:var(--mono);font-size:10.5px}
+
+  /* 舞台内的绝对定位层 */
+  .stage{position:relative}
+  .legend{display:flex;gap:16px;flex-wrap:wrap;margin-top:12px;color:var(--ink-3);font-size:11.5px}
+  .legend b{color:var(--ink-2);font-weight:600}
+  .foot{margin-top:18px;color:var(--ink-4);font-size:11.5px}
+</style>
+</head>
+<body>
+<div class="page">
+  <div class="kicker">归藏 · 交互改版</div>
+  <h1>让用户永远知道：现在在看什么、点了会发生什么</h1>
+  <p class="lede">
+    左栏现在把两类完全不同的东西混在一起：<b>视图过滤</b>（全部 / 待归类 / 失效）和 <b>工具入口</b>（整理与洗白）。
+    两者共用同一个“选中”样式，于是打开整理抽屉时，<b>视图和工具同时高亮</b>；右侧面板又脱离主区独立存在，
+    用户无法判断“我是在过滤列表，还是在操作整理计划”。下面三种改法按代价从小到大排列。
+  </p>
+
+  <div class="why">
+    <div class="why-card">
+      <h3>规则一 · 选中只有一个</h3>
+      <p>实心高亮 = 当前内容区在显示什么。<code>aria-selected</code> 只能出现一次。</p>
+    </div>
+    <div class="why-card">
+      <h3>规则二 · 工具是动作，不是位置</h3>
+      <p>工具入口用“已展开 / 进行中”表达，不再抢选中色；再点一次可收起。</p>
+    </div>
+    <div class="why-card">
+      <h3>规则三 · 面板必须说明作用对象</h3>
+      <p>面板标题旁标出当前范围（全部收藏 / 待归类），让人知道操作作用于哪批数据。</p>
+    </div>
+  </div>
+
+  <div class="tabs" role="tablist" aria-label="方案">
+    <button class="tab" role="tab" data-variant="A" aria-selected="true"><span class="idx">A</span>工具变视图</button>
+    <button class="tab" role="tab" data-variant="B" aria-selected="false"><span class="idx">B</span>抽屉带上下文</button>
+    <button class="tab" role="tab" data-variant="C" aria-selected="false"><span class="idx">C</span>模式条 + 分组</button>
+    <button class="tab" role="tab" data-variant="L" aria-selected="false"><span class="idx">!</span>对照：现在的问题</button>
+  </div>
+
+  <div class="stage" id="stage" data-screen-label="主舞台"></div>
+
+  <div class="legend" id="legend"></div>
+  <p class="foot">原型内可点：左栏切换、整理入口、列表行、Esc 关闭浮层。数据为示意。</p>
+</div>
+
+<script>
+const RAIL = [
+  { group:'书库视图', items:[
+    { id:'all',  name:'全部收藏', count:1648, icon:'all' },
+    { id:'star', name:'星标精选', count:0, icon:'star' },
+    { id:'later',name:'稍后阅读', count:0, icon:'later' },
+  ]},
+  { group:'智能视图', items:[
+    { id:'inbox', name:'待归类', count:912, icon:'inbox' },
+    { id:'pending', name:'归类建议', count:0, icon:'spark' },
+  ]},
+  { group:'检查', items:[
+    { id:'dead', name:'已失效', count:0, icon:'alert' },
+    { id:'moved',name:'已跳转', count:0, icon:'moved' },
+    { id:'dups', name:'重复书签', count:0, icon:'dups' },
+  ]},
+];
+
+const ROWS = [
+  { id:'r1', title:'Spring For All 玩最纯粹的技术', host:'spring4all.com', to:'100 编程与后端', st:'可移', tone:'ok' },
+  { id:'r2', title:'columns.render', host:'datatables.net', to:'600 Web 与前端', st:'可移', tone:'ok' },
+  { id:'r3', title:'AngularJS select 详细用法', host:'codeweblog.com', to:'600 Web 与前端', st:'拿不准', tone:'warn' },
+  { id:'r4', title:'向量数据库选型 · Milvus / Qdrant', host:'zilliz.com', to:'200 数据与中间件', st:'可移', tone:'ok' },
+  { id:'r5', title:'OpenWrt 路由器固件刷写指南', host:'openwrt.org', to:'300 网络与通信', st:'拿不准', tone:'warn' },
+  { id:'r6', title:'后端面试八股清单 · 2026 版', host:'github.com', to:'100 编程与后端', st:'可移', tone:'ok' },
+];
+
+const state = { variant:'A', view:'all', toolOpen:false, selected:'r4' };
+
+
+const SVG = (path, extra='') => `<svg viewBox="0 0 16 16" width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.35" stroke-linecap="round" stroke-linejoin="round" ${extra}>${path}</svg>`;
+const ICONS = {
+  all: SVG('<path d="M3 4.5h10M3 8h10M3 11.5h7"/>'),
+  star: SVG('<path d="M8 2.6l1.7 3.5 3.8.5-2.8 2.7.7 3.8L8 11.3 4.6 13.1l.7-3.8L2.5 6.6l3.8-.5z"/>'),
+  later: SVG('<path d="M4.5 2.8h7v10.4L8 10.6l-3.5 2.6z"/>'),
+  inbox: SVG('<path d="M2.6 9.2l1.6-5.4h7.6l1.6 5.4v3.2H2.6z"/><path d="M2.6 9.2h3l.8 1.4h3.2l.8-1.4h3"/>'),
+  spark: SVG('<path d="M8 2.2l1.2 3.3 3.3 1.2-3.3 1.2L8 11.2 6.8 7.9 3.5 6.7 6.8 5.5z"/>'),
+  folder: SVG('<path d="M2.4 4.4h4l1.2 1.6h6v6.6H2.4z"/>'),
+  alert: SVG('<path d="M8 2.6l5.6 9.8H2.4z"/><path d="M8 6.4v2.6"/><circle cx="8" cy="10.9" r=".5" fill="currentColor"/>'),
+  moved: SVG('<path d="M5 11L11 5"/><path d="M6.6 5H11v4.4"/>'),
+  dups: SVG('<path d="M3 5.5h8v8H3z"/><path d="M5 5.5V3h8v8h-2.5"/>'),
+};
+
+function el(html){ const t=document.createElement('template'); t.innerHTML=html.trim(); return t.content.firstChild; }
+
+function railHTML(){
+  const v = state.variant;
+  const parts = [];
+  parts.push(`<div class="brand"><span class="mark">藏</span>
+    <span><span class="brand-name">归藏</span><br><span class="brand-sub">GUIZANG</span></span></div>`);
+  parts.push('<div class="rail-scroll">');
+  for (const g of RAIL) {
+    parts.push(`<div class="group-label"><span>${g.group}</span></div>`);
+    for (const it of g.items) {
+      const active = state.view === it.id;   // 浮层打开时，视图仍是“当前所在”
+      parts.push(`<button class="rail-item${active?' is-active':''}" data-view="${it.id}">
+        <span class="ico">${ICONS[it.icon]}</span><span class="nm">${it.name}</span><span class="ct">${it.count}</span></button>`);
+    }
+    if (g.group === '智能视图') {
+      if (v === 'A') {
+        const active = state.view === 'organize';
+        parts.push(`<button class="rail-item${active?' is-active':''}" data-view="organize">
+          <span class="ico">${ICONS.folder}</span><span class="nm">整理与洗白</span><span class="ct">14</span></button>`);
+      } else if (v === 'C') {
+        parts.push(`<button class="tool-row${state.toolOpen?' is-open':''}" data-tool="organize">
+          <span class="ico">${ICONS.folder}</span><span class="nm">整理与洗白</span>
+          ${state.toolOpen?'<span class="tool-badge">进行中</span>':'<span class="ct">14</span>'}
+          <span class="chev">${state.toolOpen?'Esc':'↗'}</span></button>`);
+      } else if (v === 'B') {
+        parts.push(`<button class="tool-row${state.toolOpen?' is-open':''}" data-tool="organize">
+          <span class="ico">${ICONS.folder}</span><span class="nm">整理与洗白</span>
+          ${state.toolOpen?'<span class="tool-badge">已展开</span>':'<span class="ct">14</span>'}
+          <span class="chev">${state.toolOpen?'Esc':'↗'}</span></button>`);
+      } else {
+        // 现状：工具入口也吃选中色 + 展开时叠加浅底
+        parts.push(`<button class="rail-item is-tool-active is-tool-open" data-tool="organize">
+          <span class="ico">${ICONS.folder}</span><span class="nm">整理与洗白</span><span class="ct">14</span></button>`);
+      }
+    }
+  }
+  parts.push(`<div class="group-label"><span>分类</span><span>可拖入</span></div>`);
+  for (const c of [['000','综合与工具',54],['100','编程与后端',249],['200','数据与中间件',70],['300','网络与通信',48]]) {
+    parts.push(`<button class="rail-item" data-view="cat:${c[0]}">
+      <span class="ico" style="font-family:var(--mono);font-size:10.5px">${c[0]}</span>
+      <span class="nm">${c[1]}</span><span class="ct">${c[2]}</span></button>`);
+  }
+  parts.push('</div>');
+  return parts.join('');
+}
+
+function mainHTML(){
+  const v = state.variant;
+  if (v === 'L') {
+    return `<div class="main-head">
+      <div class="crumb">书库 › 全部收藏</div>
+      <div class="main-title"><h2>全部收藏</h2><span class="pill">1648</span></div>
+      <p class="main-sub">左侧「全部收藏」是实心选中，同时「整理与洗白」也是实心选中——两个都是“当前”。</p>
+    </div>
+    <div class="main-body">${rowsHTML()}</div>`;
+  }
+  if (state.view === 'organize' || (state.variant === 'C' && state.toolOpen)) {
+    return `<div class="main-head">
+      <div class="crumb">书库 › 整理</div>
+      <div class="main-title"><h2>整理计划</h2><span class="pill">14 条待整理</span></div>
+      <p class="main-sub">动作发生在这一批数据上，范围写在面板与工具条里；左栏不再出现第二个“选中”。</p>
+      <div class="toolbar">
+        <button class="btn primary">执行 6 条</button>
+        <button class="btn">再拆一层二级</button>
+        <button class="btn ghost">重新生成</button>
+        <span style="margin-left:auto;font-size:11px;color:var(--ink-4)">本轮上限 200 · 方案外 8</span>
+      </div>
+    </div>
+    <div class="main-body">
+      <div class="subhead"><span class="code">100</span> 编程与后端 · 3</div>
+      <div class="row"><span class="box"></span><span class="ttl"><b>后端面试八股清单 · 2026 版</b><span>github.com</span></span><span class="to">110 github</span><span class="st ok">可移</span></div>
+      <div class="row"><span class="box"></span><span class="ttl"><b>Anthropic · Claude API 文档</b><span>docs.anthropic.com</span></span><span class="to">120 anthropi</span><span class="st warn">拿不准</span></div>
+      <div class="subhead"><span class="code">200</span> 数据与中间件 · 1</div>
+      <div class="row is-sel"><span class="box"></span><span class="ttl"><b>向量数据库选型 · Milvus / Qdrant</b><span>zilliz.com</span></span><span class="to">200 数据与中间件</span><span class="st ok">可移</span></div>
+      <div class="subhead"><span class="code">600</span> Web 与前端 · 2</div>
+      <div class="row"><span class="box"></span><span class="ttl"><b>columns.render</b><span>datatables.net</span></span><span class="to">600 Web 与前端</span><span class="st ok">可移</span></div>
+    </div>`;
+  }
+  if (state.view === 'pending') {
+    return `<div class="main-head">
+      <div class="crumb">书库 › 归类建议</div>
+      <div class="main-title"><h2>归类建议</h2><span class="pill">0</span></div>
+      <p class="main-sub">这些书签拿到了 AI 建议，逐条确认后才会真的移动。</p>
+    </div>
+    <div class="main-body"><div class="empty"><div class="glyph">✦</div><h3>卷目已清，暂无待决建议</h3>
+      <p>所有书签皆已妥善归类。收录新网址时，建议将在此呈递。</p></div></div>`;
+  }
+  const title = state.view === 'inbox' ? '待归类' : state.view === 'dead' ? '已失效' : '全部收藏';
+  const count = state.view === 'inbox' ? 912 : state.view === 'dead' ? 0 : 1648;
+  return `<div class="main-head">
+    <div class="crumb">书库 › ${title}</div>
+    <div class="main-title"><h2>${title}</h2><span class="pill">${count}</span></div>
+    <p class="main-sub">列表只是浏览；整理计划的入口在左栏「智能视图」里，点开就是独立视图，不会和这里抢高亮。</p>
+  </div>
+  <div class="main-body">${rowsHTML()}</div>`;
+}
+
+function rowsHTML(){
+  return `<div class="row"><span class="box"></span><span class="ttl"><b>QiuQuan's Blog</b><span>qiuquan.cc</span></span><span class="to">000 综合与工具</span><span class="st">—</span></div>` +
+  ROWS.map((r)=>`<div class="row${state.selected===r.id?' is-sel':''}" data-row="${r.id}">
+    <span class="box"></span><span class="ttl"><b>${r.title}</b><span>${r.host}</span></span>
+    <span class="to">${r.to}</span><span class="st ${r.tone}">${r.st}</span></div>`).join('');
+}
+
+function panelHTML(){
+  const r = ROWS.find(x=>x.id===state.selected) || ROWS[0];
+  return `<div class="panel-head">
+      <div class="panel-kicker">条目详情</div>
+      <div class="panel-title">${r.title}</div>
+    </div>
+    <div class="panel-body">
+      <div class="kv"><span>目标类目</span><span>${r.to}</span></div>
+      <div class="kv"><span>状态</span><span>${r.st}</span></div>
+      <div class="kv"><span>来源</span><span>本地关键词规则</span></div>
+      <div class="kv"><span>域名</span><span>${r.host}</span></div>
+      <h4>说明</h4>
+      <p style="margin:0;color:var(--ink-3)">面板只描述“选中的这一条”。批量动作留在整理视图的工具条里，两者不再混在一起。</p>
+    </div>`;
+}
+
+function sheetHTML(){
+  return `<div class="sheet${state.toolOpen?' open':''}" id="sheet">
+    <div class="scrim" data-close></div>
+    <div class="body">
+      <div class="sheet-head">
+        <div class="top"><span class="panel-kicker">工具 · 浮层</span><button class="btn ghost" data-close>Esc 关闭</button></div>
+        <div class="title">整理计划</div>
+        <span class="scope-chip">作用于 · 全部收藏 1648 条</span>
+      </div>
+      <div class="panel-body" style="flex:1">
+        <div class="subhead"><span class="code">100</span> 编程与后端 · 3</div>
+        <div class="row" style="grid-template-columns:minmax(0,1fr) 86px;padding:8px 4px">
+          <span class="ttl"><b>后端面试八股清单 · 2026 版</b><span>→ 110 github</span></span><span class="st ok">可移</span></div>
+        <div class="row" style="grid-template-columns:minmax(0,1fr) 86px;padding:8px 4px">
+          <span class="ttl"><b>Anthropic · Claude API 文档</b><span>→ 120 anthropi</span></span><span class="st warn">拿不准</span></div>
+        <div class="kv" style="margin-top:14px"><span>可移</span><span>6</span></div>
+        <div class="kv"><span>拿不准</span><span>8</span></div>
+        <div class="kv"><span>本轮上限</span><span>200</span></div>
+        <div class="kv"><span>方案外</span><span>8</span></div>
+        <p style="margin-top:12px;color:var(--ink-3)">浮层不改变左栏选中：你仍在「全部收藏」，只是临时调出工具。关掉即回到原视图。</p>
+      </div>
+      <div class="sheet-foot"><button class="btn" data-close>返回浏览</button><button class="btn primary">执行 6 条</button></div>
+    </div>
+  </div>`;
+}
+
+function modebarHTML(){
+  if (state.variant !== 'C' || !state.toolOpen) return '';
+  return `<div class="modebar"><span class="tag">正在整理</span>
+    范围：全部收藏 1648 条 · 可移 6 · 拿不准 8
+    <span style="margin-left:auto"></span>
+    <button class="btn ghost" data-exit>退出整理</button></div>`;
+}
+
+function render(){
+  const stage = document.getElementById('stage');
+  const v = state.variant;
+  const showPanel = (v === 'A' || v === 'C');
+  const organizer = v === 'C' && state.view !== 'organize' && state.toolOpen;
+  stage.innerHTML = `<div class="app${showPanel?'':' no-panel'} ${v==='L'?'legacy':''}">
+      <aside class="rail">${railHTML()}</aside>
+      <main class="main">${modebarHTML()}${mainHTML()}</main>
+      ${showPanel?`<aside class="panel">${panelHTML()}</aside>`:''}
+      ${v==='B'?sheetHTML():''}
+    </div>`;
+
+  document.querySelectorAll('.tab').forEach(t=>t.setAttribute('aria-selected', String(t.dataset.variant===v)));
+  const notes = {
+    A:'<b>A · 工具变视图</b>：整理变成主区里的一个视图，左栏永远只有一个实心选中；右侧只放条目详情。',
+    B:'<b>B · 抽屉带上下文</b>：保留浮层，但浮层自带标题与“作用于哪批数据”，左栏工具行用“已展开”样式，不与选中争色。',
+    C:'<b>C · 模式条</b>：主区顶部常驻一条“正在做什么”，左栏只负责切换位置；适合以后工具变多。',
+    L:'<b>对照</b>：现在打开整理时，视图与工具同时实心选中；再加上鼠标 hover，看起来像三项都在“选中”。',
+  };
+  document.getElementById('legend').innerHTML = notes[v];
+
+  stage.querySelectorAll('[data-view]').forEach(b=>{
+    b.addEventListener('click',()=>{ state.view=b.dataset.view; state.toolOpen=false; render(); });
+  });
+  stage.querySelectorAll('[data-tool]').forEach(b=>{
+    b.addEventListener('click',()=>{
+      if (state.variant==='B' || state.variant==='C') { state.toolOpen=!state.toolOpen; render(); }
+      else { state.view='organize'; state.toolOpen=true; render(); }
+    });
+  });
+  stage.querySelectorAll('[data-row]').forEach(r=>{
+    r.addEventListener('click',()=>{ state.selected=r.dataset.row; render(); });
+  });
+  stage.querySelectorAll('[data-exit]').forEach(b=>{
+    b.addEventListener('click',()=>{ state.toolOpen=false; render(); });
+  });
+  stage.querySelectorAll('[data-close]').forEach(b=>{
+    b.addEventListener('click',()=>{ state.toolOpen=false; render(); });
+  });
+}
+
+document.querySelectorAll('.tab').forEach(t=>t.addEventListener('click',()=>{
+  state.variant=t.dataset.variant;
+  state.view = t.dataset.variant==='L' ? 'all' : (state.view==='organize' && t.dataset.variant==='B' ? 'all' : state.view);
+  state.toolOpen = false;
+  render();
+}));
+
+document.addEventListener('keydown',(e)=>{
+  if(e.key==='Escape' && state.toolOpen){ state.toolOpen=false; render(); }
+});
+
+render();
+</script>
+</body>
+</html>
