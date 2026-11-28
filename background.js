@@ -44,6 +44,7 @@ const WEEKLY_ALARM = 'guizang-weekly-check';
 let organize = { running: false, stage: '', done: 0, total: 0 };
 let applyCtl = { running: false, stop: false };
 let orgCtl = { stop: false };   // 计划生成阶段的中断开关
+let aiCtl = { stop: false };    // AI 归类的中断开关
 
 /** 正在跑的检测，只存在内存里；页面靠它显示进度 */
 let scan = { running: false, done: 0, total: 0, startedAt: 0 };
@@ -951,20 +952,37 @@ const handlers = {
     const state = await loadState();
     const { items, scheme, settings, learned } = state;
     const wanted = new Set(ids);
-    const targets = items.filter((it) => wanted.has(it.id)).slice(0, 80);
+    // 不再截成 80 条：选中多少判多少。本地规则先跑，只有没把握的才送模型。
+    const targets = items.filter((it) => wanted.has(it.id));
     if (!scheme.length) throw new Error('没找到可用分类。先在书签栏建几个类目文件夹（例如「500 人工智能」）。');
     if (!targets.length) return { suggestions: [] };
 
+    aiCtl = { stop: false };
     broadcast({ type: 'ai:start', total: targets.length });
-    const pageMeta = hasModel(settings) ? await enrichWeakHeads(targets, settings) : {};
+
+    // 1) 本地关键词 + 历史偏好：零成本，先定一批
+    const base = classifyHeuristic(targets, scheme, { schemeId: settings.schemeId, learned });
+    const merged = new Map(base.map((s) => [s.id, s]));
+    const lowConf = targets.filter((it) => ((merged.get(it.id) || {}).conf || 0) < 0.55);
+
+    // 2) 只把没把握的送模型（可选：没有模型就纯本地）
     const stats = {};
-    const list = await classify(
-      targets,
-      scheme,
-      settings,
-      (done, total) => broadcast({ type: 'ai:progress', done, total }),
-      { learned, pageMeta, stats },
-    );
+    let list = base;
+    if (hasModel(settings) && lowConf.length) {
+      const pageMeta = await enrichWeakHeads(lowConf, settings);
+      const refined = await classify(
+        lowConf,
+        scheme,
+        settings,
+        (done, total) => broadcast({ type: 'ai:progress', done, total }),
+        { learned, pageMeta, stats, shouldStop: () => aiCtl.stop },
+      );
+      for (const s of refined) merged.set(s.id, s);
+      list = [...merged.values()];
+    }
+    // 建议目标=当前分类的不产生动作，丢掉（与 classify() 里的过滤保持一致）
+    const byId = new Map(targets.map((it) => [it.id, it]));
+    list = list.filter((s) => (byId.get(s.id) || {}).code !== s.code);
     const failed = stats.failed || [];
 
     // 有失败批次也先把成功的写进去：别让「跑了一半」变成「什么都没留下」
@@ -978,6 +996,8 @@ const handlers = {
     if (!list.length && failed.length) throw new Error('模型没走通：' + failed[0].error);
     return { suggestions: list, failed, source: hasModel(settings) ? 'model' : 'heuristic' };
   },
+
+  'ai:stop': async () => { aiCtl.stop = true; return { stopping: true }; },
 
   'ai:cleanTitles': async ({ ids = [] }) => {
     const state = await loadState();

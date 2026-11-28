@@ -2041,7 +2041,9 @@ function aiPanel() {
   const busy = S.aiBusy
     ? `<div class="sg"><div class="sg-why">正在生成建议 ${S.aiProgress ? `${S.aiProgress.done}/${S.aiProgress.total}` : '…'}</div>
        <div class="scan-track" style="margin-top:8px">
-       <div class="scan-fill" style="width:${S.aiProgress ? Math.round(S.aiProgress.done / S.aiProgress.total * 100) : 8}%"></div></div></div>`
+       <div class="scan-fill" style="width:${S.aiProgress ? Math.round(S.aiProgress.done / S.aiProgress.total * 100) : 8}%"></div></div>
+       <div class="sg-why" style="margin-top:6px">先跑本地规则，只有没把握的才送模型；可以先停，已拿到的建议会保留。</div>
+       <button class="btn btn-line btn-sm" data-ai-stop style="margin-top:8px">停止</button></div>`
     : '';
 
   const note = S.pendingNote
@@ -2065,7 +2067,7 @@ function aiPanel() {
     <div class="insp-body">
       ${body || `<div class="empty" style="padding:22px 14px">
         <div class="empty-hint">${S.aiReady
-          ? `给当前视图的 ${Math.min(visible().length, 80)} 条生成建议${visible().length > 80 ? `（当前视图共 ${visible().length} 条，一次最多 80 条）` : ''}，先看看它怎么判。`
+          ? `给当前视图的 ${visible().length} 条生成建议，先看看它怎么判。`
           : '还没配置模型。可以在设置里填 API Key，或者先用本地关键词规则试跑。'}</div>
       </div>`}
     </div>
@@ -2143,6 +2145,10 @@ function wireAi() {
     }
   }
 
+  box.querySelector('[data-ai-stop]')?.addEventListener('click', async () => {
+    await send('ai:stop').catch(() => {});
+    toast('已请求停止，等这一批返回后收尾');
+  });
   box.querySelectorAll('[data-locate]').forEach((el) => {
     el.addEventListener('click', () => {
       $(`[data-id="${el.dataset.locate}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
@@ -2208,7 +2214,7 @@ async function overrideSuggestion(id, code) {
 
 async function runAi(ids) {
   if (S.aiBusy) return;
-  const scope = ids.slice(0, 80);
+  const scope = ids;
   if (!scope.length) return toast('当前视图没有可归类的书签');
   S.aiBusy = true;
   S.aiProgress = { done: 0, total: scope.length };

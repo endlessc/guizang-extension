@@ -505,7 +505,7 @@ async function handle(msg) {
   if (type === 'ai:run') {
     const st = stateLoad();
     const set = new Set(msg.ids);
-    const targets = st.items.filter((it) => set.has(it.id)).slice(0, 80);
+    const targets = st.items.filter((it) => set.has(it.id));
     emit({ type: 'ai:start', total: targets.length });
     const list = await classify(targets, st.scheme, settings);
     await new Promise((r) => setTimeout(r, 420));
@@ -514,6 +514,8 @@ async function handle(msg) {
     emit({ type: 'state:changed' });
     return { suggestions: list, source: 'heuristic' };
   }
+
+  if (type === 'ai:stop') return { stopping: true };
 
   if (type === 'ai:accept') {
     // 与真实后台一致：逐组执行，某组的目标类目找不到不影响其它组
@@ -1033,7 +1035,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.13.0-mock' }),
+      getManifest: () => ({ version: '0.14.0-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },
