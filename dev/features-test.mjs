@@ -15,7 +15,7 @@ import { normalizeBase } from '../lib/llm.js';
 import { classifyHeuristic, classifyWithModel, parseSubNames, parseSubAssign, buildSubAssignMessages, PROMPT_VERSION, SELECTIVE_THRESHOLD } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 import { sampleOps } from '../lib/organize.js';
-import { parseTree, treeOrder, familyOf } from '../lib/tree.js';
+import { parseTree, treeOrder, familyOf, groupByCodeShown } from '../lib/tree.js';
 
 let passed = 0;
 function test(name, fn) {
@@ -409,7 +409,7 @@ console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
   console.log('  ✓ 解析失败也记进 stats');
   assert.equal(stats2.batches, 2);
   console.log('  ✓ stats 记录总批数');
-  passed += 11;
+  passed += 14;
 }
 
 console.log('9. 建议血缘：模型与提示词版本（lib/llm.js）');
@@ -473,6 +473,21 @@ console.log('10. 拆二级后的父子关系与展示顺序（lib/tree.js）');
   const cyc = treeOrder([{ code: 'A' }, { code: 'B' }], { A: 'B', B: 'A' });
   assert.equal(cyc.length, 2, '父子关系成环时也不能漏画');
   console.log('  ✓ 父子关系成环时也不漏画');
+
+  // 全库分页：组头要报「本组共几条」，而不是「前 400 行里落了几条」
+  const many = Array.from({ length: 65 }, (_, i) => ({ id: 'a' + i, code: '010' }));
+  const few = Array.from({ length: 3 }, (_, i) => ({ id: 'b' + i, code: '020' }));
+  const all = [...many, ...few];
+  const scheme = [{ code: '010', name: '开发工具' }, { code: '020', name: '网盘' }];
+  const truncated = new Set(many.slice(0, 9).map((it) => it.id));
+  const g1 = groupByCodeShown(all, scheme, truncated);
+  assert.deepEqual(g1.map((g) => [g.code, g.rows.length, g.total]), [['010', 9, 65]], '只画已显示的行，但报全组总数');
+  console.log('  ✓ 组头报全组总数（9 / 共 65）');
+  const g2 = groupByCodeShown(all, scheme, new Set(all.map((it) => it.id)));
+  assert.deepEqual(g2.map((g) => g.total), [65, 3], '全部显示时两组都在');
+  console.log('  ✓ 全部显示时不丢组');
+  assert.deepEqual(groupByCodeShown(all, scheme, new Set()).length, 0, '一行都没显示时不画空组');
+  console.log('  ✓ 不画空组');
 
   // 安全恢复会建「归藏恢复 …」容器；里面的副本不该再被当成第二套类目
   const withRestore = [{

@@ -5,7 +5,7 @@ import {
   TONE, PROBLEM, SUSPECT, statusMark, onBroadcast, debounce, checkProto,
   THEMES, getTheme, setThemeAnimated, confirmDialog,
 } from './shared.js';
-import { groupByCode, treeOrder, familyOf } from '../lib/tree.js';
+import { groupByCode, groupByCodeShown, treeOrder, familyOf } from '../lib/tree.js';
 import { groupOps, UNSURE_THRESHOLD } from '../lib/organize.js';
 import { findDuplicates, duplicateIdSet, removableCount } from '../lib/dedup.js';
 import { filterAndScore, parseQuery } from '../lib/search.js';
@@ -1511,13 +1511,18 @@ function renderList() {
   } else if (flat) {
     body = wrapItems(shown.map((it, i) => itemRenderer(it, { showCat, rowIdx: i + 1 })).join(''));
   } else {
-    const groups = groupByCode(shown, hasSubs ? treeOrder(S.folderScheme, S.parentOf) : S.folderScheme);
+    // 用全量算组头总数，只渲染前 400 行；否则「左栏 65 / 组头 9」会像丢数据
+    const shownIds = new Set(shown.map((it) => it.id));
+    const groups = groupByCodeShown(rows, hasSubs ? treeOrder(S.folderScheme, S.parentOf) : S.folderScheme, shownIds);
     body = groups.map((g) => {
       const bad = g.rows.filter((it) => PROBLEM.has((S.health[it.id] || {}).status)).length;
+      const partial = g.rows.length < g.total;
       return `<div class="group-head">
         <span class="group-num">${esc(g.code)}</span>
         <span class="group-name">${esc(g.name)}</span>
-        <span class="group-count">${g.rows.length} 条</span>
+        <span class="group-count"${partial ? ` title="本组共 ${g.total} 条，当前显示 ${g.rows.length} 条；点下方「加载更多」继续"` : ''}>${
+          partial ? `${g.rows.length} / 共 ${g.total} 条` : `${g.total} 条`
+        }</span>
         <span class="group-rule"></span>
         ${bad ? `<span class="group-bad">${bad} 条失效</span>` : ''}
       </div>` + wrapItems(g.rows.map((it, i) => itemRenderer(it, { showCat: false, rowIdx: i + 1 })).join(''));

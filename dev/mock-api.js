@@ -1213,7 +1213,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.27.0-mock' }),
+      getManifest: () => ({ version: '0.27.1-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },
