@@ -417,7 +417,9 @@ async function runOrganize(scope = 'inbox', folderCode = '', limit = MAX_CANDIDA
     }
 
     // 只把「本地没把握」的送去模型
-    const lowConf = picked.filter((it) => (suggestions[it.id].conf || 0) < 0.55).slice(0, MAX_CANDIDATES);
+    // 候选已经被 limit 截过（200 / 500 / 1000 / 全部），这里不再二次截断，
+    // 否则「全部」实际只有前 200 条进模型，其余只走本地规则。
+    const lowConf = picked.filter((it) => (suggestions[it.id].conf || 0) < 0.55);
     if (hasModel(settings) && lowConf.length) {
       organize.stage = 'model';
       organize.total = lowConf.length;

@@ -1773,8 +1773,11 @@ function organizePanel() {
     const perBatch = pr.batchSize || 0;
     // 把「本轮总数」和「每批条数」分开写：193 是本轮要判的总条数，一批只有 24 条
     const batchLine = pr.stage === 'model' && pr.batch && pr.batches
-      ? `第 ${pr.batch}/${pr.batches} 批（${perBatch ? `每批 ${perBatch} 条，` : ''}本轮共 ${pr.total || '…'} 条）· 本批已等 ${batchWaited} 秒`
+      ? `第 ${pr.batch}/${pr.batches} 批（${perBatch ? `每批 ${perBatch} 条，` : ''}需模型判断 ${pr.total || '…'} 条）· 本批已等 ${batchWaited} 秒`
       : '正在预筛书签';
+    const scopeLine = pr.candidates
+      ? `本轮候选 ${pr.candidates} 条，其中 ${pr.total || '…'} 条本地没把握、需要模型判断`
+      : '';
     const slowHint = pr.stage === 'model' && batchWaited > 90
       ? '（单批上限 120 秒，超时会自动重试一次）'
       : '';
@@ -1782,7 +1785,8 @@ function organizePanel() {
       <div class="plan-busy">
         <div class="plan-busy-line">${pr.stage === 'model' ? '模型正在判断' : '正在预筛'} ${pr.done}/${pr.total || '…'}</div>
         <div class="scan-track"><div class="scan-fill" style="width:${pct}%"></div></div>
-        <div class="plan-empty-hint" style="margin-top:10px">${batchLine}${slowHint}</div>
+        <div class="plan-empty-hint" style="margin-top:10px">${scopeLine}</div>
+        <div class="plan-empty-hint">${batchLine}${slowHint}</div>
         <div class="plan-empty-hint">已处理 ${pr.done}/${pr.total || '…'} 条，整轮已用 ${waited} 秒。中途停止会保留已拿到的建议。</div>
         <button class="btn btn-line btn-sm" data-stop-plan style="margin-top:10px">停止生成</button>
       </div>
@@ -2964,7 +2968,8 @@ onBroadcast((msg) => {
   if (msg.type === 'organize:progress') {
     S.planProgress = {
       stage: msg.stage, done: msg.done, total: msg.total,
-      batch: msg.batch || 0, batches: msg.batches || 0, batchSize: msg.batchSize || 0, at: msg.at || Date.now(),
+      batch: msg.batch || 0, batches: msg.batches || 0, batchSize: msg.batchSize || 0,
+      candidates: msg.candidates || (S.planProgress && S.planProgress.candidates) || 0, at: msg.at || Date.now(),
       batchAt: msg.batch ? (msg.at || Date.now()) : (S.planProgress && S.planProgress.batchAt) || 0,
     };
     if (msg.at) S.planStartedAt = S.planStartedAt || msg.at;

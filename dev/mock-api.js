@@ -742,12 +742,12 @@ async function handle(msg) {
       for (let b = 1; b <= batches; b += 1) {
         emit({
           type: 'organize:progress', stage: 'model', batch: b, batches, batchSize: 24,
-          done: Math.min(total, (b - 1) * 24), total, at: Date.now(),
+          done: Math.min(total, (b - 1) * 24), total, candidates: 1648, at: Date.now(),
         });
         await new Promise((r) => setTimeout(r, 1200));
         emit({
           type: 'organize:progress', stage: 'model', batch: b, batches, batchSize: 24,
-          done: Math.min(total, b * 24), total, at: Date.now(),
+          done: Math.min(total, b * 24), total, candidates: 1648, at: Date.now(),
         });
         await new Promise((r) => setTimeout(r, 300));
       }
@@ -1031,7 +1031,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.10.3-mock' }),
+      getManifest: () => ({ version: '0.10.4-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },
