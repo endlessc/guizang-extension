@@ -1763,6 +1763,9 @@ function organizePanel() {
           <button type="button" class="seg-tab${S.orgScope === 'all' ? ' is-active' : ''}" data-org-scope="all">全库巡检错放</button>
           <button type="button" class="seg-tab${S.orgScope === 'scheme' ? ' is-active' : ''}" data-org-scope="scheme">按方案建档</button>
         </div>
+        ${S.orgScope === 'scheme' && !(S.settings && S.settings.schemeId)
+          ? '<div class="scheme-warn" style="margin:8px 0">还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成。</div>'
+          : ''}
         <div class="plan-empty-hint">${ready
           ? (S.orgScope === 'all'
               ? '全库巡检：优先挑「还不在本方案类目里」的书签（每次最多 200 条），归位后它们就离开候选池，再点一次自动接着下一批；方案内错放也会一并列出。确认无误且自动备份后才动手。'

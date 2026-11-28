@@ -917,6 +917,19 @@ async function handle(msg) {
     return planInstall([JSON.parse(JSON.stringify(root))], scheme);
   }
 
+  if (type === 'scheme:select') {
+    const scheme = getScheme(msg.schemeId, settings.customSchemes || []);
+    if (!scheme) throw new Error('没有这个方案');
+    let dropped = 0;
+    if ((settings.schemeId || '') !== msg.schemeId) {
+      dropped = Object.keys(pending).length;
+      if (dropped) for (const k of Object.keys(pending)) delete pending[k];
+    }
+    settings = { ...settings, schemeId: msg.schemeId };
+    emit({ type: 'state:changed' });
+    return { selected: true, schemeId: msg.schemeId, dropped };
+  }
+
   if (type === 'scheme:install') {
     const scheme = getScheme(msg.schemeId, settings.customSchemes || []);
     if (!scheme) throw new Error('没有这个方案');
@@ -994,7 +1007,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.9.1-mock' }),
+      getManifest: () => ({ version: '0.9.2-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

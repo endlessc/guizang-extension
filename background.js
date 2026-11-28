@@ -391,7 +391,7 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
     const { items, scheme, settings, learned } = state;
     // 按方案建档：判定用方案定义的完整类目（不只书签栏里已建的那几个）
     const full = scope === 'scheme' ? getScheme(settings.schemeId, settings.customSchemes || []) : null;
-    if (scope === 'scheme' && !full) throw new Error('先在设置里选一套方案，再按方案建档');
+    if (scope === 'scheme' && !full) throw new Error('还没选用方案：去设置页点一张方案卡，选「仅选用（不建目录）」，再回来生成');
     if (!scheme.length && !full) throw new Error('还没有分类目录，先到设置里装一套方案');
     const targets = full
       ? full.folders.map((f) => ({ code: f.code, name: f.name, hint: f.hint || '' }))
@@ -1297,6 +1297,19 @@ const handlers = {
   'backup:clear': async () => clearBackups(),
 
   'backup:check': async ({ planId = '', planAt = 0 }) => checkBackupReady(await listBackups(), { id: planId, at: planAt }),
+
+  /** 只把某套方案设为「当前方案」，不建任何目录：给「按方案建档」这类只看类目定义的场景用 */
+  'scheme:select': async ({ schemeId }) => {
+    const scheme = getScheme(schemeId, (await readSettings()).customSchemes || []);
+    if (!scheme) throw new Error('没有这个方案');
+    const settings = await readSettings();
+    const { pending: curPending = {} } = await chrome.storage.local.get('pending');
+    const sw = onSchemeChange(settings.schemeId, schemeId, curPending);
+    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
+    await chrome.storage.local.set({ settings: { ...settings, schemeId } });
+    broadcast({ type: 'state:changed' });
+    return { selected: true, schemeId, dropped: sw.dropped };
+  },
 
   'scheme:install': async ({ schemeId }) => {
     const settings = await readSettings();

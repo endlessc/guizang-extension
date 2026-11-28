@@ -515,6 +515,7 @@ async function previewScheme(id, schemes = []) {
             plan.conflict.length ? ' disabled' : ''
           }>安装并启用</button>
           <button type="button" class="btn btn-line btn-sm" id="btnTrimScheme">按我的收藏裁剪</button>
+          <button type="button" class="btn btn-ghost btn-sm" id="btnSelectScheme">仅选用（不建目录）</button>
           ${meta && meta.custom ? `
             <button type="button" class="btn btn-line btn-sm" id="btnExportScheme">导出此方案 JSON</button>
             <button type="button" class="btn btn-danger-ghost btn-sm" id="btnDeleteScheme">删除方案</button>
@@ -522,10 +523,12 @@ async function previewScheme(id, schemes = []) {
         </div>
         <div class="hint" style="margin-top:6px">「安装并启用」把方案里 ${
           s.missing + s.exists
-        } 个类目原样建全；「按我的收藏裁剪」先用本地规则把你的收藏铺进这套编码，只留下真有收藏的类目，做成草稿等你审定。</div>
+        } 个类目原样建全；「按我的收藏裁剪」先用本地规则把你的收藏铺进这套编码，只留下真有收藏的类目，做成草稿等你审定；
+        「仅选用」只把方案设为当前判定依据，一个目录都不建——书库里的「按方案建档」用它。</div>
       </div>`;
     $('#btnInstall')?.addEventListener('click', () => installScheme(id));
     $('#btnTrimScheme')?.addEventListener('click', () => trimScheme(id));
+    $('#btnSelectScheme')?.addEventListener('click', () => selectScheme(id));
     $('#btnExportScheme')?.addEventListener('click', () => {
       download(`guizang-scheme-${meta.id}.json`, JSON.stringify(meta, null, 2));
       toast('已导出自定义方案');
@@ -588,6 +591,18 @@ function wireCustomSchemes() {
       toast('导入失败：' + e.message);
     }
   });
+}
+
+async function selectScheme(id) {
+  try {
+    const r = await send('scheme:select', { schemeId: id });
+    await renderPicker();
+    toast(r.dropped
+      ? `已选用：${id}；换了方案，${r.dropped} 条旧建议已作废`
+      : '已选用这套方案（没有建任何目录）');
+  } catch (err) {
+    toast(err.message);
+  }
 }
 
 async function trimScheme(id) {
