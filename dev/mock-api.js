@@ -13,6 +13,7 @@ import { flattenTree, checkBackupReady, validateSnapshot, rebuildSubtree } from 
 import { PROTO } from '../lib/version.js';
 import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS } from '../lib/llm.js';
 import { runAccept } from '../lib/pending.js';
+import { DEWEY_HINTS } from '../lib/schemes.js';
 import { createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme } from '../lib/taxonomy.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
@@ -554,7 +555,7 @@ async function handle(msg) {
   if (type === 'taxonomy:design') {
     // 预览层不调模型：直接拿现有方案当骨架，验证「抽样→铺全量→剪枝」这条链路
     const st = stateLoad();
-    const skeleton = st.scheme.slice(0, 6).map((f) => ({ name: f.name, hint: f.hint || '', children: [] }));
+    const skeleton = st.scheme.map((f) => ({ name: f.name, hint: f.hint || DEWEY_HINTS[f.code] || '', children: [] }));
     const built = buildTaxonomyFromSkeleton(skeleton, {});
     const { map, unmatched } = assignByRules(st.items, built.nodes);
     const nodes = built.nodes.map((n) => ({ ...n, members: map[n.code] || [] }));
@@ -564,7 +565,7 @@ async function handle(msg) {
       params: built.params,
       source: { items: st.items.length, sampled: 0, unmatched: unmatched.length },
     });
-    const pruned = pruneTaxonomy(draft, { minPerCategory: 3 });
+    const pruned = pruneTaxonomy(draft, { minPerCategory: 2 });
     taxoDraft = { ...pruned.taxonomy, status: 'draft' };
     emit({ type: 'taxonomy:start' });
     emit({ type: 'taxonomy:done', draft: taxoDraft });

@@ -120,6 +120,18 @@
     </section>
 
     <section class="card">
+      <div class="card-kicker">因书立目</div>
+      <h2>从收藏里归纳分类法</h2>
+      <p class="hint">按域名分层抽 200 条交给模型归纳两级骨架，再用规则铺到全部收藏，装不下的类目自动剪掉。产出只是草稿：改名、勾掉不要的类目之后，点「落成目录」才会真的建文件夹。</p>
+      <div class="tx-status" id="txStatus"></div>
+      <div class="opt-row">
+        <button type="button" class="btn btn-primary btn-sm" id="btnTxDesign">开始归纳</button>
+        <button type="button" class="btn btn-ghost btn-sm" id="btnTxCancel" hidden>放弃草稿</button>
+      </div>
+      <div id="txBody"></div>
+    </section>
+
+    <section class="card">
       <div class="card-kicker">个人习惯沉淀</div>
       <h2>改判记忆规则</h2>
       <p class="hint">当你在 AI 归类或整理计划中手动「改判」特定域名时，归藏会自动记住你的偏好，后续本地规则优先命中，并作为示例提示给大模型（公共平台如 GitHub / 知乎不会绑定整站）。</p>

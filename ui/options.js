@@ -61,6 +61,8 @@ async function boot() {
   $('#form').addEventListener('submit', save);
   $('#clearHealth').addEventListener('click', () => clear('health:clear', '检测结果'));
   $('#clearPending').addEventListener('click', () => clear('ai:ignoreAll', '归类建议'));
+  wireTaxonomy();
+  await renderTaxonomy().catch(() => {});
   $('#openShortcuts')?.addEventListener('click', () => chrome.tabs.create({ url: 'chrome://extensions/shortcuts' }));
   $('#exportMd')?.addEventListener('click', exportMarkdown);
   $('#exportHtml')?.addEventListener('click', exportHtml);
@@ -172,6 +174,154 @@ async function renderPermissions() {
 }
 
 /* ── 主题配色 ─────────────────────────────────── */
+
+/* ── 分类法设计 ───────────────────────────── */
+
+let txDraft = null;
+let txBusy = false;
+let txConflict = [];   // 落成目录时的冲突单独存：草稿里没这个字段，重渲染会丢
+
+async function renderTaxonomy() {
+  const status = $('#txStatus');
+  const body = $('#txBody');
+  const design = $('#btnTxDesign');
+  const cancel = $('#btnTxCancel');
+  if (!status || !body) return;
+
+  if (txBusy) {
+    status.innerHTML = '正在归纳：抽样 → 模型归纳骨架 → 铺全量 → 剪枝…';
+    design.disabled = true;
+    cancel.hidden = true;
+    return;
+  }
+
+  const { draft } = await send('taxonomy:load').catch(() => ({ draft: null }));
+  txDraft = draft || null;
+  design.disabled = false;
+
+  if (!txDraft) {
+    status.innerHTML = '还没有草稿。归纳只读你的收藏，不会改动任何书签。';
+    body.innerHTML = '';
+    cancel.hidden = true;
+    return;
+  }
+
+  const s = txDraft.stats || {};
+  const state = txDraft.status === 'approved' ? '已审定，等落成目录'
+    : txDraft.status === 'installed' ? '已落成目录' : '草稿';
+  status.innerHTML = `<b>${state}</b> · ${esc(txDraft.name || '未命名')} · `
+    + `<b>${s.categories || 0}</b> 个类目 · 最深 <b>${s.maxDepth || 0}</b> 层 · `
+    + `只有一条的类目 <b>${s.singles || 0}</b> 个 · 覆盖 <b>${s.members || 0}</b> 条`
+    + (txDraft.source && txDraft.source.unmatched ? ` · 未覆盖 <b>${txDraft.source.unmatched}</b> 条` : '')
+    + (txDraft.dropped ? ` · 剪掉 <b>${txDraft.dropped}</b> 条` : '');
+
+  cancel.hidden = false;
+  const editable = txDraft.status === 'draft';
+  const rows = [...txDraft.nodes]
+    .sort((a, b) => String(a.code).localeCompare(String(b.code)))
+    .map((n) => `
+      <div class="tx-row${n.parent ? ' is-child' : ''}" data-code="${esc(n.code)}">
+        ${editable ? `<input type="checkbox" class="tx-del" data-del="${esc(n.code)}" title="勾掉就删除这一类" />` : '<span style="width:14px"></span>'}
+        <span class="tx-code">${esc(n.code)}</span>
+        ${editable
+          ? `<input class="tx-name" data-name="${esc(n.code)}" value="${esc(n.name)}" maxlength="20" spellcheck="false" />`
+          : `<span class="tx-name" style="border:0">${esc(n.name)}</span>`}
+        <span class="tx-count">${n.total || 0}</span>
+      </div>`)
+    .join('');
+
+  const conflicts = txConflict.length
+    ? `<div class="scheme-warn">这些已有目录和草稿撞车，先改名或换方案：<br>${
+      txConflict.map((c) => `「${esc(c.code)}」现有为「${esc(c.got)}」，草稿要「${esc(c.want)}」`).join('<br>')
+    }</div>`
+    : '';
+
+  body.innerHTML = `
+    <div class="tx-list">${rows || '<div class="hint">草稿是空的。</div>'}</div>
+    ${conflicts}
+    <div class="opt-row tx-actions">
+      ${editable
+        ? '<button type="button" class="btn btn-primary btn-sm" id="btnTxApprove">保存修改并审定</button>'
+        : txDraft.status === 'approved'
+          ? '<button type="button" class="btn btn-primary btn-sm" id="btnTxInstall">落成目录并启用</button>'
+          : '<span class="hint">已落成目录，可以在上面切换方案或重新归纳。</span>'}
+    </div>`;
+
+  $('#btnTxApprove')?.addEventListener('click', approveTx);
+  $('#btnTxInstall')?.addEventListener('click', installTx);
+}
+
+async function approveTx() {
+  if (!txDraft) return;
+  const renames = {};
+  document.querySelectorAll('.tx-name[data-name]').forEach((el) => {
+    const code = el.dataset.name;
+    const old = (txDraft.nodes.find((n) => n.code === code) || {}).name || '';
+    const next = el.value.trim();
+    if (next && next !== old) renames[code] = next;
+  });
+  const removed = [...document.querySelectorAll('.tx-del:checked')].map((el) => el.dataset.del);
+  const msg = $('#txStatus');
+  try {
+    txDraft = await send('taxonomy:approve', { renames, removed });
+    await renderTaxonomy();
+  } catch (err) {
+    if (msg) msg.innerHTML = `<span class="test-msg bad">${esc(err.message)}</span>`;
+  }
+}
+
+async function installTx() {
+  const msg = $('#txStatus');
+  try {
+    const r = await send('taxonomy:install');
+    if (!r.installed) {
+      txConflict = r.conflict || [];
+      await renderTaxonomy();
+      return;
+    }
+    txConflict = [];
+    toast(`已落成目录：新建 ${r.created} 个，复用 ${r.reused} 个`);
+    const summary = await send('summary:load');
+    renderScheme(summary.scheme);
+    await renderPicker();
+    await renderTaxonomy();
+  } catch (err) {
+    if (msg) msg.innerHTML = `<span class="test-msg bad">${esc(err.message)}</span>`;
+  }
+}
+
+function wireTaxonomy() {
+  $('#btnTxDesign')?.addEventListener('click', async () => {
+    txBusy = true;
+    txConflict = [];
+    await renderTaxonomy();
+    try {
+      await send('taxonomy:design', { sampleSize: 200 });
+    } catch (err) {
+      txBusy = false;
+      await renderTaxonomy();
+      toast(err.message);
+    }
+  });
+  $('#btnTxCancel')?.addEventListener('click', async () => {
+    await send('taxonomy:cancel').catch(() => {});
+    txDraft = null;
+    await renderTaxonomy();
+  });
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (!msg || !msg.type) return;
+    if (msg.type === 'taxonomy:done') {
+      txBusy = false;
+      renderTaxonomy().catch(() => {});
+      return;
+    }
+    if (msg.type === 'taxonomy:error') {
+      txBusy = false;
+      toast(msg.message || '归纳失败');
+      renderTaxonomy().catch(() => {});
+    }
+  });
+}
 
 function renderThemes() {
   const current = getTheme();
