@@ -18,7 +18,7 @@ import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme,
   planExtend, applyExtend, acceptProposals, coverageOf, nodesFromScheme,
 } from '../lib/taxonomy.js';
-import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, foldersForCodes } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
 import {
   normalizeMeta, emptyLearned, recordOverride, removeLearnedDomain,
@@ -768,13 +768,18 @@ async function handle(msg) {
       const meta = await handle({ type: 'backup:run', planId: plan.id });
       emit({ type: 'organize:backup-made', meta });
     }
-    // 按方案建档：缺的目标目录先建出来（真机同样在研究 runApply 里做）
+    // 按方案建档：缺的目标目录先建出来（含父级，父在前）——真机同样在研究 runApply 里做
     const bar = findNode('1');
-    for (const code of [...new Set(ops.map((o) => o.to.code))]) {
-      const exists = [...bar.children].some((c) => !c.url && String(c.title).startsWith(code + ' '));
-      if (exists) continue;
-      const name = (plan.scheme.find((f) => f.code === code) || {}).name || code;
-      bar.children.push({ id: 'f' + code, title: `${code} ${name}`, parentId: bar.id, children: [] });
+    const findFolder = (code) => {
+      let hit = null;
+      walk(root, (n) => { if (!hit && !n.url && n.title && String(n.title).startsWith(code + ' ')) hit = n; });
+      return hit;
+    };
+    for (const f of foldersForCodes([...new Set(ops.map((o) => o.to.code))], plan.scheme)) {
+      if (findFolder(f.code)) continue;
+      const parent = f.parent ? findFolder(f.parent) : bar;
+      const host = parent || bar;
+      host.children.push({ id: 'f' + f.code, title: `${f.code} ${f.name}`, parentId: host.id, children: [] });
     }
 
     emit({ type: 'organize:apply-start', total: ops.length });
@@ -1008,7 +1013,7 @@ export async function install() {
       },
       onMessage: { addListener: (fn) => listeners.push(fn) },
       getURL: (p) => p,
-      getManifest: () => ({ version: '0.10.0-mock' }),
+      getManifest: () => ({ version: '0.10.1-mock' }),
       openOptionsPage: () => { location.href = 'options.html'; },
       lastError: null,
     },

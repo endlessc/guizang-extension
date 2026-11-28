@@ -9,7 +9,7 @@
  */
 
 import {
-  preselect, buildPlan, groupOps, dropOp, overrideOp,
+  preselect, buildPlan, groupOps, dropOp, overrideOp, foldersForCodes,
   UNSURE_THRESHOLD, MAX_CANDIDATES,
 } from '../lib/organize.js';
 
@@ -84,7 +84,7 @@ console.log('状态判定');
   eq('统计', plan.stats, { total: 4, ready: 1, unsure: 1, blocked: 1, skip: 1 });
   eq('目标类目带名字', plan.ops.find((o) => o.id === '1').to, { code: '100', name: '编程与后端', missing: false });
   eq('来源保留', plan.ops.find((o) => o.id === '1').source, 'model');
-  eq('scheme 快照只留 code+name', Object.keys(plan.scheme[0]).sort(), ['code', 'name']);
+  eq('scheme 快照保留 code/name/parent', Object.keys(plan.scheme[0]).sort(), ['code', 'name', 'parent']);
 }
 
 console.log('按方案建档：缺的目录标出来，执行时再建');
@@ -104,6 +104,22 @@ console.log('按方案建档：缺的目录标出来，执行时再建');
   eq('将新建的目录清单去重且带名字', plan.created, [
     { code: '100', name: '编程与后端' }, { code: '500', name: '人工智能' },
   ]);
+  // 分批跑时可能只有子类有可执行条目：父目录必须一起补建，否则子目录没处放
+  const tree = [
+    { code: '100', name: '编程与后端', parent: null },
+    { code: '110', name: 'Java', parent: '100' },
+    { code: '111', name: 'JVM', parent: '110' },
+    { code: '200', name: '资讯', parent: null },
+  ];
+  eq('父目录一并展开且父在前', foldersForCodes(['111', '200'], tree), [
+    { code: '100', name: '编程与后端', parent: null },
+    { code: '200', name: '资讯', parent: null },
+    { code: '110', name: 'Java', parent: '100' },
+    { code: '111', name: 'JVM', parent: '110' },
+  ]);
+  eq('重复 code 只展开一次', foldersForCodes(['110', '111', '110'], tree).map((f) => f.code), ['100', '110', '111']);
+  eq('方案里没有的 code 兜底用 code 当名字', foldersForCodes(['999'], tree), [{ code: '999', name: '999', parent: null }]);
+
   const plain = buildPlan({ items, scheme, scope: 'all', suggestions, blocked: new Set(), now: 9 });
   eq('不传 existing 时视为都已存在', plain.created.length, 0);
 

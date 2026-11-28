@@ -18,7 +18,7 @@ import {
   classify, classifyHeuristic, classifyWithModel, designSkeleton, cleanTitles,
   hasModel, testConnection, DEFAULT_SETTINGS,
 } from './lib/llm.js';
-import { buildPlan, dropOp, overrideOp, readyOps, preselect, MAX_CANDIDATES } from './lib/organize.js';
+import { buildPlan, dropOp, overrideOp, readyOps, preselect, foldersForCodes, MAX_CANDIDATES } from './lib/organize.js';
 import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js';
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
@@ -209,11 +209,11 @@ async function runApply() {
   let { scheme } = parseTree(tree, parseOptsFor(settings));
   let folderOf = new Map(scheme.map((f) => [f.code, f.id]));
 
-  // 计划里出现但目录还不存在的（「按方案建档」会这样）：先按方案把目录建出来再搬
-  const wanted = [...new Set(ops.map((o) => o.to.code))].filter((code) => !folderOf.has(code));
+  // 计划里出现但目录还不存在的（「按方案建档」会这样）：连祖先把目录建出来再搬
+  const wanted = foldersForCodes([...new Set(ops.map((o) => o.to.code))], plan.scheme)
+    .filter((f) => !folderOf.has(f.code));
   if (wanted.length) {
-    const nameOf = new Map(plan.scheme.map((f) => [f.code, f.name]));
-    const folders = wanted.map((code) => ({ code, name: nameOf.get(code) || code }));
+    const folders = wanted.map((f) => ({ code: f.code, name: f.name, parent: f.parent }));
     const kind = folders.every((f) => /^\d+$/.test(f.code)) ? 'digit' : 'letter';
     const inst = planInstall(tree, { id: 'adhoc', kind, folders });
     if (inst.conflict.length) {
