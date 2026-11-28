@@ -13,7 +13,7 @@ import { flattenTree, checkBackupReady, validateSnapshot, rebuildSubtree } from 
 import { PROTO } from '../lib/version.js';
 import { classify, classifyHeuristic, cleanTitles, DEFAULT_SETTINGS } from '../lib/llm.js';
 import { runAccept } from '../lib/pending.js';
-import { createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules } from '../lib/taxonomy.js';
+import { createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, assignByRules, approveTaxonomy, toScheme } from '../lib/taxonomy.js';
 import { buildPlan, dropOp, overrideOp, readyOps } from '../lib/organize.js';
 import { normalizeUrl, findDuplicates } from '../lib/dedup.js';
 import {
@@ -571,6 +571,42 @@ async function handle(msg) {
     return { started: true };
   }
   if (type === 'taxonomy:load') return { draft: taxoDraft, running: false };
+
+  if (type === 'taxonomy:approve') {
+    if (!taxoDraft) throw new Error('还没有分类法草稿');
+    taxoDraft = approveTaxonomy(taxoDraft, { renames: msg.renames || {}, removed: msg.removed || [] });
+    if (!taxoDraft.nodes.length) throw new Error('类目全被删掉了，至少留一个');
+    emit({ type: 'taxonomy:done', draft: taxoDraft });
+    return taxoDraft;
+  }
+
+  if (type === 'taxonomy:install') {
+    if (!taxoDraft) throw new Error('还没有分类法草稿');
+    if (taxoDraft.status !== 'approved') throw new Error('先审定，再落成目录');
+    const scheme = toScheme(taxoDraft);
+    const plan = planInstall([JSON.parse(JSON.stringify(root))], scheme);
+    if (plan.conflict.length) return { installed: false, conflict: plan.conflict };
+    const created = new Map();
+    for (const f of plan.missing) {
+      const parentId = f.parent
+        ? (created.get(f.parent) || (plan.exists.find((e) => e.code === f.parent) || {}).folderId)
+        : plan.barId;
+      const parent = parentId ? findNode(parentId) : null;
+      if (!parent) continue;
+      const node = { id: 'f' + scheme.id + f.code, title: `${f.code} ${f.name}`, parentId: parent.id, children: [] };
+      parent.children.push(node);
+      created.set(f.code, node.id);
+    }
+    taxoDraft = { ...taxoDraft, status: 'installed', schemeId: scheme.id, installedAt: Date.now() };
+    settings = {
+      ...settings,
+      schemeId: scheme.id,
+      customSchemes: [...(settings.customSchemes || []).filter((x) => x.id !== scheme.id), scheme],
+    };
+    emit({ type: 'taxonomy:done', draft: taxoDraft });
+    emit({ type: 'state:changed' });
+    return { installed: true, created: created.size, reused: plan.exists.length, schemeId: scheme.id };
+  }
   if (type === 'taxonomy:cancel') {
     taxoDraft = null;
     emit({ type: 'taxonomy:done', draft: null });

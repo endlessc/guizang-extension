@@ -23,6 +23,7 @@ import { pushEntry, latestEntry, findEntry, markUndone } from './lib/journal.js'
 import { onSchemeChange, prunePending, runAccept } from './lib/pending.js';
 import {
   createTaxonomy, pruneTaxonomy, buildTaxonomyFromSkeleton, sampleForSkeleton, assignByRules,
+  approveTaxonomy, toScheme,
 } from './lib/taxonomy.js';
 import { normalizeUrl, findDuplicates, duplicateIdSet } from './lib/dedup.js';
 import { buildOmniboxSuggestions } from './lib/search.js';
@@ -321,6 +322,30 @@ async function runDesign({ parentSchemeId = '', sampleSize = 200 }) {
   } finally {
     taxo = { running: false, stage: '', done: 0, total: 0 };
   }
+}
+
+/** 按 plan 建目录：父先子后，已有的按 code 复用 */
+async function createFolders(plan) {
+  const existing = new Map((plan.exists || []).map((e) => [e.code, e.folderId]));
+  const created = new Map();
+  let made = 0;
+  for (const f of plan.missing || []) {
+    let parentId = plan.barId;
+    if (f.parent) {
+      parentId = created.get(f.parent) || existing.get(f.parent) || null;
+      if (!parentId) continue; // 父类没建出来，子类跳过，下一轮 install 会补
+    }
+    const node = await chrome.bookmarks.create({ parentId, title: `${f.code} ${f.name}` });
+    created.set(f.code, node.id);
+    made += 1;
+  }
+  return { made, created };
+}
+
+async function readTaxonomy() {
+  const { [TAXONOMY_KEY]: draft } = await chrome.storage.local.get(TAXONOMY_KEY);
+  if (!draft) throw new Error('还没有分类法草稿');
+  return draft;
 }
 
 async function readPlan() {
@@ -1030,6 +1055,51 @@ const handlers = {
     return { draft: draft || null, running: taxo.running };
   },
 
+  /** 审定：改名、删类，状态 draft → approved */
+  'taxonomy:approve': async ({ renames = {}, removed = [] } = {}) => {
+    const draft = await readTaxonomy();
+    if (!draft) throw new Error('还没有分类法草稿');
+    const next = approveTaxonomy(draft, { renames, removed });
+    if (!next.nodes.length) throw new Error('类目全被删掉了，至少留一个');
+    await chrome.storage.local.set({ [TAXONOMY_KEY]: next });
+    broadcast({ type: 'taxonomy:done', draft: next });
+    return next;
+  },
+
+  /** 落成目录：折成方案 → planInstall（只建缺的、冲突拦下）→ 启用 */
+  'taxonomy:install': async () => {
+    const draft = await readTaxonomy();
+    if (!draft) throw new Error('还没有分类法草稿');
+    if (draft.status !== 'approved') throw new Error('先审定，再落成目录');
+
+    const scheme = toScheme(draft);
+    const tree = await chrome.bookmarks.getTree();
+    const plan = planInstall(tree, scheme);
+    if (plan.conflict.length) return { installed: false, conflict: plan.conflict, plan };
+
+    const { made } = await createFolders(plan);
+
+    const settings = await readSettings();
+    const customs = (settings.customSchemes || []).filter((s) => s.id !== scheme.id);
+    customs.push(sanitizeCustomScheme({ ...scheme, custom: true }));
+    const { pending = {} } = await chrome.storage.local.get('pending');
+    const sw = onSchemeChange(settings.schemeId, scheme.id, pending);
+    if (sw.changed && sw.dropped) await chrome.storage.local.set({ pending: {} });
+    await chrome.storage.local.set({ settings: { ...settings, customSchemes: customs, schemeId: scheme.id } });
+
+    const installed = {
+      ...draft,
+      status: 'installed',
+      installedAt: Date.now(),
+      schemeId: scheme.id,
+      snapshot: { barId: plan.barId, exists: plan.exists.map((e) => ({ code: e.code, folderId: e.folderId })), created: made },
+    };
+    await chrome.storage.local.set({ [TAXONOMY_KEY]: installed });
+    broadcast({ type: 'taxonomy:done', draft: installed });
+    broadcast({ type: 'state:changed' });
+    return { installed: true, created: made, reused: plan.exists.length, schemeId: scheme.id, dropped: sw.dropped };
+  },
+
   'taxonomy:cancel': async () => {
     await chrome.storage.local.remove(TAXONOMY_KEY);
     broadcast({ type: 'taxonomy:done', draft: null });
@@ -1127,9 +1197,7 @@ const handlers = {
     const plan = planInstall(tree, scheme);
     if (plan.conflict.length) return { installed: false, conflict: plan.conflict, plan };
 
-    for (const f of plan.missing) {
-      await chrome.bookmarks.create({ parentId: plan.barId, title: `${f.code} ${f.name}` });
-    }
+    await createFolders(plan);
     // 换方案 → 旧建议全部作废：不同方案会撞码但语义不同（杜威 100 哲学 / PARA 100 项目）
     const { pending: curPending = {} } = await chrome.storage.local.get('pending');
     const sw = onSchemeChange(settings.schemeId, schemeId, curPending);

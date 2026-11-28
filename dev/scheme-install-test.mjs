@@ -96,6 +96,63 @@ console.log('已经装好一遍 → 再装是空操作');
   eq('全部复用', plan.summary, { exists: 12, missing: 0, conflict: 0 });
 }
 
+console.log('两级方案：按父建子（taxonomy 落成目录用）');
+{
+  const emptyBar = [{ id: '0', children: [{ id: '1', title: '书签栏', children: [] }] }];
+  const scheme = {
+    id: 'tx1', name: '语料归纳', kind: 'digit',
+    folders: [
+      { code: '000', name: '综合' },
+      { code: '010', name: '编辑器', parent: '000' },
+      { code: '100', name: '资讯' },
+    ],
+  };
+  const plan = planInstall(emptyBar, scheme);
+  eq('三个都要建', plan.missing.map((f) => f.code), ['000', '010', '100']);
+  eq('父在前子在后', plan.missing.map((f) => f.parent), [null, '000', null]);
+  eq('建在书签栏下', plan.barId, '1');
+}
+
+console.log('两级方案：同名复用、异名拦下');
+{
+  const tree = [{
+    id: '0',
+    children: [{
+      id: '1', title: '书签栏', children: [
+        {
+          id: '10', title: '000 综合', children: [
+            { id: '11', title: '010 编辑器', children: [] },
+          ],
+        },
+      ],
+    }],
+  }];
+  const scheme = {
+    id: 'tx2', name: '语料归纳', kind: 'digit',
+    folders: [
+      { code: '000', name: '综合' },
+      { code: '010', name: '编辑器', parent: '000' },
+      { code: '100', name: '资讯' },
+    ],
+  };
+  const plan = planInstall(tree, scheme);
+  eq('同名按 code 复用（含嵌套）', plan.exists.map((f) => f.code), ['000', '010']);
+  eq('只建缺的那一个', plan.missing.map((f) => f.code), ['100']);
+  eq('无冲突', plan.summary.conflict, 0);
+
+  const renamed = [{
+    id: '0',
+    children: [{
+      id: '1', title: '书签栏', children: [
+        { id: '10', title: '000 综合', children: [{ id: '11', title: '010 编辑器工具', children: [] }] },
+      ],
+    }],
+  }];
+  const bad = planInstall(renamed, scheme);
+  eq('嵌套同名不同名 → 冲突', bad.conflict.map((c) => [c.code, c.got, c.want]), [['010', '编辑器工具', '编辑器']]);
+  eq('有冲突时其余仍照常算', bad.missing.map((f) => f.code), ['100']);
+}
+
 if (failed) {
   console.error(`\n❌ ${failed} 项断言失败`);
   process.exit(1);

@@ -11,6 +11,7 @@ import {
   createTaxonomy, recount, pruneTaxonomy, limitTop, foldOverflow,
   normalizeName, normalizeNames, toScheme, computeStats, groupMembers, validateTaxonomy,
   sampleForSkeleton, buildTaxonomyFromSkeleton, assignByRules, TOP_LIMIT,
+  renameNodes, removeNodes, approveTaxonomy,
 } from '../lib/taxonomy.js';
 
 let failed = 0;
@@ -261,6 +262,39 @@ console.log('流水线串起来（假骨架，不调模型）');
   eq('剪枝后三个类目都留下', pruned.taxonomy.nodes.map((n) => n.code).sort(), ['000', '010', '100']);
   eq('剪枝后成员不丢', pruned.taxonomy.stats.members, 24);
   eq('可以直接折成方案', toScheme(pruned.taxonomy).folders.map((f) => f.name), ['开发工具', '编辑器', '资讯']);
+}
+
+console.log('审定：改名 / 删类 / 状态流转');
+{
+  const tx = createTaxonomy({
+    id: 'tx-approve',
+    nodes: [
+      { code: '000', name: '综合', members: ['a1'] },
+      { code: '010', name: '编辑器', parent: '000', members: ['b1', 'b2'] },
+      { code: '020', name: '网盘', parent: '000', members: ['c1'] },
+      { code: '021', name: '种子', parent: '020', members: ['c2'] },
+      { code: '100', name: '资讯', members: ['d1'] },
+    ],
+  });
+
+  const renamed = renameNodes(tx, { '010': '编辑器 / IDE' });
+  eq('改名生效', renamed.nodes.find((n) => n.code === '010').name, '编辑器 / IDE');
+  eq('改名不动成员', renamed.nodes.find((n) => n.code === '010').members.sort(), ['b1', 'b2']);
+  eq('改名不动层级', renamed.nodes.find((n) => n.code === '010').parent, '000');
+
+  const removed = removeNodes(tx, ['020']);
+  eq('删父类时子孙一起删', removed.nodes.map((n) => n.code).sort(), ['000', '010', '100']);
+  eq('删掉的类目成员不再计入', removed.stats.members, 1 + 2 + 1);
+
+  const approved = approveTaxonomy(tx, { renames: { '100': '资讯与社区' }, removed: ['020'], now: 123 });
+  eq('状态转成 approved', [approved.status, approved.approvedAt], ['approved', 123]);
+  eq('改名与删类同时生效', approved.nodes.find((n) => n.code === '100').name, '资讯与社区');
+  eq('删掉的类目消失', approved.nodes.some((n) => n.code === '020' || n.code === '021'), false);
+  eq('剩下类的成员没丢', approved.stats.members, 1 + 2 + 1);
+
+  const scheme = toScheme(approved);
+  eq('折装后仍带父级', scheme.folders.filter((f) => f.parent).map((f) => f.code), ['010']);
+  eq('折装顺序父在前', scheme.folders.map((f) => f.code), ['000', '010', '100']);
 }
 
 if (failed) {
