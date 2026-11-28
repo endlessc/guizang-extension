@@ -399,6 +399,7 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
       broadcast({ type: 'organize:progress', stage: 'model', done: 0, total: lowConf.length });
       try {
         const pageMeta = await enrichWeakHeads(lowConf, settings);
+        const stats = {};
         const refined = await classifyWithModel(
           lowConf,
           scheme,
@@ -407,9 +408,15 @@ async function runOrganize(scope = 'inbox', folderCode = '') {
             organize.done = done;
             broadcast({ type: 'organize:progress', stage: 'model', done, total });
           },
-          { learned, pageMeta },
+          { learned, pageMeta, stats },
         );
         for (const s of refined) suggestions[s.id] = { ...s };
+        if (stats.failed && stats.failed.length) {
+          broadcast({
+            type: 'organize:warn',
+            message: `${stats.failed.length} 批模型请求没走通，这部分先用本地规则：${stats.failed[0].error}`,
+          });
+        }
       } catch (e) {
         broadcast({ type: 'organize:warn', message: '模型没走通，先用本地规则：' + String((e && e.message) || e) });
       }
@@ -894,20 +901,26 @@ const handlers = {
 
     broadcast({ type: 'ai:start', total: targets.length });
     const pageMeta = hasModel(settings) ? await enrichWeakHeads(targets, settings) : {};
+    const stats = {};
     const list = await classify(
       targets,
       scheme,
       settings,
       (done, total) => broadcast({ type: 'ai:progress', done, total }),
-      { learned, pageMeta },
+      { learned, pageMeta, stats },
     );
+    const failed = stats.failed || [];
 
-    const pending = { ...state.pending };
-    const at = Date.now();
-    for (const s of list) pending[s.id] = { ...s, at };
-    await chrome.storage.local.set({ pending });
-    broadcast({ type: 'state:changed' });
-    return { suggestions: list, source: hasModel(settings) ? 'model' : 'heuristic' };
+    // 有失败批次也先把成功的写进去：别让「跑了一半」变成「什么都没留下」
+    if (list.length) {
+      const pending = { ...state.pending };
+      const at = Date.now();
+      for (const s of list) pending[s.id] = { ...s, at };
+      await chrome.storage.local.set({ pending });
+      broadcast({ type: 'state:changed' });
+    }
+    if (!list.length && failed.length) throw new Error('模型没走通：' + failed[0].error);
+    return { suggestions: list, failed, source: hasModel(settings) ? 'model' : 'heuristic' };
   },
 
   'ai:cleanTitles': async ({ ids = [] }) => {

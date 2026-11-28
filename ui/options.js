@@ -6,7 +6,7 @@ import { toMarkdown, toNetscapeHtml } from '../lib/export.js';
 import { ensureEnv } from './env.js';
 await ensureEnv();
 
-const FIELDS = ['baseUrl', 'model', 'apiKey', 'maxTokens', 'concurrency', 'timeout', 'checkLimit'];
+const FIELDS = ['baseUrl', 'model', 'apiKey', 'maxTokens', 'modelTimeout', 'concurrency', 'timeout', 'checkLimit'];
 let currentSettings = {};
 
 function appVersion() {
@@ -458,7 +458,7 @@ function collect() {
   for (const k of FIELDS) {
     const el = document.querySelector(`[name="${k}"]`);
     if (!el) continue;
-    out[k] = /maxTokens|concurrency|timeout|checkLimit/.test(k) ? Number(el.value) || 0 : el.value.trim();
+    out[k] = /maxTokens|modelTimeout|concurrency|timeout|checkLimit/.test(k) ? Number(el.value) || 0 : el.value.trim();
   }
   const headCb = document.querySelector('[name="fetchHeadOnAi"]');
   if (headCb) out.fetchHeadOnAi = Boolean(headCb.checked);

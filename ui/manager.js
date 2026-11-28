@@ -2132,9 +2132,15 @@ async function runAi(ids) {
   S.aiProgress = { done: 0, total: scope.length };
   renderInspector();
   try {
-    await send('ai:run', { ids: scope });
+    const r = await send('ai:run', { ids: scope });
     await load();
-    toast(`${S.aiReady ? '模型' : '本地规则'}给出了 ${Object.keys(S.pending).length} 条建议`);
+    const failed = (r && r.failed) || [];
+    if (failed.length) {
+      // 部分批次没走通：已经生成的建议照常留下，别让用户以为全废了
+      toast(`已生成 ${((r && r.suggestions) || []).length} 条建议；${failed.length} 批没走通：${failed[0].error}`);
+    } else {
+      toast(`${S.aiReady ? '模型' : '本地规则'}给出了 ${Object.keys(S.pending).length} 条建议`);
+    }
   } catch (e) {
     toast(e.message);
   } finally {

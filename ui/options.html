@@ -25,6 +25,8 @@
             <input name="model" spellcheck="false" placeholder="deepseek-chat" /></label>
           <label class="field"><span>最大输出 (max_tokens)</span>
             <input name="maxTokens" type="number" min="200" step="100" /></label>
+          <label class="field"><span>单批超时（秒）</span>
+            <input name="modelTimeout" type="number" min="20" step="10" /></label>
         </div>
         <label class="opt-toggle">
           <input type="checkbox" name="fetchHeadOnAi" />

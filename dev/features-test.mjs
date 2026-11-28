@@ -11,7 +11,7 @@ import { toMarkdown, toSelectionMarkdown, toNetscapeHtml } from '../lib/export.j
 import { normalizeMeta, collectAllTags, recordOverride, matchLearned, pickSerendipity, analyzeUsage } from '../lib/meta.js';
 import { parseHeadHtml, isWeakTitle, cleanTitleLocal } from '../lib/head.js';
 import { sanitizeCustomScheme, getScheme, parseOptsOf } from '../lib/schemes.js';
-import { classifyHeuristic } from '../lib/llm.js';
+import { classifyHeuristic, classifyWithModel } from '../lib/llm.js';
 import { validateSnapshot, rebuildSubtree } from '../lib/backup.js';
 
 let passed = 0;
@@ -190,5 +190,59 @@ test('校验快照并重建父子层级', () => {
   assert.equal(tree.length, 1);
   assert.equal(tree[0].children[0].children[0].title, 'arXiv');
 });
+
+console.log('8. 模型批处理容错（lib/llm.js classifyWithModel）');
+{
+  const scheme = [{ code: '100', name: '编程' }, { code: '200', name: '资讯' }];
+  const items = Array.from({ length: 48 }, (_, i) => ({
+    id: 'i' + i, title: 't' + i, host: 'a.com', url: 'https://a.com/' + i,
+  }));
+  const settings = { apiKey: 'k', baseUrl: 'http://mock', model: 'm' };
+  const replyOf = (messages, code) => {
+    const raw = String(messages[1].content).split('待归类书签：\n')[1];
+    const rows = JSON.parse(raw);
+    return JSON.stringify({ items: rows.map((r) => ({ id: r.id, code, conf: 0.8, reason: 'x' })) });
+  };
+
+  // 第 1 批成功、第 2 批一直失败（含重试）
+  let calls = 0;
+  const stats = {};
+  const out = await classifyWithModel(items, scheme, settings, null, {
+    call: async (st, messages) => {
+      calls += 1;
+      if (calls >= 2) throw new Error('模型请求超时（模拟）');
+      return replyOf(messages, '100');
+    },
+    stats,
+  });
+  assert.equal(out.length, 24, '失败批次之外的批次要保留');
+  console.log('  ✓ 一批失败不丢已完成的批次');
+  assert.equal(stats.failed.length, 1, '失败批次要被记下来');
+  console.log('  ✓ 失败批次被记进 stats');
+  assert.match(stats.failed[0].error, /超时/, '失败原因要带原文');
+  console.log('  ✓ 失败原因带原文');
+  assert.equal(calls, 3, '失败批次应重试一次');
+  console.log('  ✓ 失败批次重试一次后才放弃');
+
+  // 第 2 批返回不可解析内容：只丢这一批，并记录
+  calls = 0;
+  const stats2 = {};
+  const out2 = await classifyWithModel(items, scheme, settings, null, {
+    call: async (st, messages) => {
+      calls += 1;
+      return calls === 1 ? replyOf(messages, '200') : '抱歉，我不太确定';
+    },
+    stats: stats2,
+  });
+  assert.equal(out2.length, 24);
+  console.log('  ✓ 坏 JSON 只丢这一批');
+  assert.equal(out2[0].code, '200');
+  console.log('  ✓ 好批次的结果照常返回');
+  assert.match(stats2.failed[0].error, /没有返回可解析的 JSON/);
+  console.log('  ✓ 解析失败也记进 stats');
+  assert.equal(stats2.batches, 2);
+  console.log('  ✓ stats 记录总批数');
+  passed += 8;
+}
 
 console.log(`\n✅ 全部通过（${passed} 项断言）`);
